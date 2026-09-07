@@ -109,6 +109,8 @@ pub struct Ledger<S: RecordStore = MemoryStore> {
     by_id: HashMap<RecordId, usize>,
     /// Every `idk` ever seen (root or rotated-to) -> chain index.
     idk_to_chain: HashMap<[u8; 32], usize>,
+    /// `IdentityId` bytes (`SHA-256(root idk)`) -> chain index.
+    id_to_chain: HashMap<[u8; 32], usize>,
     chains: Vec<Chain>,
     /// `server_root` -> state.
     servers: HashMap<[u8; 32], ServerState>,
@@ -130,6 +132,7 @@ impl<S: RecordStore> Ledger<S> {
             leaves: Vec::new(),
             by_id: HashMap::new(),
             idk_to_chain: HashMap::new(),
+            id_to_chain: HashMap::new(),
             chains: Vec::new(),
             servers: HashMap::new(),
         }
@@ -188,6 +191,15 @@ impl<S: RecordStore> Ledger<S> {
     pub fn agreement_key(&self, idk: &[u8; 32]) -> Option<[u8; 32]> {
         let c = self.chain_of(idk)?;
         (!c.tombstoned).then_some(c.tip_ik)
+    }
+
+    /// The current signing key (chain tip) for the identity whose stable
+    /// [`IdentityId`] bytes are `identity_id` — i.e. resolve a fingerprint to a
+    /// usable key. `None` if unknown or evaporated.
+    pub fn idk_for_id(&self, identity_id: &[u8; 32]) -> Option<[u8; 32]> {
+        let &chain_id = self.id_to_chain.get(identity_id)?;
+        let c = &self.chains[chain_id];
+        (!c.tombstoned).then_some(c.tip_idk)
     }
 
     /// The current signing key (chain tip) for a live identity.
@@ -280,6 +292,8 @@ impl<S: RecordStore> Ledger<S> {
             tombstoned: false,
         });
         self.idk_to_chain.insert(record.author, chain_id);
+        self.id_to_chain
+            .insert(dante_crypto::hash::sha256(&record.author), chain_id);
         Ok(self.push_record(record))
     }
 

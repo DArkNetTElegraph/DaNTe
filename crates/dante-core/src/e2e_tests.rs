@@ -68,6 +68,8 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
     let mut bob = engine(&relay).await;
     let alice_idk = alice.identity().sign_public().to_bytes();
     let bob_idk = bob.identity().sign_public().to_bytes();
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
 
     // Both announce and publish prekeys.
     alice.announce("alice", now).await.unwrap();
@@ -83,7 +85,7 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
 
     // Alice opens the conversation.
     alice
-        .send_dm(&bob_idk, "hello bob, this is alice", now)
+        .send_dm(&bob_id, "hello bob, this is alice", now)
         .await
         .unwrap();
     let got = bob.receive(now).await.unwrap();
@@ -92,7 +94,7 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
     assert_eq!(got[0].text, "hello bob, this is alice");
 
     // Bob replies; ratchet advances.
-    bob.send_dm(&alice_idk, "hi alice!", now).await.unwrap();
+    bob.send_dm(&alice_id, "hi alice!", now).await.unwrap();
     let got = alice.receive(now).await.unwrap();
     assert_eq!(
         got,
@@ -103,8 +105,8 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
     );
 
     // A few more rounds.
-    alice.send_dm(&bob_idk, "how are you", now).await.unwrap();
-    alice.send_dm(&bob_idk, "still there?", now).await.unwrap();
+    alice.send_dm(&bob_id, "how are you", now).await.unwrap();
+    alice.send_dm(&bob_id, "still there?", now).await.unwrap();
     let got = bob.receive(now).await.unwrap();
     assert_eq!(
         got.iter().map(|d| d.text.clone()).collect::<Vec<_>>(),
@@ -121,18 +123,18 @@ async fn send_dm_to_unknown_peer_fails_until_synced() {
     let relay = spawn_relay().await;
     let mut alice = engine(&relay).await;
     let mut bob = engine(&relay).await;
-    let bob_idk = bob.identity().sign_public().to_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
 
     bob.announce("bob", now).await.unwrap();
     bob.publish_prekeys().await.unwrap();
 
     // Alice has not synced Bob's announce yet.
     assert!(matches!(
-        alice.send_dm(&bob_idk, "hi", now).await,
+        alice.send_dm(&bob_id, "hi", now).await,
         Err(crate::CoreError::UnknownPeer)
     ));
 
     alice.sync(now).await.unwrap();
-    alice.send_dm(&bob_idk, "hi", now).await.unwrap();
+    alice.send_dm(&bob_id, "hi", now).await.unwrap();
     assert_eq!(bob.receive(now).await.unwrap()[0].text, "hi");
 }

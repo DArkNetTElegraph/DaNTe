@@ -8,7 +8,9 @@
 //!             [--http 127.0.0.1:8080] [--pow-bits N] [--hint NAME]
 //! ```
 //!
-//! The keystore passphrase is read from `DANTE_PASSPHRASE`.
+//! The keystore passphrase is read from `DANTE_PASSPHRASE`. `--relay` accepts a
+//! comma-separated list of `host:port` endpoints; the client uses the first
+//! reachable one and fails over to the rest if the connection drops.
 //!
 //! In `chat`, lines starting with `/` are commands:
 //! `/to <fingerprint>`, `/file <path>`, `/whoami`, `/peer`, `/quit`.

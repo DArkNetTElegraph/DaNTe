@@ -10,7 +10,7 @@ use std::{net::IpAddr, sync::Arc};
 use async_trait::async_trait;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpListener, TcpStream},
 };
 
 use crate::{
@@ -55,28 +55,112 @@ async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<u8>, NetEr
 }
 
 /// A client connection to a relay.
+///
+/// Holds an ordered list of candidate relay endpoints and a lazily-(re)opened
+/// TCP stream. [`Client::request`] transparently reconnects — and fails over to
+/// the next endpoint — across a dropped connection, so a relay restart or a
+/// single dead relay does not sink the engine. Application-level errors
+/// ([`NetError::Peer`]) are returned as-is and never trigger a retry.
 pub struct Client {
-    stream: TcpStream,
+    addrs: Vec<String>,
+    /// Index into `addrs` of the endpoint `stream` is (or was) connected to.
+    current: usize,
+    stream: Option<TcpStream>,
 }
 
 impl Client {
-    /// Connect to a relay at `addr`.
-    pub async fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, NetError> {
-        let stream = TcpStream::connect(addr).await?;
-        stream.set_nodelay(true).ok();
-        Ok(Self { stream })
+    /// Connect to a single relay at `addr` (`host:port`).
+    pub async fn connect(addr: &str) -> Result<Self, NetError> {
+        Self::connect_multi(&[addr.to_string()]).await
     }
 
-    /// Send one request and await its response.
-    pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
-        write_frame(&mut self.stream, &req.encode()).await?;
-        let body = read_frame(&mut self.stream).await?;
-        let res = Response::decode(&body)?;
-        if let Response::Error(msg) = &res {
-            return Err(NetError::Peer(msg.clone()));
+    /// Connect to the first reachable relay in `addrs`, which is kept as the
+    /// failover list (tried in order, wrapping from the last success).
+    pub async fn connect_multi(addrs: &[String]) -> Result<Self, NetError> {
+        let addrs: Vec<String> = addrs
+            .iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
+        if addrs.is_empty() {
+            return Err(NetError::Closed);
         }
-        Ok(res)
+        let mut client = Self {
+            addrs,
+            current: 0,
+            stream: None,
+        };
+        client.reconnect().await?;
+        Ok(client)
     }
+
+    /// The relay endpoint the live stream is (or was last) connected to.
+    pub fn endpoint(&self) -> &str {
+        &self.addrs[self.current]
+    }
+
+    /// Drop any stream and open a fresh one, trying every endpoint once
+    /// starting from the last-known-good.
+    async fn reconnect(&mut self) -> Result<(), NetError> {
+        self.stream = None;
+        let n = self.addrs.len();
+        let mut last = NetError::Closed;
+        for step in 0..n {
+            let idx = (self.current + step) % n;
+            match TcpStream::connect(self.addrs[idx].as_str()).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true).ok();
+                    self.stream = Some(stream);
+                    self.current = idx;
+                    return Ok(());
+                }
+                Err(e) => last = e.into(),
+            }
+        }
+        Err(last)
+    }
+
+    /// Send one request and await its response, reconnecting once (and failing
+    /// over) if the connection is dead.
+    pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
+        let bytes = req.encode();
+        let mut last_err = NetError::Closed;
+        for attempt in 0..2 {
+            if self.stream.is_none() {
+                if let Err(e) = self.reconnect().await {
+                    last_err = e;
+                    continue;
+                }
+            }
+            let stream = self
+                .stream
+                .as_mut()
+                .expect("reconnect populated the stream");
+            match round_trip(stream, &bytes).await {
+                Ok(res) => return Ok(res),
+                // A relay-level error is a real answer — do not retry it.
+                Err(e @ NetError::Peer(_)) => return Err(e),
+                Err(e) => {
+                    self.stream = None;
+                    last_err = e;
+                    if attempt == 1 {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(last_err)
+    }
+}
+
+async fn round_trip(stream: &mut TcpStream, bytes: &[u8]) -> Result<Response, NetError> {
+    write_frame(stream, bytes).await?;
+    let body = read_frame(stream).await?;
+    let res = Response::decode(&body)?;
+    if let Response::Error(msg) = &res {
+        return Err(NetError::Peer(msg.clone()));
+    }
+    Ok(res)
 }
 
 /// Handles inbound relay requests. Implemented by `dante-relay`.
@@ -152,7 +236,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(serve(listener, Arc::new(Echo)));
 
-        let mut client = Client::connect(addr).await.unwrap();
+        let mut client = Client::connect(&addr.to_string()).await.unwrap();
         assert_eq!(
             client.request(&Request::Ping).await.unwrap(),
             Response::Pong
@@ -175,6 +259,56 @@ mod tests {
         // relay Error becomes a NetError::Peer
         let err = client.request(&Request::Deposit(vec![])).await.unwrap_err();
         assert!(matches!(err, NetError::Peer(_)));
+    }
+
+    #[tokio::test]
+    async fn client_reconnects_after_the_relay_drops() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let task = tokio::spawn(serve(listener, Arc::new(Echo)));
+
+        let mut client = Client::connect(&addr).await.unwrap();
+        assert_eq!(
+            client.request(&Request::Ping).await.unwrap(),
+            Response::Pong
+        );
+
+        // Relay goes away, then a fresh one binds the same port.
+        task.abort();
+        loop {
+            match TcpListener::bind(&*addr).await {
+                Ok(l) => {
+                    tokio::spawn(serve(l, Arc::new(Echo)));
+                    break;
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+
+        // The stale connection is dead; request() reconnects and succeeds.
+        assert_eq!(
+            client.request(&Request::Ping).await.unwrap(),
+            Response::Pong
+        );
+    }
+
+    #[tokio::test]
+    async fn client_fails_over_to_a_live_endpoint() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let live = listener.local_addr().unwrap().to_string();
+        tokio::spawn(serve(listener, Arc::new(Echo)));
+
+        // First endpoint is a closed port; second is the live relay.
+        let dead = {
+            let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        let mut client = Client::connect_multi(&[dead, live.clone()]).await.unwrap();
+        assert_eq!(
+            client.request(&Request::Ping).await.unwrap(),
+            Response::Pong
+        );
+        assert_eq!(client.endpoint(), live);
     }
 
     #[tokio::test]

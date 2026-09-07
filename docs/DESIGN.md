@@ -160,7 +160,15 @@ DaNTe/
   sealed-sender `Envelope` with day-rotating recipient hint + size-class padding;
   relay `Mailbox` store-and-forward with TTL; per-IP token-bucket rate limiting
   (announce 10/h per §3); relay-side ledger replica + periodic evaporation GC;
-  `dante-relay` binary (`--listen`, background maintenance, ctrl-c shutdown).
+  `dante-relay` binary (`--listen`, `--min-pow-bits`, background maintenance,
+  ctrl-c shutdown).
+- **Client relay resiliency:** `net::Client` holds an ordered list of relay
+  endpoints; `request()` transparently reconnects and fails over to the next
+  endpoint across a dropped connection (application-level `Peer` errors are
+  never retried). `Engine::connect` takes a comma/whitespace-separated
+  `--relay` list; the first entry is what invite links and `ServerRegister.
+  entry_relays` advertise. Not yet: health-based reordering, or learning new
+  endpoints from `entry_relays`.
 - **Deferred:** libp2p (QUIC + Noise + Yamux), Kademlia DHT for peer/prekey
   lookup, gossipsub for multi-relay ledger fan-out. The request/response
   protocol is designed to run unchanged over that overlay; until then a client

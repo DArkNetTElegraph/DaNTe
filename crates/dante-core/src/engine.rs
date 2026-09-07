@@ -201,8 +201,10 @@ pub struct Engine {
     /// stable `IdentityId` bytes and pinned to the peer `idk` that was verified
     /// (so a later key rotation drops back to unverified). Persisted.
     verified_peers: HashMap<[u8; 32], [u8; 32]>,
-    /// The relay address this engine connected to (embedded in invite links).
-    relay_addr: String,
+    /// Relay endpoints this engine may use, preference order. The first is the
+    /// one embedded in invite links and server-discovery records; the whole
+    /// list is the client's failover set.
+    relay_addrs: Vec<String>,
     pow: Difficulty,
     last_fetch_since_ms: u64,
     last_announce_ms: u64,
@@ -215,6 +217,10 @@ impl Engine {
     /// prior state from `store_path` if that file exists (otherwise a fresh
     /// prekey set is generated). `pow` is the difficulty for this client's own
     /// announce/liveness records; it must meet the network's floor.
+    ///
+    /// `relay_addr` may be a comma- or whitespace-separated list of `host:port`
+    /// endpoints; the client connects to the first reachable one and fails over
+    /// to the rest if the connection drops.
     pub async fn connect(
         identity: Identity,
         relay_addr: &str,
@@ -222,7 +228,13 @@ impl Engine {
         pow: Difficulty,
         store_path: Option<PathBuf>,
     ) -> Result<Self, CoreError> {
-        let client = Client::connect(relay_addr).await?;
+        let relay_addrs: Vec<String> = relay_addr
+            .split([',', ' ', '\t', '\n'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let client = Client::connect_multi(&relay_addrs).await?;
 
         let restored = match &store_path {
             Some(p) => store::load(p, &identity)?,
@@ -245,7 +257,7 @@ impl Engine {
             new_reactions: Vec::new(),
             channel_reactions: HashMap::new(),
             verified_peers: HashMap::new(),
-            relay_addr: relay_addr.to_owned(),
+            relay_addrs,
             pow,
             last_fetch_since_ms: 0,
             last_announce_ms: 0,
@@ -324,6 +336,17 @@ impl Engine {
 
     fn my_member_id(&self) -> [u8; 32] {
         *self.identity.id().as_bytes()
+    }
+
+    /// The relay endpoint advertised to others (invite links, discovery). Always
+    /// present — [`Engine::connect`] rejects an empty relay list.
+    fn primary_relay(&self) -> &str {
+        self.relay_addrs.first().map(String::as_str).unwrap_or("")
+    }
+
+    /// The relay endpoints this client will use, in failover order.
+    pub fn relay_endpoints(&self) -> &[String] {
+        &self.relay_addrs
     }
 
     /// This identity.
@@ -727,7 +750,7 @@ impl Engine {
             &host.root,
             self.my_member_id(),
             *channel_id,
-            &self.relay_addr,
+            self.primary_relay(),
             now_ms.saturating_add(ttl_ms),
             max_uses,
             random_array::<8>(),
@@ -823,7 +846,7 @@ impl Engine {
                 .map(|t| t.chars().take(32).collect())
                 .take(8)
                 .collect(),
-            entry_relays: vec![self.relay_addr.clone()],
+            entry_relays: self.relay_addrs.iter().take(8).cloned().collect(),
             discoverable,
             invite,
         };

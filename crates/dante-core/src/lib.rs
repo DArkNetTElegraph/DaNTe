@@ -11,7 +11,7 @@
 pub mod engine;
 pub mod error;
 
-pub use engine::{Engine, ReceivedDm, DM_TTL_MS};
+pub use engine::{Engine, Inbound, ReceivedDm, DM_TTL_MS};
 pub use error::CoreError;
 
 #[cfg(test)]

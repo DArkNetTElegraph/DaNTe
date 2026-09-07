@@ -118,6 +118,45 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
 }
 
 #[tokio::test]
+async fn alice_sends_bob_an_encrypted_file() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_idk = alice.identity().sign_public().to_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    alice.sync(now).await.unwrap();
+
+    let file: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 256) as u8).collect();
+    alice
+        .send_file(&bob_id, "report.bin", &file, now)
+        .await
+        .unwrap();
+
+    let inbound = bob.receive_all(now).await.unwrap();
+    assert_eq!(inbound.len(), 1);
+    match &inbound[0] {
+        crate::Inbound::File {
+            from_idk,
+            filename,
+            data,
+        } => {
+            assert_eq!(*from_idk, alice_idk);
+            assert_eq!(filename, "report.bin");
+            assert_eq!(*data, file);
+        }
+        other => panic!("expected a file, got {other:?}"),
+    }
+    // receive() (text-only view) hides it
+    assert!(bob.receive(now).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn send_dm_to_unknown_peer_fails_until_synced() {
     let now = now_ms();
     let relay = spawn_relay().await;

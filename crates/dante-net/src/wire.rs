@@ -35,6 +35,11 @@ pub enum Request {
     PublishPrekeys(Vec<u8>),
     /// Retrieve the published prekey bundle for an `identity_id`.
     GetPrekeys([u8; 32]),
+    /// Store a ciphertext blob (a file chunk); the relay keys it by
+    /// `SHA-256(bytes)` and returns [`Response::Ok`].
+    PutBlob(Vec<u8>),
+    /// Retrieve a blob by its `SHA-256`.
+    GetBlob([u8; 32]),
 }
 
 /// A relay -> client response.
@@ -59,6 +64,8 @@ pub enum Response {
     Envelopes(Vec<Vec<u8>>),
     /// Reply to [`Request::GetPrekeys`]: the encoded bundle, or `None`.
     Prekeys(Option<Vec<u8>>),
+    /// Reply to [`Request::GetBlob`]: the blob, or `None`.
+    Blob(Option<Vec<u8>>),
 }
 
 const REQ_PING: u8 = 0;
@@ -69,6 +76,8 @@ const REQ_DEPOSIT: u8 = 4;
 const REQ_FETCH: u8 = 5;
 const REQ_PUBLISH_PREKEYS: u8 = 6;
 const REQ_GET_PREKEYS: u8 = 7;
+const REQ_PUT_BLOB: u8 = 8;
+const REQ_GET_BLOB: u8 = 9;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -77,6 +86,7 @@ const RES_TREE_HEAD: u8 = 3;
 const RES_RECORDS: u8 = 4;
 const RES_ENVELOPES: u8 = 5;
 const RES_PREKEYS: u8 = 6;
+const RES_BLOB: u8 = 7;
 
 fn write_blob_list(w: &mut Writer, blobs: &[Vec<u8>]) {
     w.u32(blobs.len() as u32);
@@ -130,6 +140,12 @@ impl Request {
             Request::GetPrekeys(id) => {
                 w.u8(REQ_GET_PREKEYS).fixed(id);
             }
+            Request::PutBlob(bytes) => {
+                w.u8(REQ_PUT_BLOB).bytes(bytes);
+            }
+            Request::GetBlob(hash) => {
+                w.u8(REQ_GET_BLOB).fixed(hash);
+            }
         }
         w.into_vec()
     }
@@ -149,6 +165,8 @@ impl Request {
             REQ_DEPOSIT => Request::Deposit(r.bytes()?.to_vec()),
             REQ_PUBLISH_PREKEYS => Request::PublishPrekeys(r.bytes()?.to_vec()),
             REQ_GET_PREKEYS => Request::GetPrekeys(r.fixed::<32>()?),
+            REQ_PUT_BLOB => Request::PutBlob(r.bytes()?.to_vec()),
+            REQ_GET_BLOB => Request::GetBlob(r.fixed::<32>()?),
             REQ_FETCH => {
                 let n = r.u32()? as usize;
                 if n > r.remaining() {
@@ -185,6 +203,8 @@ impl Request {
             Request::Fetch { .. } => "Fetch",
             Request::PublishPrekeys(_) => "PublishPrekeys",
             Request::GetPrekeys(_) => "GetPrekeys",
+            Request::PutBlob(_) => "PutBlob",
+            Request::GetBlob(_) => "GetBlob",
         }
     }
 }
@@ -225,6 +245,17 @@ impl Response {
                     }
                 }
             }
+            Response::Blob(blob) => {
+                w.u8(RES_BLOB);
+                match blob {
+                    Some(b) => {
+                        w.bool(true).bytes(b);
+                    }
+                    None => {
+                        w.bool(false);
+                    }
+                }
+            }
         }
         w.into_vec()
     }
@@ -244,6 +275,11 @@ impl Response {
             RES_RECORDS => Response::Records(read_blob_list(&mut r)?),
             RES_ENVELOPES => Response::Envelopes(read_blob_list(&mut r)?),
             RES_PREKEYS => Response::Prekeys(if r.bool()? {
+                Some(r.bytes()?.to_vec())
+            } else {
+                None
+            }),
+            RES_BLOB => Response::Blob(if r.bool()? {
                 Some(r.bytes()?.to_vec())
             } else {
                 None
@@ -284,6 +320,8 @@ mod tests {
         });
         rt_req(Request::PublishPrekeys(vec![1, 2, 3]));
         rt_req(Request::GetPrekeys([7u8; 32]));
+        rt_req(Request::PutBlob(vec![4, 5, 6, 7]));
+        rt_req(Request::GetBlob([2u8; 32]));
     }
 
     #[test]
@@ -299,6 +337,8 @@ mod tests {
         rt_res(Response::Envelopes(vec![vec![]]));
         rt_res(Response::Prekeys(Some(vec![9, 9, 9])));
         rt_res(Response::Prekeys(None));
+        rt_res(Response::Blob(Some(vec![1, 1])));
+        rt_res(Response::Blob(None));
     }
 
     #[test]

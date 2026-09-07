@@ -11,9 +11,11 @@
 //! has at least `difficulty` leading zero bits. `challenge` is the 32-byte,
 //! kind-specific value defined by the ledger record being authorised.
 
-use argon2::{Algorithm, Argon2, Params, Version};
-
-use crate::{error::CryptoError, random_bytes};
+use crate::{
+    error::CryptoError,
+    pwhash::{self, Argon2idParams},
+    random_bytes,
+};
 
 /// Lanes / parallelism. Fixed at 1 so a proof is verifier-cheap to reproduce.
 pub const PARALLELISM: u32 = 1;
@@ -37,6 +39,7 @@ pub const LIVENESS: Difficulty = Difficulty {
 
 /// The tunable cost of a puzzle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Difficulty {
     /// Argon2 memory cost in KiB.
     pub m_cost_kib: u32,
@@ -48,6 +51,7 @@ pub struct Difficulty {
 
 /// A completed proof of work. Serialized into the ledger record it authorises.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PowProof {
     /// Argon2 memory cost in KiB the solver used.
     pub m_cost_kib: u32,
@@ -65,18 +69,17 @@ fn digest(
     m_cost_kib: u32,
     t_cost: u32,
 ) -> Result<[u8; DIGEST_LEN], CryptoError> {
-    let params = Params::new(m_cost_kib, t_cost, PARALLELISM, Some(DIGEST_LEN))
-        .map_err(|_| CryptoError::Argon2("invalid parameters"))?;
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-
     let mut pwd = [0u8; 32 + NONCE_LEN];
     pwd[..32].copy_from_slice(challenge);
     pwd[32..].copy_from_slice(nonce);
 
+    let params = Argon2idParams {
+        m_cost_kib,
+        t_cost,
+        p_cost: PARALLELISM,
+    };
     let mut out = [0u8; DIGEST_LEN];
-    argon
-        .hash_password_into(&pwd, &challenge[..16], &mut out)
-        .map_err(|_| CryptoError::Argon2("hash failed"))?;
+    pwhash::argon2id(&pwd, &challenge[..16], params, &mut out)?;
     Ok(out)
 }
 

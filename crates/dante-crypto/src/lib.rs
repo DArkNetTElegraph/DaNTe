@@ -6,11 +6,16 @@
 //!
 //! Implemented so far (Phase 1):
 //!
-//! - [`sign`]  — Ed25519 signatures (RFC 8032)
-//! - [`agree`] — X25519 key agreement (RFC 7748)
-//! - [`aead`]  — XChaCha20-Poly1305 and AES-256-GCM (RFC 8439 / reference)
-//! - [`kdf`]   — HKDF-SHA-256 (RFC 5869)
-//! - [`pow`]   — the `argon2id-pow` memory-hard puzzle (`docs/PROTOCOL.md` §3)
+//! - [`sign`]   — Ed25519 signatures (RFC 8032)
+//! - [`agree`]  — X25519 key agreement (RFC 7748)
+//! - [`aead`]   — XChaCha20-Poly1305 and AES-256-GCM (RFC 8439 / reference)
+//! - [`kdf`]    — HKDF-SHA-256 (RFC 5869)
+//! - [`hash`]   — SHA-256 / SHA-512
+//! - [`pwhash`] — Argon2id KDF for low-entropy secrets (keystore, key backup)
+//! - [`pow`]    — the `argon2id-pow` memory-hard puzzle (`docs/PROTOCOL.md` §3)
+//!
+//! With the `serde` feature, [`pow::PowProof`] and [`pow::Difficulty`] derive
+//! `Serialize`/`Deserialize` so higher layers can embed them in wire records.
 //!
 //! Still to come: Double Ratchet wrapper (Phase 4) and MLS wrapper over
 //! `OpenMLS` (Phase 6).
@@ -19,19 +24,29 @@ mod error;
 
 pub mod aead;
 pub mod agree;
+pub mod hash;
 pub mod kdf;
 pub mod pow;
+pub mod pwhash;
 pub mod sign;
 
 pub use error::CryptoError;
 
-/// Fill an `N`-byte array from the operating system CSPRNG.
+/// Return an `N`-byte array filled from the operating system CSPRNG.
 ///
 /// Panics only if the OS RNG is unavailable, which on the platforms DaNTe
 /// targets indicates the system is too broken to run.
-pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
-    use rand::RngCore;
+pub fn random_array<const N: usize>() -> [u8; N] {
     let mut buf = [0u8; N];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    fill_random(&mut buf);
     buf
 }
+
+/// Fill `buf` from the operating system CSPRNG. Same panic contract as
+/// [`random_array`].
+pub fn fill_random(buf: &mut [u8]) {
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(buf);
+}
+
+pub(crate) use random_array as random_bytes;

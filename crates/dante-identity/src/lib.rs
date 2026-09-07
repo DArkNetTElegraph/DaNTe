@@ -1,13 +1,23 @@
 //! `dante-identity` — identity lifecycle for DaNTe.
 //!
-//! Scope:
-//! - Generate the `(idk: Ed25519, ik: X25519)` identity keypair
-//! - `IdentityId = H(idk_pub)` and its display fingerprints (Crockford base32
-//!   + BIP39 word phrase) and safety numbers for contact verification
-//! - The on-disk encrypted keystore (`KeystoreFile`, Argon2id-wrapped)
-//! - Construction of `IdentityAnnounce` / `LivenessProof` bodies (incl. PoW)
-//! - Encrypted key-backup export/import for recovery
-//!
-//! See `../../docs/PROTOCOL.md` §1.
+//! - [`Identity`] — the `(idk: Ed25519, ik: X25519)` keypair plus a local
+//!   message-store key, held in memory
+//! - [`IdentityId`] — `SHA-256(idk_pub)`, with Crockford-base32 and BIP39
+//!   word-phrase renderings and a pairwise [`id::safety_number`]
+//! - [`keystore`] — the Argon2id-wrapped on-disk keystore (`docs/PROTOCOL.md`
+//!   §1.2)
+//! - [`backup`] — the passphrase-encrypted key backup for recovery (§1.3)
+//! - [`liveness`] — the `IdentityAnnounce` / `LivenessProof` bodies and their
+//!   PoW challenge derivations (§2.2)
 
-// Phase 1 begins implementation here.
+mod error;
+
+pub mod backup;
+pub mod id;
+pub mod identity;
+pub mod keystore;
+pub mod liveness;
+
+pub use error::IdentityError;
+pub use id::IdentityId;
+pub use identity::Identity;

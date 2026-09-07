@@ -202,6 +202,15 @@ DaNTe/
   `dante chat`: `/safety <fp>`, `/verify <fp> [off]`. `dante serve`:
   `GET /api/safety?peer=` / `POST /api/verify`, with a per-DM shield (🛡️/⚠️)
   and a compare dialog in the SPA.
+- **Delete channel / server** *(done, host)*: `Engine::delete_channel` DMs every
+  member a server-root-signed `RemoveOrder` with the **all-zeros sentinel
+  member** — the `Remove` handler reads that as "the host closed this channel"
+  and drops it locally — then removes it from `hosted`. `Engine::delete_server`
+  closes every channel that way and publishes a `ServerDelist` (ledger kind 5)
+  so the server leaves discovery, then drops the `hosted` entry and its policy.
+  `dante chat`: `/delchannel #<chan>`, `/delserver <root>`. `dante serve`:
+  `POST /api/channel/delete`, `POST /api/server/delete`; SPA 🗑 buttons for the
+  owner (channel header + server pane actions).
 - **Leave channel** *(done)*: `ChannelControl::Leave { channel_id }` (tag 7).
   `Engine::leave_channel` DMs it to every other member and drops all local
   state for the channel (and the server policy if no channels remain); the

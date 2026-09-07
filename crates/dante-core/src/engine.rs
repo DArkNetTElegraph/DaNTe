@@ -20,7 +20,10 @@ use dante_identity::{
     records::{IdentityAnnounce, IdentityRevoke, LivenessProof, RevokeReason},
     Identity,
 };
-use dante_ledger::{server::ServerRegister, Ledger, LedgerParams, MemoryStore};
+use dante_ledger::{
+    server::{ServerDelist, ServerRegister},
+    Ledger, LedgerParams, MemoryStore,
+};
 use dante_net::{sync, transport::Client};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
 
@@ -1071,6 +1074,84 @@ impl Engine {
         Ok(())
     }
 
+    /// Delete a channel this client hosts: tell every member (a server-root-
+    /// signed [`crate::channel::RemoveOrder`] with the all-zeros sentinel
+    /// member) and drop it locally. The channel log on the relay is left to
+    /// expire.
+    pub async fn delete_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (server_root, members) = {
+            let ch = self
+                .channels
+                .get(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            if !self.hosted.contains_key(&ch.info.server_root) {
+                return Err(CoreError::NotServerHost);
+            }
+            let me = self.my_member_id();
+            let members: Vec<[u8; 32]> = ch.roster.iter().copied().filter(|m| *m != me).collect();
+            (ch.info.server_root, members)
+        };
+
+        let order = crate::channel::RemoveOrder::mint(
+            &self.hosted[&server_root].root,
+            *channel_id,
+            [0u8; 32],
+            now_ms,
+        )
+        .encode();
+        for m in members {
+            let msg = Content::Channel(
+                ChannelControl::Remove {
+                    order: order.clone(),
+                }
+                .encode(),
+            );
+            let _ = self.send_content(&m, msg, now_ms).await;
+        }
+
+        self.channels.remove(channel_id);
+        if let Some(h) = self.hosted.get_mut(&server_root) {
+            h.channels.retain(|c| c != channel_id);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Tear down a server this client hosts: close every one of its channels
+    /// and publish a `ServerDelist` record so it drops out of discovery.
+    pub async fn delete_server(
+        &mut self,
+        server_root: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let root_secret = self
+            .hosted
+            .get(server_root)
+            .ok_or(CoreError::NotServerHost)?
+            .root
+            .to_bytes();
+        let channels: Vec<[u8; 32]> = self.hosted[server_root].channels.clone();
+        for c in channels {
+            let _ = self.delete_channel(&c, now_ms).await;
+        }
+
+        let root = SignSecret::from_bytes(&root_secret);
+        let rec = ServerDelist {
+            server_root: *server_root,
+        }
+        .to_record(now_ms, |m| root.sign(m));
+        sync::submit_record(&mut self.client, &rec).await?;
+
+        self.hosted.remove(server_root);
+        self.server_policies.remove(server_root);
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Leave a channel this client joined. Notifies every other member with a
     /// [`ChannelControl::Leave`] (the host turns it into a rekey so post-leave
     /// messages stay private) and drops all local state for the channel. The
@@ -1862,6 +1943,24 @@ impl Engine {
                 let order = crate::channel::RemoveOrder::decode(&order)?;
                 order.verify()?;
                 let me = self.my_member_id();
+                // Sentinel member = all-zeros: the host closed the whole channel.
+                if order.member == [0u8; 32] {
+                    if let Some(ch) = self.channels.get(&order.channel_id) {
+                        if ch.info.server_root == order.server_root {
+                            let server_root = ch.info.server_root;
+                            self.channels.remove(&order.channel_id);
+                            if !self
+                                .channels
+                                .values()
+                                .any(|c| c.info.server_root == server_root)
+                            {
+                                self.server_policies.remove(&server_root);
+                            }
+                            self.dirty = true;
+                        }
+                    }
+                    return Ok(());
+                }
                 if order.member == me {
                     return Ok(()); // a removal of us — nothing to rotate
                 }

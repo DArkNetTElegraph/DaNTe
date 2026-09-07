@@ -856,6 +856,73 @@ async fn inactivity_auto_kick() {
 }
 
 #[tokio::test]
+async fn host_deletes_a_channel_then_the_server() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let a = host.create_channel(&server, "general", true).unwrap();
+    let b = host.create_channel(&server, "random", true).unwrap();
+    host.invite_to_channel(&a, &alice_id, now).await.unwrap();
+    host.invite_to_channel(&b, &alice_id, now).await.unwrap();
+    macro_rules! settle {
+        () => {
+            for _ in 0..8 {
+                for e in [&mut host, &mut alice] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+    assert_eq!(alice.channels().len(), 2);
+
+    // Delete one channel.
+    host.delete_channel(&a, now).await.unwrap();
+    assert!(!host.channels().iter().any(|c| c.channel_id == a));
+    settle!();
+    assert_eq!(
+        alice.channels().len(),
+        1,
+        "alice dropped the deleted channel"
+    );
+    assert_eq!(alice.channels()[0].channel_id, b);
+
+    // A non-host cannot delete.
+    assert!(matches!(
+        alice.delete_channel(&b, now).await,
+        Err(crate::CoreError::NotServerHost)
+    ));
+
+    // List the server publicly, then tear it all down.
+    host.set_discoverable(&server, true, "come in", vec![], now + 500)
+        .await
+        .unwrap();
+    host.sync(now + 600).await.unwrap();
+    assert_eq!(host.discoverable_servers().len(), 1);
+
+    host.delete_server(&server, now + 1_000).await.unwrap();
+    assert!(host.channels().is_empty());
+    settle!();
+    assert!(alice.channels().is_empty(), "alice dropped every channel");
+
+    // The delist landed: the server is gone from discovery.
+    host.sync(now + 2_000).await.unwrap();
+    assert!(host.discoverable_servers().is_empty());
+}
+
+#[tokio::test]
 async fn a_member_can_leave_a_channel() {
     let now = now_ms();
     let relay = spawn_relay().await;

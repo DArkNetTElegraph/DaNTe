@@ -342,6 +342,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <span class="spacer"></span>
       <button class="icon-btn" id="btn-contact" title="Save as contact" hidden>☆</button>
       <button class="icon-btn" id="btn-leave" title="Leave channel" hidden>🚪</button>
+      <button class="icon-btn" id="btn-delchan" title="Delete channel" hidden>🗑</button>
       <button class="icon-btn" id="btn-block" title="Block" hidden>🚫</button>
       <button class="icon-btn" id="btn-verify" title="Safety number" hidden>🛡️</button>
       <button class="icon-btn" id="btn-emoji" title="Custom emoji" hidden>😀</button>
@@ -608,6 +609,14 @@ function renderPane() {
   actions.appendChild(mk("🧭", "List on public discovery", () => publishFlow(server)));
   const akDays = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
   actions.appendChild(mk("⏲", akDays ? `Auto-kick after ${akDays}d — click to change` : "Auto-kick inactive members", () => autoKickFlow(server)));
+  const srvRoot = store.rootOf(server);
+  if (srvRoot && store.policies[srvRoot] && store.policies[srvRoot].owner === store.me.fingerprint) {
+    actions.appendChild(mk("🗑", "Delete this server", async () => {
+      if (!ui.confirm('Delete the server "' + server + '" and all its channels for everyone? This cannot be undone.')) return;
+      try { await api.post("/api/server/delete", { server: srvRoot }); await refreshChannels(); selectTarget("@dm", null); }
+      catch (e) { ui.sys("delete failed: " + e.message); }
+    }));
+  }
 
   const lbl = el("div", "group-label");
   lbl.appendChild(el("span", null, "Text Channels"));
@@ -642,6 +651,8 @@ function renderChat() {
   blockBtn.hidden = true;
   const leaveBtn = $("#btn-leave");
   leaveBtn.hidden = true;
+  const delChanBtn = $("#btn-delchan");
+  delChanBtn.hidden = true;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
@@ -662,7 +673,14 @@ function renderChat() {
     emojiBtn.onclick = () => emojiFlow(store.rootOf(store.view.server));
     const root = store.rootOf(store.view.server);
     const iOwn = root && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
-    if (!iOwn) {
+    if (iOwn) {
+      delChanBtn.hidden = false;
+      delChanBtn.onclick = async () => {
+        if (!ui.confirm("Delete #" + store.channelName(target.slice(1)) + " for everyone? This cannot be undone.")) return;
+        try { await api.post("/api/channel/delete", { channel: target }); await refreshChannels(); selectTarget("@dm", null); }
+        catch (e) { ui.sys("delete failed: " + e.message); }
+      };
+    } else {
       leaveBtn.hidden = false;
       leaveBtn.onclick = async () => {
         if (!ui.confirm("Leave " + store.channelName(target.slice(1)) + "? You'll need a new invite to rejoin.")) return;

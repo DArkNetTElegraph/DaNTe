@@ -14,6 +14,10 @@ pub enum CoreError {
     #[error(transparent)]
     Dm(#[from] dante_dm::DmError),
 
+    /// A group/channel operation failed.
+    #[error(transparent)]
+    Group(#[from] dante_group::GroupError),
+
     /// An identity/record operation failed.
     #[error(transparent)]
     Identity(#[from] dante_identity::IdentityError),
@@ -43,6 +47,15 @@ pub enum CoreError {
     /// A message arrived for a conversation we have no session for.
     #[error("no session for an inbound message")]
     NoSession,
+
+    /// An operation referenced a channel this client is not in.
+    #[error("unknown channel")]
+    UnknownChannel,
+
+    /// A host-only operation was attempted for a server this client does not
+    /// host.
+    #[error("not the host of that server")]
+    NotServerHost,
 
     /// A file's chunk is no longer in the relay blob store (expired).
     #[error("a file chunk is missing from the relay")]

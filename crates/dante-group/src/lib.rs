@@ -16,4 +16,4 @@ pub mod error;
 pub mod group;
 
 pub use error::GroupError;
-pub use group::{Group, GroupMessage, MemberId, SenderKeyBundle, MAX_SKIP};
+pub use group::{Group, GroupMessage, GroupState, MemberId, SenderKeyBundle, MAX_SKIP};

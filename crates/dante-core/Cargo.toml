@@ -15,6 +15,7 @@ dante-ledger.workspace = true
 dante-proto.workspace = true
 dante-net.workspace = true
 dante-dm.workspace = true
+dante-group.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

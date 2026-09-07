@@ -311,6 +311,7 @@ version = "0.0.1"
 dependencies = [
  "dante-crypto",
  "dante-dm",
+ "dante-group",
  "dante-identity",
  "dante-ledger",
  "dante-net",

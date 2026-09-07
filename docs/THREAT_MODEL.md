@@ -86,6 +86,11 @@ provide.
    timing. The ledger publicly lists that an identity exists and when it was last
    active. The set of servers a client syncs with is observable to those relays.
    Sealed sender hides the *sender* from the relay, not the *recipient*.
+   **Channel messages** are worse for metadata than DMs: they go to a per-
+   channel relay log keyed by a stable `channel_id` (a 32-byte capability), so a
+   relay sees which channel each opaque message belongs to, plus its size and
+   timing — it just cannot read the content (sender-keys encryption). The
+   `channel_id` is shared only with members, but it does not rotate.
 5. **Anonymity of network location.** DaNTe does not hide your IP address from
    peers you connect to directly or from relays. Run it over Tor/VPN if network-
    level anonymity is required. (A future phase may integrate transport-level

@@ -40,6 +40,20 @@ pub enum Request {
     PutBlob(Vec<u8>),
     /// Retrieve a blob by its `SHA-256`.
     GetBlob([u8; 32]),
+    /// Append an (opaque, E2E-encrypted) message to a channel's log.
+    PostToChannel {
+        /// The channel id (a shared 32-byte capability).
+        channel_id: [u8; 32],
+        /// The encoded `dante_group::GroupMessage`.
+        blob: Vec<u8>,
+    },
+    /// Read a channel's log from `since_seq` (exclusive).
+    FetchChannel {
+        /// The channel id.
+        channel_id: [u8; 32],
+        /// Return entries with sequence number greater than this.
+        since_seq: u64,
+    },
 }
 
 /// A relay -> client response.
@@ -66,6 +80,8 @@ pub enum Response {
     Prekeys(Option<Vec<u8>>),
     /// Reply to [`Request::GetBlob`]: the blob, or `None`.
     Blob(Option<Vec<u8>>),
+    /// Reply to [`Request::FetchChannel`]: `(seq, blob)` pairs in order.
+    ChannelLog(Vec<(u64, Vec<u8>)>),
 }
 
 const REQ_PING: u8 = 0;
@@ -78,6 +94,8 @@ const REQ_PUBLISH_PREKEYS: u8 = 6;
 const REQ_GET_PREKEYS: u8 = 7;
 const REQ_PUT_BLOB: u8 = 8;
 const REQ_GET_BLOB: u8 = 9;
+const REQ_POST_CHANNEL: u8 = 10;
+const REQ_FETCH_CHANNEL: u8 = 11;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -87,6 +105,7 @@ const RES_RECORDS: u8 = 4;
 const RES_ENVELOPES: u8 = 5;
 const RES_PREKEYS: u8 = 6;
 const RES_BLOB: u8 = 7;
+const RES_CHANNEL_LOG: u8 = 8;
 
 fn write_blob_list(w: &mut Writer, blobs: &[Vec<u8>]) {
     w.u32(blobs.len() as u32);
@@ -146,6 +165,15 @@ impl Request {
             Request::GetBlob(hash) => {
                 w.u8(REQ_GET_BLOB).fixed(hash);
             }
+            Request::PostToChannel { channel_id, blob } => {
+                w.u8(REQ_POST_CHANNEL).fixed(channel_id).bytes(blob);
+            }
+            Request::FetchChannel {
+                channel_id,
+                since_seq,
+            } => {
+                w.u8(REQ_FETCH_CHANNEL).fixed(channel_id).u64(*since_seq);
+            }
         }
         w.into_vec()
     }
@@ -167,6 +195,14 @@ impl Request {
             REQ_GET_PREKEYS => Request::GetPrekeys(r.fixed::<32>()?),
             REQ_PUT_BLOB => Request::PutBlob(r.bytes()?.to_vec()),
             REQ_GET_BLOB => Request::GetBlob(r.fixed::<32>()?),
+            REQ_POST_CHANNEL => Request::PostToChannel {
+                channel_id: r.fixed::<32>()?,
+                blob: r.bytes()?.to_vec(),
+            },
+            REQ_FETCH_CHANNEL => Request::FetchChannel {
+                channel_id: r.fixed::<32>()?,
+                since_seq: r.u64()?,
+            },
             REQ_FETCH => {
                 let n = r.u32()? as usize;
                 if n > r.remaining() {
@@ -205,6 +241,8 @@ impl Request {
             Request::GetPrekeys(_) => "GetPrekeys",
             Request::PutBlob(_) => "PutBlob",
             Request::GetBlob(_) => "GetBlob",
+            Request::PostToChannel { .. } => "PostToChannel",
+            Request::FetchChannel { .. } => "FetchChannel",
         }
     }
 }
@@ -256,6 +294,12 @@ impl Response {
                     }
                 }
             }
+            Response::ChannelLog(entries) => {
+                w.u8(RES_CHANNEL_LOG).u32(entries.len() as u32);
+                for (seq, blob) in entries {
+                    w.u64(*seq).bytes(blob);
+                }
+            }
         }
         w.into_vec()
     }
@@ -284,6 +328,17 @@ impl Response {
             } else {
                 None
             }),
+            RES_CHANNEL_LOG => {
+                let n = r.u32()? as usize;
+                if n > r.remaining() {
+                    return Err(WireError::LengthTooLarge(n as u64));
+                }
+                let mut out = Vec::with_capacity(n);
+                for _ in 0..n {
+                    out.push((r.u64()?, r.bytes()?.to_vec()));
+                }
+                Response::ChannelLog(out)
+            }
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -322,6 +377,14 @@ mod tests {
         rt_req(Request::GetPrekeys([7u8; 32]));
         rt_req(Request::PutBlob(vec![4, 5, 6, 7]));
         rt_req(Request::GetBlob([2u8; 32]));
+        rt_req(Request::PostToChannel {
+            channel_id: [3u8; 32],
+            blob: vec![1, 2],
+        });
+        rt_req(Request::FetchChannel {
+            channel_id: [4u8; 32],
+            since_seq: 7,
+        });
     }
 
     #[test]
@@ -339,6 +402,7 @@ mod tests {
         rt_res(Response::Prekeys(None));
         rt_res(Response::Blob(Some(vec![1, 1])));
         rt_res(Response::Blob(None));
+        rt_res(Response::ChannelLog(vec![(1, vec![9]), (2, vec![])]));
     }
 
     #[test]

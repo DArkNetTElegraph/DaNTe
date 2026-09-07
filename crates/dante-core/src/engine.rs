@@ -156,6 +156,9 @@ pub struct Engine {
     /// Role configuration per server_root: the one we sign for servers we host,
     /// the latest verified broadcast for servers we have joined.
     server_policies: HashMap<[u8; 32], ServerPolicy>,
+    /// Reactions seen since the last `take_reactions()` — live-session only,
+    /// not persisted.
+    new_reactions: Vec<crate::channel::ChannelReaction>,
     /// The relay address this engine connected to (embedded in invite links).
     relay_addr: String,
     pow: Difficulty,
@@ -197,6 +200,7 @@ impl Engine {
             channel_history: Vec::new(),
             invite_uses: HashMap::new(),
             server_policies: HashMap::new(),
+            new_reactions: Vec::new(),
             relay_addr: relay_addr.to_owned(),
             pow,
             last_fetch_since_ms: 0,
@@ -1146,8 +1150,8 @@ impl Engine {
                         continue;
                     }
                     match ch.group.decrypt(&gm) {
-                        Ok(pt) => {
-                            if let Ok(Content::Text(text)) = Content::decode(&pt) {
+                        Ok(pt) => match Content::decode(&pt) {
+                            Ok(Content::Text(text)) => {
                                 new_history.push(ChannelHistoryEntry {
                                     channel_id: id,
                                     sender: gm.sender,
@@ -1160,21 +1164,76 @@ impl Engine {
                                     channel_name: ch.info.channel_name.clone(),
                                     sender: gm.sender,
                                     text,
+                                    seq,
                                 });
                             }
-                        }
+                            Ok(Content::Reaction {
+                                target_seq,
+                                emoji,
+                                remove,
+                            }) => {
+                                self.new_reactions.push(crate::channel::ChannelReaction {
+                                    channel_id: id,
+                                    target_seq,
+                                    emoji,
+                                    member: gm.sender,
+                                    removed: remove,
+                                });
+                            }
+                            _ => {}
+                        },
                         Err(e) => tracing::debug!(error = %e, "undecryptable channel message"),
                     }
                 }
             }
         }
-        if !out.is_empty() {
+        if !out.is_empty() || !self.new_reactions.is_empty() {
             for e in new_history {
                 self.push_channel_history(e);
             }
             self.dirty = true;
         }
         Ok(out)
+    }
+
+    /// React to a channel message (or remove your reaction). The reaction rides
+    /// the channel's log like a normal message.
+    pub async fn send_react(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        emoji: &str,
+        remove: bool,
+        _now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let gm = {
+            let ch = self
+                .channels
+                .get_mut(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            ch.group.encrypt(
+                &Content::Reaction {
+                    target_seq,
+                    emoji: emoji.to_owned(),
+                    remove,
+                }
+                .encode(),
+            )
+        };
+        sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
+        self.new_reactions.push(crate::channel::ChannelReaction {
+            channel_id: *channel_id,
+            target_seq,
+            emoji: emoji.to_owned(),
+            member: self.my_member_id(),
+            removed: remove,
+        });
+        Ok(())
+    }
+
+    /// Drain the reactions seen since the last call (own and inbound).
+    pub fn take_reactions(&mut self) -> Vec<crate::channel::ChannelReaction> {
+        std::mem::take(&mut self.new_reactions)
     }
 
     async fn handle_channel_control(
@@ -1564,7 +1623,7 @@ impl Engine {
                 size: m.total_size,
             }),
             Content::Channel(_) => None, // control traffic, not conversation
-            Content::Typing => None,     // ephemeral; never sent via this path
+            Content::Typing | Content::Reaction { .. } => None, // never sent via DM
         };
         let plaintext = content.encode();
 
@@ -1697,9 +1756,8 @@ impl Engine {
                         tracing::debug!(error = %e, "dropping channel-control message");
                     }
                 }
-                // Typing signals travel the ephemeral signal path, not the
-                // mailbox; ignore one that somehow arrives here.
-                Ok(Content::Typing) => {}
+                // Typing / reactions are channel-scoped and never arrive by DM.
+                Ok(Content::Typing | Content::Reaction { .. }) => {}
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }
             self.dirty = true;

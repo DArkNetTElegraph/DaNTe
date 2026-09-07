@@ -281,6 +281,23 @@ pub struct ChannelMessage {
     pub sender: [u8; 32],
     /// The message text.
     pub text: String,
+    /// The relay-log sequence number — a stable id reactions point at.
+    pub seq: u64,
+}
+
+/// A decrypted emoji reaction to a channel message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelReaction {
+    /// The channel it belongs to.
+    pub channel_id: [u8; 32],
+    /// The `seq` of the message being reacted to.
+    pub target_seq: u64,
+    /// The emoji.
+    pub emoji: String,
+    /// Who reacted (`IdentityId` bytes).
+    pub member: [u8; 32],
+    /// True if the reaction was withdrawn.
+    pub removed: bool,
 }
 
 fn read_fixed_list(r: &mut Reader<'_>) -> Result<Vec<[u8; 32]>, WireError> {

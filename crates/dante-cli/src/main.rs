@@ -308,6 +308,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
          /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
+         /react #<chan> <seq> <emoji> [-]  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -324,12 +325,18 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                 let _ = engine.sync(now).await;
                 match engine.poll_channels(now).await {
                     Ok(msgs) => for m in msgs {
-                        println!("[#{}] <{}> {}",
+                        println!("[#{} {}] <{}> {}",
                             IdentityId::from_bytes(m.channel_id).to_base32().split('-').next().unwrap_or(""),
+                            m.seq,
                             IdentityId::from_bytes(m.sender).to_base32().split('-').next().unwrap_or(""),
                             m.text);
                     }
                     Err(e) => eprintln!("channel poll error: {e}"),
+                }
+                for r in engine.take_reactions() {
+                    println!("  {} {} {}",
+                        if r.removed { "－" } else { "＋" }, r.emoji,
+                        IdentityId::from_bytes(r.member).to_base32().split('-').next().unwrap_or(""));
                 }
                 match engine.receive_all(now).await {
                     Ok(items) => {
@@ -540,6 +547,27 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     Err(e) => println!("bad server root: {e}"),
                 },
                 _ => println!("usage: /autokick <server-root> <days|off>"),
+            },
+            "react" => match (a, b) {
+                (Some(chan), Some(rest)) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    let mut it = rest.split_whitespace();
+                    match (
+                        parse_fingerprint(chan),
+                        it.next().and_then(|s| s.parse::<u64>().ok()),
+                    ) {
+                        (Ok(cid), Some(seq)) => {
+                            let emoji = it.next().unwrap_or("👍");
+                            let remove = it.next() == Some("-");
+                            match engine.send_react(&cid, seq, emoji, remove, now_ms()).await {
+                                Ok(()) => println!("reacted"),
+                                Err(e) => println!("failed: {e}"),
+                            }
+                        }
+                        _ => println!("usage: /react #<chan> <seq> <emoji> [-]"),
+                    }
+                }
+                _ => println!("usage: /react #<chan> <seq> <emoji> [-]"),
             },
             "discover" => {
                 let list = engine.discoverable_servers();

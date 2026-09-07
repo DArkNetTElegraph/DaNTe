@@ -966,3 +966,60 @@ async fn server_discovery_and_public_join() {
     joiner.sync(now).await.unwrap();
     assert!(joiner.discoverable_servers().is_empty());
 }
+
+#[tokio::test]
+async fn channel_emoji_reactions() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    for _ in 0..4 {
+        host.receive_all(now).await.unwrap();
+        alice.receive_all(now).await.unwrap();
+    }
+
+    host.send_channel(&chan, "big news", now).await.unwrap();
+    let got = alice.poll_channels(now).await.unwrap();
+    assert_eq!(got.len(), 1);
+    let target = got[0].seq;
+    assert!(target > 0);
+
+    // Alice reacts; the host sees it via take_reactions, not poll_channels.
+    alice
+        .send_react(&chan, target, "🎉", false, now)
+        .await
+        .unwrap();
+    let msgs = host.poll_channels(now).await.unwrap();
+    assert!(msgs.is_empty(), "a reaction is not a message");
+    let reacts = host.take_reactions();
+    assert_eq!(reacts.len(), 1);
+    assert_eq!(reacts[0].target_seq, target);
+    assert_eq!(reacts[0].emoji, "🎉");
+    assert_eq!(reacts[0].member, alice_id);
+    assert!(!reacts[0].removed);
+
+    // Withdrawing it comes through as removed = true.
+    alice
+        .send_react(&chan, target, "🎉", true, now)
+        .await
+        .unwrap();
+    host.poll_channels(now).await.unwrap();
+    let reacts = host.take_reactions();
+    assert_eq!(reacts.len(), 1);
+    assert!(reacts[0].removed);
+
+    // Draining twice yields nothing.
+    assert!(host.take_reactions().is_empty());
+}

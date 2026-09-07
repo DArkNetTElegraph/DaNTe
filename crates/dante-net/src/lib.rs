@@ -1,13 +1,30 @@
-//! `dante-net` — the peer-to-peer networking layer for DaNTe.
+//! `dante-net` — the transport and relay protocol for DaNTe.
 //!
-//! Scope:
-//! - libp2p swarm: QUIC + TCP, Noise (`XX`), Yamux
-//! - Kademlia DHT for peer / prekey-bundle / server lookup
-//! - gossipsub for the ledger topic and (later) per-server topics
-//! - request-response for mailbox fetch and ledger range sync
-//! - the relay **client**: deposit/poll sealed-sender envelopes
+//! MVP topology: clients open a framed TCP connection to one or more
+//! community-run **relays** and speak a small request/response protocol.
 //!
-//! DHT key layout and the sealed-sender `Envelope` are specified in
-//! `../../docs/PROTOCOL.md` §4.1–4.2.
+//! - [`transport`] — framed TCP [`Client`](transport::Client) /
+//!   [`serve`](transport::serve) / [`RequestHandler`](transport::RequestHandler)
+//! - [`wire`] — the [`Request`](wire::Request) / [`Response`](wire::Response)
+//!   messages
+//! - [`mailbox`] — a relay's sealed-sender store-and-forward
+//!   [`Mailbox`](mailbox::Mailbox)
+//! - [`ratelimit`] — token-bucket [`KeyedRateLimiter`](ratelimit::KeyedRateLimiter)
+//! - [`sync`] — client helpers: pull/submit ledger records, deposit/fetch
+//!   envelopes
+//!
+//! A libp2p DHT + gossip overlay for multi-relay decentralisation is a later
+//! phase; the protocol here is designed to run unchanged over it.
 
-// Phase 3 begins implementation here.
+pub mod error;
+pub mod mailbox;
+pub mod ratelimit;
+pub mod sync;
+pub mod transport;
+pub mod wire;
+
+pub use error::NetError;
+pub use mailbox::Mailbox;
+pub use ratelimit::KeyedRateLimiter;
+pub use transport::{serve, Client, RequestHandler, MAX_FRAME};
+pub use wire::{Request, Response};

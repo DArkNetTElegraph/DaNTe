@@ -6,13 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "DaNTe networking: libp2p transport, DHT, gossipsub, request-response, relay client."
+description = "DaNTe networking: framed TCP transport, relay request/response protocol, mailbox, rate limiting, ledger sync."
 
 [dependencies]
+dante-crypto.workspace = true
 dante-proto.workspace = true
+dante-identity.workspace = true
+dante-ledger.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "time", "macros"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"

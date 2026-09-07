@@ -78,9 +78,16 @@ DaNTe/
 - Replication: gossipsub for new records + request-response range sync; Merkle-root gossip for tamper detection.
 
 ### Phase 3 — Networking  (`dante-net`, `dante-relay`)
-- libp2p: QUIC + TCP, Noise, Yamux; Kademlia DHT for peer + prekey-bundle lookup; gossipsub for ledger + presence; request-response for mailbox fetch + ledger sync.
-- `dante-relay` binary: encrypted mailbox store-and-forward with TTL; ledger replication; per-IP / per-identity announce rate-limiting; bootstrap addressing.
-- Sealed-sender envelope: recipient-encrypted, sender identity inside ciphertext; relay sees only a recipient hint + size.
+- **Implemented (MVP):** framed-TCP client↔relay request/response protocol
+  (`Ping` / `SubmitRecord` / `GetTreeHead` / `GetRecords` / `Deposit` / `Fetch`);
+  sealed-sender `Envelope` with day-rotating recipient hint + size-class padding;
+  relay `Mailbox` store-and-forward with TTL; per-IP token-bucket rate limiting
+  (announce 10/h per §3); relay-side ledger replica + periodic evaporation GC;
+  `dante-relay` binary (`--listen`, background maintenance, ctrl-c shutdown).
+- **Deferred:** libp2p (QUIC + Noise + Yamux), Kademlia DHT for peer/prekey
+  lookup, gossipsub for multi-relay ledger fan-out. The request/response
+  protocol is designed to run unchanged over that overlay; until then a client
+  syncs the key directory by pulling records from the relay(s) it connects to.
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`)  — **MVP**
 - Signed prekey bundles published to DHT/relay; X3DH session init.

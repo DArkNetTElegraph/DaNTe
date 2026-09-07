@@ -257,6 +257,63 @@ async fn host_and_member_exchange_channel_messages() {
 }
 
 #[tokio::test]
+async fn channel_typing_signals_reach_members_without_burning_the_chain() {
+    use crate::{TypingEvent, TypingScope};
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let host_id = *host.identity().id().as_bytes();
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    let server = host.create_server("the lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    alice.receive_all(now).await.unwrap();
+    host.receive_all(now).await.unwrap();
+
+    // Host types; Alice sees it, host does not see its own.
+    host.send_typing_channel(&chan, now).await.unwrap();
+    assert_eq!(
+        alice.poll_typing(now).await.unwrap(),
+        vec![TypingEvent {
+            scope: TypingScope::Channel(chan),
+            who: host_id,
+            at_ms: now,
+        }]
+    );
+    assert!(host.poll_typing(now).await.unwrap().is_empty());
+
+    // The signal did not advance the sender chain: the next real message is
+    // still iteration 0 and decrypts cleanly.
+    host.send_channel(&chan, "first real message", now)
+        .await
+        .unwrap();
+    let msgs = alice.poll_channels(now).await.unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].text, "first real message");
+
+    // The other direction.
+    alice.send_typing_channel(&chan, now).await.unwrap();
+    assert_eq!(
+        host.poll_typing(now).await.unwrap(),
+        vec![TypingEvent {
+            scope: TypingScope::Channel(chan),
+            who: alice_id,
+            at_ms: now,
+        }]
+    );
+}
+
+#[tokio::test]
 async fn channel_history_survives_a_restart() {
     use dante_identity::keystore;
 

@@ -405,12 +405,15 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
-        Cmd::Typing { to } => {
-            // DM only for now; channel typing needs the group signal key.
-            if let Ok((false, id)) = parse_target(&to) {
+        Cmd::Typing { to } => match parse_target(&to) {
+            Ok((true, id)) => {
+                let _ = engine.send_typing_channel(&id, now_ms()).await;
+            }
+            Ok((false, id)) => {
                 let _ = engine.send_typing_dm(&id, now_ms()).await;
             }
-        }
+            Err(_) => {}
+        },
     }
 }
 

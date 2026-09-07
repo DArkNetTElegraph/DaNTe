@@ -201,6 +201,62 @@ async fn bob_restarts_and_resumes_the_conversation_from_disk() {
 }
 
 #[tokio::test]
+async fn host_and_member_exchange_channel_messages() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let host_id = *host.identity().id().as_bytes();
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    // Host builds a server + channel and invites Alice.
+    let server = host.create_server("the lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+
+    // Alice receives the invite (a DM) -> joins, replies with her key bundle.
+    let inbound = alice.receive_all(now).await.unwrap();
+    assert!(inbound.is_empty(), "control messages are not user-visible");
+    assert_eq!(alice.channels().len(), 1);
+    assert_eq!(alice.channels()[0].channel_name, "general");
+    // Host receives Alice's KeyBundle.
+    host.receive_all(now).await.unwrap();
+
+    // Host posts to the channel; Alice reads it.
+    host.send_channel(&chan, "welcome everyone", now)
+        .await
+        .unwrap();
+    let msgs = alice.poll_channels(now).await.unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].sender, host_id);
+    assert_eq!(msgs[0].text, "welcome everyone");
+    assert_eq!(msgs[0].channel_id, chan);
+
+    // Alice replies; host reads it (and does not see its own message).
+    alice
+        .send_channel(&chan, "thanks for the invite", now)
+        .await
+        .unwrap();
+    let msgs = host.poll_channels(now).await.unwrap();
+    assert_eq!(
+        msgs.iter().map(|m| m.text.clone()).collect::<Vec<_>>(),
+        vec!["thanks for the invite"]
+    );
+    assert_eq!(
+        host.poll_channels(now).await.unwrap().len(),
+        0,
+        "no re-delivery"
+    );
+}
+
+#[tokio::test]
 async fn send_dm_to_unknown_peer_fails_until_synced() {
     let now = now_ms();
     let relay = spawn_relay().await;

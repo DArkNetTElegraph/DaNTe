@@ -112,6 +112,42 @@ pub async fn get_blob(client: &mut Client, hash: &[u8; 32]) -> Result<Option<Vec
     }
 }
 
+/// Append an encoded channel message to a channel's relay log.
+pub async fn post_to_channel(
+    client: &mut Client,
+    channel_id: &[u8; 32],
+    blob: &[u8],
+) -> Result<(), NetError> {
+    match client
+        .request(&Request::PostToChannel {
+            channel_id: *channel_id,
+            blob: blob.to_vec(),
+        })
+        .await?
+    {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("PostToChannel: {other:?}"))),
+    }
+}
+
+/// Read a channel's log after `since_seq`. Returns `(seq, blob)` pairs.
+pub async fn fetch_channel(
+    client: &mut Client,
+    channel_id: &[u8; 32],
+    since_seq: u64,
+) -> Result<Vec<(u64, Vec<u8>)>, NetError> {
+    match client
+        .request(&Request::FetchChannel {
+            channel_id: *channel_id,
+            since_seq,
+        })
+        .await?
+    {
+        Response::ChannelLog(entries) => Ok(entries),
+        _ => Err(NetError::UnexpectedResponse("FetchChannel")),
+    }
+}
+
 /// Fetch and decode mailbox envelopes for `hints` since `since_ms`.
 pub async fn fetch(
     client: &mut Client,

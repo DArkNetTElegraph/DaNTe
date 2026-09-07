@@ -7,17 +7,19 @@ use std::{
     path::PathBuf,
 };
 
-use dante_crypto::{hash::sha256, pow::Difficulty};
+use dante_crypto::{hash::sha256, pow::Difficulty, random_array, sign::SignSecret};
 use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Session};
+use dante_group::{Group, GroupMessage, SenderKeyBundle};
 use dante_identity::{
     records::{IdentityAnnounce, LivenessProof},
     Identity,
 };
-use dante_ledger::{Ledger, LedgerParams, MemoryStore};
+use dante_ledger::{server::ServerRegister, Ledger, LedgerParams, MemoryStore};
 use dante_net::{sync, transport::Client};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
 
 use crate::{
+    channel::{ChannelControl, ChannelInfo, ChannelMessage},
     error::CoreError,
     store::{self, HistoryEntry, HistoryKind, PersistedState},
 };
@@ -57,6 +59,21 @@ pub enum Inbound {
     },
 }
 
+/// One channel this client belongs to.
+pub(crate) struct ChannelSession {
+    pub info: ChannelInfo,
+    pub group: Group,
+    pub roster: HashSet<[u8; 32]>,
+    pub last_seq: u64,
+}
+
+/// A server this client hosts (holds the root key).
+pub(crate) struct HostedServer {
+    pub name: String,
+    pub root: SignSecret,
+    pub channels: Vec<[u8; 32]>,
+}
+
 /// The client engine.
 pub struct Engine {
     identity: Identity,
@@ -64,6 +81,8 @@ pub struct Engine {
     ledger: Ledger<MemoryStore>,
     client: Client,
     sessions: HashMap<[u8; 32], Session>,
+    channels: HashMap<[u8; 32], ChannelSession>,
+    hosted: HashMap<[u8; 32], HostedServer>,
     seen_envelopes: HashSet<[u8; 32]>,
     history: Vec<HistoryEntry>,
     pow: Difficulty,
@@ -98,6 +117,8 @@ impl Engine {
             ledger: Ledger::new(MemoryStore::default(), params),
             client,
             sessions: HashMap::new(),
+            channels: HashMap::new(),
+            hosted: HashMap::new(),
             seen_envelopes: HashSet::new(),
             history: Vec::new(),
             pow,
@@ -118,8 +139,33 @@ impl Engine {
             engine.history = s.history;
             engine.last_fetch_since_ms = s.last_fetch_since_ms;
             engine.last_announce_ms = s.last_announce_ms;
+            for c in s.channels {
+                engine.channels.insert(
+                    c.info.channel_id,
+                    ChannelSession {
+                        info: c.info,
+                        group: Group::import(&c.group)?,
+                        roster: c.roster.into_iter().collect(),
+                        last_seq: c.last_seq,
+                    },
+                );
+            }
+            for h in s.hosted {
+                engine.hosted.insert(
+                    h.root_pub,
+                    HostedServer {
+                        name: h.name,
+                        root: SignSecret::from_bytes(&h.root_secret),
+                        channels: h.channels,
+                    },
+                );
+            }
         }
         Ok(engine)
+    }
+
+    fn my_member_id(&self) -> [u8; 32] {
+        *self.identity.id().as_bytes()
     }
 
     /// This identity.
@@ -151,6 +197,26 @@ impl Engine {
                 .sessions
                 .iter()
                 .map(|(k, s)| (*k, s.export()))
+                .collect(),
+            channels: self
+                .channels
+                .values()
+                .map(|c| store::StoredChannel {
+                    info: c.info.clone(),
+                    group: c.group.export(),
+                    roster: c.roster.iter().copied().collect(),
+                    last_seq: c.last_seq,
+                })
+                .collect(),
+            hosted: self
+                .hosted
+                .iter()
+                .map(|(root_pub, h)| store::StoredHostedServer {
+                    root_pub: *root_pub,
+                    name: h.name.clone(),
+                    root_secret: h.root.to_bytes(),
+                    channels: h.channels.clone(),
+                })
                 .collect(),
             history: self.history.clone(),
             seen_envelopes: seen,
@@ -222,6 +288,235 @@ impl Engine {
         Ok(())
     }
 
+    // ---- channels / servers -------------------------------------------------
+
+    /// Channels this client currently belongs to.
+    pub fn channels(&self) -> Vec<ChannelInfo> {
+        self.channels.values().map(|c| c.info.clone()).collect()
+    }
+
+    /// Create a server: mint a root key, register it on the ledger. Returns the
+    /// `server_root` public key (also its display handle).
+    pub async fn create_server(&mut self, name: &str, now_ms: u64) -> Result<[u8; 32], CoreError> {
+        let root = SignSecret::generate();
+        let server_root = root.public().to_bytes();
+        let reg = ServerRegister {
+            server_root,
+            name: name.chars().take(64).collect(),
+            summary: String::new(),
+            tags: vec![],
+            entry_relays: vec![],
+            discoverable: false,
+        };
+        let rec = reg.to_record(now_ms, |m| root.sign(m));
+        sync::submit_record(&mut self.client, &rec).await?;
+        self.hosted.insert(
+            server_root,
+            HostedServer {
+                name: name.to_owned(),
+                root,
+                channels: vec![],
+            },
+        );
+        self.dirty = true;
+        Ok(server_root)
+    }
+
+    /// Create a channel in a server this client hosts. Returns the channel id.
+    pub fn create_channel(
+        &mut self,
+        server_root: &[u8; 32],
+        name: &str,
+        private: bool,
+    ) -> Result<[u8; 32], CoreError> {
+        let server_name = self
+            .hosted
+            .get(server_root)
+            .ok_or(CoreError::NotServerHost)?
+            .name
+            .clone();
+        let channel_id = random_array::<32>();
+        let (group, _my_bundle) = Group::create(channel_id, self.my_member_id());
+        let info = ChannelInfo {
+            server_root: *server_root,
+            server_name,
+            channel_id,
+            channel_name: name.to_owned(),
+            private,
+        };
+        let mut roster = HashSet::new();
+        roster.insert(self.my_member_id());
+        self.channels.insert(
+            channel_id,
+            ChannelSession {
+                info,
+                group,
+                roster,
+                last_seq: 0,
+            },
+        );
+        self.hosted
+            .get_mut(server_root)
+            .unwrap()
+            .channels
+            .push(channel_id);
+        self.dirty = true;
+        Ok(channel_id)
+    }
+
+    /// Add `peer_id` to a channel (host only): DM them an invite carrying every
+    /// current member's sender-key bundle, and add them to the local roster.
+    pub async fn invite_to_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        peer_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let ch = self
+            .channels
+            .get(channel_id)
+            .ok_or(CoreError::UnknownChannel)?;
+        if !self.hosted.contains_key(&ch.info.server_root) {
+            return Err(CoreError::NotServerHost);
+        }
+        let info = ch.info.clone();
+        let roster: Vec<[u8; 32]> = ch.roster.iter().copied().collect();
+        // Our own bundle for this channel; other members' bundles are whatever
+        // they last sent us (we only have their public sig keys + chain keys as
+        // receivers, which we cannot re-serialise). For the common host-invites
+        // flow the host is the only established member, so its bundle suffices;
+        // additional members re-share on `KeyBundle` receipt.
+        let my_bundle = ch.group.my_bundle().encode();
+
+        let invite = ChannelControl::Invite {
+            info,
+            roster: roster.clone(),
+            bundles: vec![my_bundle],
+        };
+        self.send_content(peer_id, Content::Channel(invite.encode()), now_ms)
+            .await?;
+
+        if let Some(ch) = self.channels.get_mut(channel_id) {
+            ch.roster.insert(*peer_id);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Send a text message to a channel.
+    pub async fn send_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        text: &str,
+        _now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let ch = self
+            .channels
+            .get_mut(channel_id)
+            .ok_or(CoreError::UnknownChannel)?;
+        let gm = ch.group.encrypt(&Content::Text(text.to_owned()).encode());
+        sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Poll every channel's relay log and return newly decrypted messages
+    /// (excluding our own).
+    pub async fn poll_channels(&mut self, _now_ms: u64) -> Result<Vec<ChannelMessage>, CoreError> {
+        let me = self.my_member_id();
+        let ids: Vec<[u8; 32]> = self.channels.keys().copied().collect();
+        let mut out = Vec::new();
+        for id in ids {
+            let since = self.channels[&id].last_seq;
+            let entries = sync::fetch_channel(&mut self.client, &id, since).await?;
+            for (seq, blob) in entries {
+                if let Some(ch) = self.channels.get_mut(&id) {
+                    ch.last_seq = ch.last_seq.max(seq);
+                    let Ok(gm) = GroupMessage::decode(&blob) else {
+                        continue;
+                    };
+                    if gm.sender == me {
+                        continue;
+                    }
+                    match ch.group.decrypt(&gm) {
+                        Ok(pt) => {
+                            if let Ok(Content::Text(text)) = Content::decode(&pt) {
+                                out.push(ChannelMessage {
+                                    channel_id: id,
+                                    channel_name: ch.info.channel_name.clone(),
+                                    sender: gm.sender,
+                                    text,
+                                });
+                            }
+                        }
+                        Err(e) => tracing::debug!(error = %e, "undecryptable channel message"),
+                    }
+                }
+            }
+        }
+        if !out.is_empty() {
+            self.dirty = true;
+        }
+        Ok(out)
+    }
+
+    async fn handle_channel_control(&mut self, blob: &[u8], now_ms: u64) -> Result<(), CoreError> {
+        match ChannelControl::decode(blob)? {
+            ChannelControl::Invite {
+                info,
+                roster,
+                bundles,
+            } => {
+                let channel_id = info.channel_id;
+                if !self.channels.contains_key(&channel_id) {
+                    let (mut group, _) = Group::create(channel_id, self.my_member_id());
+                    for b in &bundles {
+                        if let Ok(bundle) = SenderKeyBundle::decode(b) {
+                            let _ = group.upsert_member(&bundle);
+                        }
+                    }
+                    let mut roster_set: HashSet<[u8; 32]> = roster.iter().copied().collect();
+                    roster_set.insert(self.my_member_id());
+                    self.channels.insert(
+                        channel_id,
+                        ChannelSession {
+                            info,
+                            group,
+                            roster: roster_set,
+                            last_seq: 0,
+                        },
+                    );
+                }
+                // Send our bundle to every other roster member.
+                let my_bundle = self.channels[&channel_id].group.my_bundle().encode();
+                let kb = ChannelControl::KeyBundle {
+                    channel_id,
+                    bundle: my_bundle,
+                };
+                let targets: Vec<[u8; 32]> = roster
+                    .into_iter()
+                    .filter(|m| *m != self.my_member_id())
+                    .collect();
+                for m in targets {
+                    let _ = self
+                        .send_content(&m, Content::Channel(kb.encode()), now_ms)
+                        .await;
+                }
+                self.dirty = true;
+            }
+            ChannelControl::KeyBundle { channel_id, bundle } => {
+                if let Some(ch) = self.channels.get_mut(&channel_id) {
+                    if let Ok(b) = SenderKeyBundle::decode(&bundle) {
+                        ch.roster.insert(b.member);
+                        ch.group.upsert_member(&b)?;
+                        self.dirty = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Send a text DM to the identity whose fingerprint (`IdentityId` bytes) is
     /// `peer_id`. Establishes a session on first contact, fetching the peer's
     /// prekeys from the relay; thereafter ratchets forward.
@@ -270,11 +565,12 @@ impl Engine {
             .agreement_key(&peer_idk)
             .ok_or(CoreError::UnknownPeer)?;
         let history_kind = match &content {
-            Content::Text(t) => HistoryKind::Text(t.clone()),
-            Content::File(m) => HistoryKind::File {
+            Content::Text(t) => Some(HistoryKind::Text(t.clone())),
+            Content::File(m) => Some(HistoryKind::File {
                 filename: m.filename.clone(),
                 size: m.total_size,
-            },
+            }),
+            Content::Channel(_) => None, // control traffic, not conversation
         };
         let plaintext = content.encode();
 
@@ -305,12 +601,14 @@ impl Engine {
             |m| self.identity.sign(m),
         )?;
         sync::deposit(&mut self.client, &env).await?;
-        self.history.push(HistoryEntry {
-            peer_idk,
-            outgoing: true,
-            ts_ms: now_ms,
-            kind: history_kind,
-        });
+        if let Some(kind) = history_kind {
+            self.history.push(HistoryEntry {
+                peer_idk,
+                outgoing: true,
+                ts_ms: now_ms,
+                kind,
+            });
+        }
         self.dirty = true;
         Ok(())
     }
@@ -398,6 +696,11 @@ impl Engine {
                     }
                     Err(e) => tracing::debug!(error = %e, "dropping file with a failed transfer"),
                 },
+                Ok(Content::Channel(blob)) => {
+                    if let Err(e) = self.handle_channel_control(&blob, now_ms).await {
+                        tracing::debug!(error = %e, "dropping channel-control message");
+                    }
+                }
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }
             self.dirty = true;

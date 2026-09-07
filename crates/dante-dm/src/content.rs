@@ -15,6 +15,9 @@ pub enum Content {
     /// A file offer: the manifest travels here; the ciphertext chunks are
     /// fetched separately from the relay blob store.
     File(FileManifest),
+    /// A channel-control message (invite, sender-key exchange). The bytes are
+    /// opaque to `dante-dm`; `dante-core` defines their shape.
+    Channel(Vec<u8>),
 }
 
 impl Content {
@@ -28,6 +31,9 @@ impl Content {
             Content::File(m) => {
                 w.u8(2).bytes(&m.encode());
             }
+            Content::Channel(b) => {
+                w.u8(3).bytes(b);
+            }
         }
         w.into_vec()
     }
@@ -38,6 +44,7 @@ impl Content {
         let out = match r.u8()? {
             1 => Content::Text(r.string()?),
             2 => Content::File(FileManifest::decode(r.bytes()?)?),
+            3 => Content::Channel(r.bytes()?.to_vec()),
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "dm::Content",

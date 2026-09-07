@@ -11,8 +11,11 @@ use std::{fs, io, path::Path};
 
 use dante_crypto::{aead, kdf, random_array};
 use dante_dm::{PreKeySecretsState, SessionState};
+use dante_group::GroupState;
 use dante_identity::Identity;
 use dante_proto::enc::{Reader, WireError, Writer};
+
+use crate::channel::ChannelInfo;
 
 const MAGIC: &[u8; 13] = b"DANTE-STATE-1";
 const KDF_INFO: &[u8] = b"dante/local-store/v1";
@@ -47,12 +50,40 @@ pub struct HistoryEntry {
     pub kind: HistoryKind,
 }
 
+/// A persisted channel membership.
+pub struct StoredChannel {
+    /// Channel description.
+    pub info: ChannelInfo,
+    /// The sender-keys group snapshot.
+    pub group: GroupState,
+    /// Known member ids.
+    pub roster: Vec<[u8; 32]>,
+    /// Last consumed channel-log sequence number.
+    pub last_seq: u64,
+}
+
+/// A persisted hosted-server record (holds the root secret).
+pub struct StoredHostedServer {
+    /// `server_root` public key.
+    pub root_pub: [u8; 32],
+    /// Display name.
+    pub name: String,
+    /// `server_root` secret — this is why the store is encrypted.
+    pub root_secret: [u8; 32],
+    /// Channel ids created under this server.
+    pub channels: Vec<[u8; 32]>,
+}
+
 /// Everything persisted between runs.
 pub struct PersistedState {
     /// The prekey secret halves.
     pub prekeys: PreKeySecretsState,
     /// `(peer_idk, session snapshot)`.
     pub sessions: Vec<([u8; 32], SessionState)>,
+    /// Channel memberships.
+    pub channels: Vec<StoredChannel>,
+    /// Servers this client hosts.
+    pub hosted: Vec<StoredHostedServer>,
     /// Conversation history, oldest first.
     pub history: Vec<HistoryEntry>,
     /// Processed-envelope tags (deduplication).
@@ -79,6 +110,9 @@ pub enum StoreError {
     /// The decrypted payload did not parse.
     #[error("store payload is corrupt")]
     Payload(#[from] WireError),
+    /// A persisted group snapshot did not parse.
+    #[error("store group state is corrupt")]
+    Group(#[from] dante_group::GroupError),
 }
 
 fn derive_key(identity: &Identity, salt: &[u8; SALT_LEN]) -> [u8; 32] {
@@ -138,6 +172,28 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
         w.fixed(idk).bytes(&sess.encode());
     }
 
+    w.u32(s.channels.len() as u32);
+    for c in &s.channels {
+        w.bytes(&c.info.encode())
+            .bytes(&c.group.encode())
+            .u64(c.last_seq)
+            .u32(c.roster.len() as u32);
+        for m in &c.roster {
+            w.fixed(m);
+        }
+    }
+
+    w.u32(s.hosted.len() as u32);
+    for h in &s.hosted {
+        w.fixed(&h.root_pub)
+            .string(&h.name)
+            .fixed(&h.root_secret)
+            .u32(h.channels.len() as u32);
+        for c in &h.channels {
+            w.fixed(c);
+        }
+    }
+
     w.u32(s.history.len() as u32);
     for h in &s.history {
         w.fixed(&h.peer_idk).bool(h.outgoing).u64(h.ts_ms);
@@ -158,7 +214,7 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     w.into_vec()
 }
 
-fn decode_state(bytes: &[u8]) -> Result<PersistedState, WireError> {
+fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
     let mut r = Reader::new(bytes);
     let last_announce_ms = r.u64()?;
     let last_fetch_since_ms = r.u64()?;
@@ -170,6 +226,44 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, WireError> {
         let idk = r.fixed::<32>()?;
         let sess = SessionState::decode(r.bytes()?)?;
         sessions.push((idk, sess));
+    }
+
+    let n = bounded_count(&mut r)?;
+    let mut channels = Vec::with_capacity(n);
+    for _ in 0..n {
+        let info = ChannelInfo::decode(r.bytes()?)?;
+        let group = GroupState::decode(r.bytes()?)?;
+        let last_seq = r.u64()?;
+        let rc = bounded_count(&mut r)?;
+        let mut roster = Vec::with_capacity(rc);
+        for _ in 0..rc {
+            roster.push(r.fixed::<32>()?);
+        }
+        channels.push(StoredChannel {
+            info,
+            group,
+            roster,
+            last_seq,
+        });
+    }
+
+    let n = bounded_count(&mut r)?;
+    let mut hosted = Vec::with_capacity(n);
+    for _ in 0..n {
+        let root_pub = r.fixed::<32>()?;
+        let name = r.string()?;
+        let root_secret = r.fixed::<32>()?;
+        let cc = bounded_count(&mut r)?;
+        let mut chans = Vec::with_capacity(cc);
+        for _ in 0..cc {
+            chans.push(r.fixed::<32>()?);
+        }
+        hosted.push(StoredHostedServer {
+            root_pub,
+            name,
+            root_secret,
+            channels: chans,
+        });
     }
 
     let n = bounded_count(&mut r)?;
@@ -188,7 +282,8 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, WireError> {
                 return Err(WireError::BadDiscriminant {
                     ty: "HistoryKind",
                     value: other.into(),
-                })
+                }
+                .into())
             }
         };
         history.push(HistoryEntry {
@@ -208,6 +303,8 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, WireError> {
     Ok(PersistedState {
         prekeys,
         sessions,
+        channels,
+        hosted,
         history,
         seen_envelopes,
         last_announce_ms,
@@ -248,6 +345,8 @@ mod tests {
         let state = PersistedState {
             prekeys: PreKeySecrets::generate(4).export(),
             sessions: vec![(peer, sess)],
+            channels: vec![],
+            hosted: vec![],
             history: vec![HistoryEntry {
                 peer_idk: peer,
                 outgoing: true,
@@ -281,6 +380,8 @@ mod tests {
         let state = PersistedState {
             prekeys: PreKeySecrets::generate(1).export(),
             sessions: vec![],
+            channels: vec![],
+            hosted: vec![],
             history: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,

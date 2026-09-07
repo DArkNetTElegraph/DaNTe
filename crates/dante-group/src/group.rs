@@ -282,6 +282,55 @@ impl Group {
         }
     }
 
+    /// Snapshot for the encrypted local store. **All secret.**
+    pub fn export(&self) -> GroupState {
+        GroupState {
+            group_id: self.group_id,
+            me: self.me,
+            sender_sig_secret: self.sender.sig.to_bytes(),
+            sender_chain_key: self.sender.chain_key,
+            sender_iteration: self.sender.iteration,
+            receivers: self
+                .receivers
+                .iter()
+                .map(|(&m, r)| ReceiverSnapshot {
+                    member: m,
+                    sig_pub: r.sig_pub.to_bytes(),
+                    chain_key: r.chain_key,
+                    iteration: r.iteration,
+                    skipped: r.skipped.iter().map(|(&n, &mk)| (n, mk)).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Restore a group view from a snapshot.
+    pub fn import(s: &GroupState) -> Result<Self, GroupError> {
+        let mut receivers = HashMap::new();
+        for r in &s.receivers {
+            receivers.insert(
+                r.member,
+                ReceiverState {
+                    sig_pub: SignPublic::from_bytes(&r.sig_pub)
+                        .map_err(|_| GroupError::BadSignature)?,
+                    chain_key: r.chain_key,
+                    iteration: r.iteration,
+                    skipped: r.skipped.iter().copied().collect(),
+                },
+            );
+        }
+        Ok(Self {
+            group_id: s.group_id,
+            me: s.me,
+            sender: SenderState {
+                sig: SignSecret::from_bytes(&s.sender_sig_secret),
+                chain_key: s.sender_chain_key,
+                iteration: s.sender_iteration,
+            },
+            receivers,
+        })
+    }
+
     /// Encrypt `plaintext` as a channel message from us.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> GroupMessage {
         let (next_ck, mk) = kdf_ck(&self.sender.chain_key);
@@ -360,6 +409,110 @@ impl Group {
             &msg.ciphertext,
         )
     }
+}
+
+/// A serializable snapshot of a [`Group`].
+#[derive(Clone)]
+pub struct GroupState {
+    group_id: [u8; 32],
+    me: MemberId,
+    sender_sig_secret: [u8; 32],
+    sender_chain_key: [u8; 32],
+    sender_iteration: u32,
+    receivers: Vec<ReceiverSnapshot>,
+}
+
+#[derive(Clone)]
+struct ReceiverSnapshot {
+    member: MemberId,
+    sig_pub: [u8; 32],
+    chain_key: [u8; 32],
+    iteration: u32,
+    skipped: Vec<(u32, [u8; 32])>,
+}
+
+impl GroupState {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.fixed(&self.group_id)
+            .fixed(&self.me)
+            .fixed(&self.sender_sig_secret)
+            .fixed(&self.sender_chain_key)
+            .u32(self.sender_iteration)
+            .u32(self.receivers.len() as u32);
+        for r in &self.receivers {
+            w.fixed(&r.member)
+                .fixed(&r.sig_pub)
+                .fixed(&r.chain_key)
+                .u32(r.iteration)
+                .u32(r.skipped.len() as u32);
+            for (n, mk) in &r.skipped {
+                w.u32(*n).fixed(mk);
+            }
+        }
+        w.into_vec()
+    }
+
+    /// Decode.
+    pub fn decode(bytes: &[u8]) -> Result<Self, GroupError> {
+        let mut r = Reader::new(bytes);
+        let group_id = r.fixed::<32>()?;
+        let me = r.fixed::<32>()?;
+        let sender_sig_secret = r.fixed::<32>()?;
+        let sender_chain_key = r.fixed::<32>()?;
+        let sender_iteration = r.u32()?;
+        let rc = bounded(&mut r)?;
+        let mut receivers = Vec::with_capacity(rc);
+        for _ in 0..rc {
+            let member = r.fixed::<32>()?;
+            let sig_pub = r.fixed::<32>()?;
+            let chain_key = r.fixed::<32>()?;
+            let iteration = r.u32()?;
+            let sc = bounded(&mut r)?;
+            let mut skipped = Vec::with_capacity(sc);
+            for _ in 0..sc {
+                skipped.push((r.u32()?, r.fixed::<32>()?));
+            }
+            receivers.push(ReceiverSnapshot {
+                member,
+                sig_pub,
+                chain_key,
+                iteration,
+                skipped,
+            });
+        }
+        r.finish()?;
+        Ok(Self {
+            group_id,
+            me,
+            sender_sig_secret,
+            sender_chain_key,
+            sender_iteration,
+            receivers,
+        })
+    }
+}
+
+impl Drop for GroupState {
+    fn drop(&mut self) {
+        self.sender_sig_secret.zeroize();
+        self.sender_chain_key.zeroize();
+        for r in &mut self.receivers {
+            r.chain_key.zeroize();
+            for (_, mk) in &mut r.skipped {
+                mk.zeroize();
+            }
+        }
+    }
+}
+
+fn bounded(r: &mut Reader<'_>) -> Result<usize, dante_proto::enc::WireError> {
+    let n = r.u32()? as usize;
+    if n > r.remaining() {
+        return Err(dante_proto::enc::WireError::LengthTooLarge(n as u64));
+    }
+    Ok(n)
 }
 
 fn open(
@@ -489,5 +642,27 @@ mod tests {
         );
         let m = a.encrypt(b"x");
         assert_eq!(GroupMessage::decode(&m.encode()).unwrap(), m);
+    }
+
+    #[test]
+    fn group_survives_export_import() {
+        let (mut a, _ba) = Group::create(GID, member(0));
+        let (mut b, bb) = Group::create(GID, member(1));
+        let (mut c, bc) = Group::create(GID, member(2));
+        a.upsert_member(&bb).unwrap();
+        a.upsert_member(&bc).unwrap();
+        b.upsert_member(&a.my_bundle()).unwrap();
+        c.upsert_member(&a.my_bundle()).unwrap();
+
+        let m1 = a.encrypt(b"one");
+        assert_eq!(b.decrypt(&m1).unwrap(), b"one");
+
+        let bytes = a.export().encode();
+        drop(a);
+        let mut a = Group::import(&GroupState::decode(&bytes).unwrap()).unwrap();
+
+        let m2 = a.encrypt(b"two after reload");
+        assert_eq!(b.decrypt(&m2).unwrap(), b"two after reload");
+        assert_eq!(c.decrypt(&m2).unwrap(), b"two after reload");
     }
 }

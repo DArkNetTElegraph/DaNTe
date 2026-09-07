@@ -213,15 +213,26 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
             }
         }
     }
+    if !engine.channels().is_empty() {
+        println!("channels:");
+        for c in engine.channels() {
+            println!(
+                "  #{}  {} / {}",
+                IdentityId::from_bytes(c.channel_id).to_base32(),
+                c.server_name,
+                c.channel_name
+            );
+        }
+    }
     println!(
-        "commands: /to <fingerprint>   /file <path>   /whoami   /peer   /quit\n\
-         (received files are written to ./dante-recv-<name>)"
+        "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
+         /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut save_tick = tokio::time::interval(Duration::from_secs(15));
-    let mut peer: Option<[u8; 32]> = None;
+    let mut peer: Option<Target> = None;
 
     loop {
         tokio::select! {
@@ -229,6 +240,15 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
             _ = tick.tick() => {
                 let now = now_ms();
                 let _ = engine.sync(now).await;
+                match engine.poll_channels(now).await {
+                    Ok(msgs) => for m in msgs {
+                        println!("[#{}] <{}> {}",
+                            IdentityId::from_bytes(m.channel_id).to_base32().split('-').next().unwrap_or(""),
+                            IdentityId::from_bytes(m.sender).to_base32().split('-').next().unwrap_or(""),
+                            m.text);
+                    }
+                    Err(e) => eprintln!("channel poll error: {e}"),
+                }
                 match engine.receive_all(now).await {
                     Ok(items) => {
                         for item in items {
@@ -277,33 +297,105 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+/// The current send target: a DM peer or a channel.
+#[derive(Clone, Copy)]
+pub(crate) enum Target {
+    /// A DM peer, by `IdentityId`.
+    Peer([u8; 32]),
+    /// A channel, by channel id.
+    Channel([u8; 32]),
+}
+
 /// Returns `Ok(true)` to quit.
-async fn handle_line(engine: &mut Engine, peer: &mut Option<[u8; 32]>, line: &str) -> Result<bool> {
+async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &str) -> Result<bool> {
     let line = line.trim();
     if line.is_empty() {
         return Ok(false);
     }
     if let Some(rest) = line.strip_prefix('/') {
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        match parts.next().unwrap_or_default() {
+        let mut parts = rest.splitn(3, char::is_whitespace);
+        let cmd = parts.next().unwrap_or_default();
+        let a = parts.next();
+        let b = parts.next();
+        match cmd {
             "quit" | "q" => return Ok(true),
             "whoami" => println!("you are {}", engine.identity().id().to_base32()),
-            "peer" => match peer {
-                Some(p) => println!("peer: {}", IdentityId::from_bytes(*p).to_base32()),
-                None => println!("no peer set (use /to <fingerprint>)"),
+            "peer" => match target {
+                Some(Target::Peer(p)) => {
+                    println!("peer: {}", IdentityId::from_bytes(*p).to_base32())
+                }
+                Some(Target::Channel(c)) => {
+                    println!("channel: #{}", IdentityId::from_bytes(*c).to_base32())
+                }
+                None => println!("no target set (/to <fingerprint> or /to #<channel-id>)"),
             },
-            "to" => match parts.next() {
-                Some(fp) => match parse_fingerprint(fp) {
+            "to" => match a {
+                Some(s) if s.starts_with('#') => match parse_fingerprint(&s[1..]) {
                     Ok(id) => {
-                        *peer = Some(id);
+                        *target = Some(Target::Channel(id));
+                        println!("channel set to #{}", IdentityId::from_bytes(id).to_base32());
+                    }
+                    Err(e) => println!("bad channel id: {e}"),
+                },
+                Some(s) => match parse_fingerprint(s) {
+                    Ok(id) => {
+                        *target = Some(Target::Peer(id));
                         println!("peer set to {}", IdentityId::from_bytes(id).to_base32());
                     }
                     Err(e) => println!("bad fingerprint: {e}"),
                 },
-                None => println!("usage: /to <fingerprint>"),
+                None => println!("usage: /to <fingerprint>   or   /to #<channel-id>"),
             },
-            "file" => match (*peer, parts.next()) {
-                (Some(p), Some(path)) => match std::fs::read(path) {
+            "server" => match a {
+                Some(name) => match engine.create_server(name, now_ms()).await {
+                    Ok(root) => println!(
+                        "server \"{name}\" created; root {}",
+                        IdentityId::from_bytes(root).to_base32()
+                    ),
+                    Err(e) => println!("create failed: {e}"),
+                },
+                None => println!("usage: /server <name>"),
+            },
+            "channel" => match (a, b) {
+                (Some(sfp), Some(name)) => match parse_fingerprint(sfp) {
+                    Ok(root) => match engine.create_channel(&root, name, true) {
+                        Ok(id) => println!(
+                            "channel \"{name}\" -> #{}",
+                            IdentityId::from_bytes(id).to_base32()
+                        ),
+                        Err(e) => println!("create failed: {e}"),
+                    },
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /channel <server-root> <name>"),
+            },
+            "invite" => match (a, b) {
+                (Some(chan), Some(fp)) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match (parse_fingerprint(chan), parse_fingerprint(fp)) {
+                        (Ok(cid), Ok(pid)) => {
+                            match engine.invite_to_channel(&cid, &pid, now_ms()).await {
+                                Ok(()) => println!("invited"),
+                                Err(e) => println!("invite failed: {e}"),
+                            }
+                        }
+                        _ => println!("bad channel id or fingerprint"),
+                    }
+                }
+                _ => println!("usage: /invite #<channel-id> <fingerprint>"),
+            },
+            "channels" => {
+                for c in engine.channels() {
+                    println!(
+                        "  #{}  {} / {}",
+                        IdentityId::from_bytes(c.channel_id).to_base32(),
+                        c.server_name,
+                        c.channel_name
+                    );
+                }
+            }
+            "file" => match (*target, a) {
+                (Some(Target::Peer(p)), Some(path)) => match std::fs::read(path) {
                     Ok(data) => {
                         let name = std::path::Path::new(path)
                             .file_name()
@@ -316,6 +408,7 @@ async fn handle_line(engine: &mut Engine, peer: &mut Option<[u8; 32]>, line: &st
                     }
                     Err(e) => println!("cannot read {path}: {e}"),
                 },
+                (Some(Target::Channel(_)), _) => println!("files are DM-only for now"),
                 (None, _) => println!("set a peer first: /to <fingerprint>"),
                 (_, None) => println!("usage: /file <path>"),
             },
@@ -324,16 +417,20 @@ async fn handle_line(engine: &mut Engine, peer: &mut Option<[u8; 32]>, line: &st
         return Ok(false);
     }
 
-    let Some(p) = *peer else {
-        println!("set a peer first: /to <fingerprint>");
-        return Ok(false);
-    };
-    match engine.send_dm(&p, line, now_ms()).await {
-        Ok(()) => {}
-        Err(dante_core::CoreError::UnknownPeer) => {
-            bail_soft("peer not in your ledger yet — they must announce; try again shortly")
+    match *target {
+        Some(Target::Peer(p)) => match engine.send_dm(&p, line, now_ms()).await {
+            Ok(()) => {}
+            Err(dante_core::CoreError::UnknownPeer) => {
+                bail_soft("peer not in your ledger yet — they must announce; try again shortly")
+            }
+            Err(e) => bail_soft(&format!("send failed: {e}")),
+        },
+        Some(Target::Channel(c)) => {
+            if let Err(e) = engine.send_channel(&c, line, now_ms()).await {
+                bail_soft(&format!("channel send failed: {e}"));
+            }
         }
-        Err(e) => bail_soft(&format!("send failed: {e}")),
+        None => println!("set a target: /to <fingerprint>   or   /to #<channel-id>"),
     }
     Ok(false)
 }

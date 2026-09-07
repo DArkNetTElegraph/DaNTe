@@ -53,6 +53,9 @@ pub struct RelayState {
     /// `SHA-256(bytes)` -> (ciphertext blob, deposited_ms). File chunks.
     blobs: std::collections::HashMap<[u8; 32], (Vec<u8>, u64)>,
     blob_bytes: usize,
+    /// `channel_id` -> the channel's append-only log. Opaque E2E channel
+    /// messages; the relay never reads them.
+    channels: std::collections::HashMap<[u8; 32], ChannelLog>,
     announce_rl: KeyedRateLimiter<IpAddr>,
     record_rl: KeyedRateLimiter<IpAddr>,
     deposit_rl: KeyedRateLimiter<IpAddr>,
@@ -63,6 +66,11 @@ pub struct RelayState {
 const BLOB_STORE_CAP: usize = 128 * 1024 * 1024;
 /// A blob is dropped this long after it was stored.
 const BLOB_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// Per-channel message retention (oldest dropped past this).
+const MAX_CHANNEL_ENTRIES: usize = 5_000;
+
+/// `(next_seq, entries)` where each entry is `(seq, blob, ts_ms)`.
+type ChannelLog = (u64, Vec<(u64, Vec<u8>, u64)>);
 
 impl RelayState {
     /// Fresh relay state.
@@ -73,6 +81,7 @@ impl RelayState {
             prekeys: std::collections::HashMap::new(),
             blobs: std::collections::HashMap::new(),
             blob_bytes: 0,
+            channels: std::collections::HashMap::new(),
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
             deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
@@ -102,6 +111,12 @@ impl RelayState {
             keep
         });
         self.blob_bytes -= freed;
+
+        for (_, entries) in self.channels.values_mut() {
+            entries.retain(|(_, _, ts)| now.saturating_sub(*ts) <= BLOB_TTL_MS);
+        }
+        self.channels.retain(|_, (_, entries)| !entries.is_empty());
+
         (dropped, evaporated)
     }
 
@@ -205,6 +220,40 @@ impl RelayState {
             }
 
             Request::GetBlob(hash) => Response::Blob(self.blobs.get(&hash).map(|(b, _)| b.clone())),
+
+            Request::PostToChannel { channel_id, blob } => {
+                if !self.deposit_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                let (next_seq, entries) =
+                    self.channels.entry(channel_id).or_insert((1, Vec::new()));
+                let seq = *next_seq;
+                *next_seq += 1;
+                entries.push((seq, blob, now));
+                if entries.len() > MAX_CHANNEL_ENTRIES {
+                    let excess = entries.len() - MAX_CHANNEL_ENTRIES;
+                    entries.drain(..excess);
+                }
+                Response::Ok
+            }
+
+            Request::FetchChannel {
+                channel_id,
+                since_seq,
+            } => {
+                let out = self
+                    .channels
+                    .get(&channel_id)
+                    .map(|(_, entries)| {
+                        entries
+                            .iter()
+                            .filter(|(seq, _, _)| *seq > since_seq)
+                            .map(|(seq, blob, _)| (*seq, blob.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Response::ChannelLog(out)
+            }
         }
     }
 }

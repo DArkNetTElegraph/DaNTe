@@ -330,6 +330,12 @@ const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) 
 const initials = s => (s || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
 const short = s => (s && s.includes("-")) ? s.split("-").slice(0, 2).join("-") : (s || "");
 
+/* messaging yourself is a local-only "Private Note" — no relay round-trip,
+   so it never comes back and doubles. */
+const isSelf  = fp => !!fp && store.me.fingerprint &&
+  (fp === store.me.fingerprint || short(fp) === short(store.me.fingerprint));
+const dmLabel = fp => isSelf(fp) ? "Private Note" : short(fp);
+
 const LS = {
   get(k, d) { try { const v = localStorage.getItem("dante." + k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
   set(k, v) { try { localStorage.setItem("dante." + k, JSON.stringify(v)); } catch (_) {} },
@@ -445,15 +451,24 @@ function renderPane() {
     lbl.appendChild(plus);
     list.appendChild(lbl);
 
+    // Private Note (yourself) always sits at the top.
+    const meFp = store.me.fingerprint;
+    const noteRow = el("button", "chan-row" + (curTarget() === meFp ? " active" : ""));
+    noteRow.appendChild(Object.assign(el("div", "avatar"), { textContent: "📝" }));
+    noteRow.appendChild(el("span", "name", "Private Note"));
+    if (store.unread.has(meFp)) noteRow.appendChild(el("span", "dot"));
+    noteRow.onclick = () => selectTarget("@dm", meFp);
+    list.appendChild(noteRow);
+
     for (const d of store.dms) {
+      if (isSelf(d.fp)) continue;
       const row = el("button", "chan-row" + (curTarget() === d.fp ? " active" : ""));
       row.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(d.fp) }));
-      const n = el("span", "name", short(d.fp)); row.appendChild(n);
+      row.appendChild(el("span", "name", dmLabel(d.fp)));
       if (store.unread.has(d.fp)) row.appendChild(el("span", "dot"));
       row.onclick = () => selectTarget("@dm", d.fp);
       list.appendChild(row);
     }
-    if (!store.dms.length) list.appendChild(el("div", "hint", "No conversations yet. Use + to add someone by fingerprint."));
     return;
   }
 
@@ -499,6 +514,10 @@ function renderChat() {
     $("#chat-topic").textContent = store.view.server;
     inviteBtn.hidden = false;
     inviteBtn.onclick = () => inviteFlow(target);
+  } else if (isSelf(target)) {
+    titleEl.innerHTML = '<span class="hash">📝</span> Private Note';
+    $("#chat-topic").textContent = "only you can see this";
+    inviteBtn.hidden = true;
   } else {
     titleEl.innerHTML = '<span class="hash">@</span> ' + esc(short(target));
     $("#chat-topic").textContent = "direct message · " + target;
@@ -664,7 +683,13 @@ $("#composer").addEventListener("submit", async e => {
   if (!text || !t) return;
   box.value = "";
   try {
-    if (t.startsWith("#")) {
+    if (isSelf(t)) {
+      // Local-only note: no relay round-trip, so nothing echoes back to double.
+      const note = { kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1 };
+      store.messages.push(note);
+      const notes = LS.get("notes", []); notes.push({ text: note.text, at: note._at }); LS.set("notes", notes);
+      renderChat();
+    } else if (t.startsWith("#")) {
       await api.send(t, text);                 // channel echo comes back via poll
     } else {
       store._pendingDmTarget = t;
@@ -695,6 +720,11 @@ async function init() {
     $("#me-avatar").textContent = initials(store.me.fingerprint);
     $("#me-sub").textContent = "online";
   } catch (_) { $("#me-sub").textContent = "offline"; }
+
+  // restore local Private Notes
+  for (const n of LS.get("notes", [])) {
+    store.messages.push({ kind: "message", from: "you", text: n.text, _target: store.me.fingerprint, _at: n.at, seq: -1 });
+  }
 
   await refreshChannels();
 

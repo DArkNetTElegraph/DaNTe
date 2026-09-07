@@ -11,6 +11,15 @@ pub enum IdentityError {
     #[error(transparent)]
     Crypto(#[from] dante_crypto::CryptoError),
 
+    /// A wire structure failed to decode.
+    #[error(transparent)]
+    Wire(#[from] dante_proto::enc::WireError),
+
+    /// A [`dante_proto::Record`] was handed to an identity decoder but its
+    /// `kind` is not an identity body.
+    #[error("record kind does not carry an identity body")]
+    WrongRecordKind,
+
     /// A fingerprint string (base32 or word phrase) did not decode to 32 bytes.
     #[error("malformed identity fingerprint")]
     BadFingerprint,

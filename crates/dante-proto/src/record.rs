@@ -140,15 +140,34 @@ impl Record {
 
     /// Build and sign a record with `author_sk` at `created_ms`.
     pub fn seal(kind: RecordKind, body: Vec<u8>, author_sk: &SignSecret, created_ms: u64) -> Self {
+        Self::seal_with(kind, body, author_sk.public().to_bytes(), created_ms, |m| {
+            author_sk.sign(m)
+        })
+    }
+
+    /// Build and sign a record without handing this crate a secret key: the
+    /// caller provides the `author` public key and a closure that produces an
+    /// Ed25519 signature over the given bytes. Lets a higher layer keep its
+    /// signing key encapsulated (e.g. `dante_identity::Identity`).
+    pub fn seal_with<F>(
+        kind: RecordKind,
+        body: Vec<u8>,
+        author: [u8; 32],
+        created_ms: u64,
+        sign: F,
+    ) -> Self
+    where
+        F: FnOnce(&[u8]) -> [u8; SIG_LEN],
+    {
         let mut rec = Self {
             v: RECORD_VERSION,
             kind,
             body,
-            author: author_sk.public().to_bytes(),
+            author,
             created_ms,
             sig: [0u8; SIG_LEN],
         };
-        rec.sig = author_sk.sign(&rec.signing_bytes());
+        rec.sig = sign(&rec.signing_bytes());
         rec
     }
 

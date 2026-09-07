@@ -9,7 +9,7 @@ authors.workspace = true
 description = "Canonical wire types for DaNTe: the length-prefixed binary codec, the ledger Record envelope, RFC 6962 Merkle proofs."
 
 [dependencies]
-dante-crypto = { workspace = true, features = ["serde"] }
+dante-crypto.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

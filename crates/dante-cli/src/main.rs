@@ -256,7 +256,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
          /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
-         /assignrole <root> <fp> <id> [remove]  \
+         /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -436,13 +436,33 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
             },
             "redeem" => match a {
                 Some(link) => {
-                    let full = b.map_or_else(|| link.to_string(), |b| format!("{link} {b}"));
-                    match engine.redeem_invite(full.trim(), now_ms()).await {
+                    let pw = b.map(str::trim).filter(|s| !s.is_empty());
+                    match engine.redeem_invite(link.trim(), pw, now_ms()).await {
                         Ok(()) => println!("redeemed — you'll join once the host is online"),
                         Err(e) => println!("redeem failed: {e}"),
                     }
                 }
-                None => println!("usage: /redeem <invite-link>"),
+                None => println!("usage: /redeem <invite-link> [password]"),
+            },
+            "joinpw" => match (a, b) {
+                (Some(root), Some(spec)) => match parse_fingerprint(root) {
+                    Ok(sr) => {
+                        let pw = (spec != "off" && spec != "0").then_some(spec);
+                        match engine.set_join_password(&sr, pw) {
+                            Ok(()) => println!(
+                                "{}",
+                                if pw.is_some() {
+                                    "join password set"
+                                } else {
+                                    "join password cleared"
+                                }
+                            ),
+                            Err(e) => println!("failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /joinpw <server-root> <password|off>"),
             },
             "autokick" => match (a, b) {
                 (Some(root), Some(spec)) => match parse_fingerprint(root) {

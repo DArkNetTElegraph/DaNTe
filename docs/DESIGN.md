@@ -224,7 +224,14 @@ infrastructure. Reached. ---**
 - Discovery: `ServerRegister` record; private servers simply omit it.
 - **Invite links** *(done)*: `InviteToken { server_root, host_id, channel_id, relay_hint, expires_ms, max_uses, nonce, sig }`, signed by the server root key, rendered `dante-invite:<hex>`. `Engine::create_invite_link` mints one; `redeem_invite` verifies it locally then DMs the host a `ChannelControl::Redeem`; the host checks the signature/expiry/use-count (`invite_uses` map, persisted) and runs the normal channel-invite. The relay is never involved. `serve`: `POST /api/invite-link` / `POST /api/redeem`; CLI: `/invitelink` / `/redeem`.
 - **Member removal** *(done, manual)*: `Engine::remove_from_channel` (host only) mints a server-root-signed `RemoveOrder { server_root, channel_id, member, issued_ms, sig }`, DMs it to every remaining member, drops the member locally, and rotates its own sender chain + signal key (`Group::remove_member`). Each remaining member verifies the order, does the same, and re-keys the others — O(n). The removed member's cached keys go stale; their messages are dropped (`ChannelSession.removed`, persisted; also guards against a stale in-flight `KeyBundle`). **Re-admitting a removed member is not supported** by the sender-keys scheme — recreate the channel (MLS migration fixes this). `serve`: `POST /api/remove`; CLI: `/kick`.
-- **Optional join password:** relay-side check on join + `Argon2id(password)` as an MLS PSK in the group key schedule (content protection, not just gatekeeping).
+- **Optional join password** *(gatekeeping done)*: the host stores
+  `SHA-256("dante/join-pw/v1" || server_root || password)` (`Engine::
+  set_join_password`); an invite-link redemption (`ChannelControl::Redeem`)
+  carries the password and the host checks it before admitting the joiner.
+  Direct invites bypass it. `POST /api/joinpw`, `/joinpw`. The
+  content-protection form (an `Argon2id` PSK woven into the channel key
+  schedule so the password is needed to *decrypt*, not just to join) waits for
+  the MLS migration — sender-keys has no key schedule to mix it into.
 - **Optional per-server auto-kick** *(done)*: `HostedServer.auto_kick_ms` (opt-in, off by default; `Engine::set_auto_kick`). `Engine::sweep_inactive_members` — run periodically by the client — removes any channel member whose ledger identity has had no announce / liveness-proof / rotation within the window (`Ledger::last_activity`), driving the same `remove_from_channel` rekey. Inactivity is measured against **ledger activity**, not chattiness, so a member active elsewhere in DaNTe is safe. `serve` sweeps every 120 s; `POST /api/autokick {server,days}`; CLI `/autokick <root> <days|off>`.
 
 ### Phase 7 — Voice & media  (post-MVP)

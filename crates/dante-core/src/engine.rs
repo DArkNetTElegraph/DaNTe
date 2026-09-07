@@ -125,6 +125,18 @@ pub(crate) struct HostedServer {
     /// whose identity has had no ledger activity for this many ms. Off by
     /// default.
     pub auto_kick_ms: Option<u64>,
+    /// `SHA-256("dante/join-pw/v1" || server_root || password)` — a second
+    /// factor the host checks before honouring an invite-link redemption.
+    pub join_pw_hash: Option<[u8; 32]>,
+}
+
+/// The proof a joiner must present for a password-gated server.
+fn join_pw_hash(server_root: &[u8; 32], pw: &str) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(64 + pw.len());
+    buf.extend_from_slice(b"dante/join-pw/v1");
+    buf.extend_from_slice(server_root);
+    buf.extend_from_slice(pw.as_bytes());
+    sha256(&buf)
 }
 
 /// The client engine.
@@ -233,11 +245,13 @@ impl Engine {
                 }
             }
             let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
+            let joinpw: HashMap<[u8; 32], [u8; 32]> = s.server_join_pw.into_iter().collect();
             for h in s.hosted {
                 engine.hosted.insert(
                     h.root_pub,
                     HostedServer {
                         auto_kick_ms: autokick.get(&h.root_pub).copied(),
+                        join_pw_hash: joinpw.get(&h.root_pub).copied(),
                         name: h.name,
                         root: SignSecret::from_bytes(&h.root_secret),
                         channels: h.channels,
@@ -320,6 +334,11 @@ impl Engine {
                 .hosted
                 .iter()
                 .filter_map(|(root, h)| h.auto_kick_ms.map(|ms| (*root, ms)))
+                .collect(),
+            server_join_pw: self
+                .hosted
+                .iter()
+                .filter_map(|(root, h)| h.join_pw_hash.map(|hash| (*root, hash)))
                 .collect(),
             server_policies: self.server_policies.values().map(|p| p.encode()).collect(),
             seen_envelopes: seen,
@@ -430,6 +449,7 @@ impl Engine {
                 root,
                 channels: vec![],
                 auto_kick_ms: None,
+                join_pw_hash: None,
             },
         );
         self.dirty = true;
@@ -559,9 +579,15 @@ impl Engine {
     }
 
     /// Redeem an invite link: verify it locally, then DM the host a request to
-    /// be added. Joining completes when the host's `Invite` arrives on a later
+    /// be added (with `password` if the server is password-gated). Joining
+    /// completes when the host's `Invite` arrives on a later
     /// [`Engine::receive_all`].
-    pub async fn redeem_invite(&mut self, link: &str, now_ms: u64) -> Result<(), CoreError> {
+    pub async fn redeem_invite(
+        &mut self,
+        link: &str,
+        password: Option<&str>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
         let token = crate::invite::InviteToken::from_link(link)?;
         token.verify()?;
         if token.is_expired(now_ms) {
@@ -573,9 +599,33 @@ impl Engine {
         let host_id = token.host_id;
         let redeem = ChannelControl::Redeem {
             token: token.encode(),
+            pw: password.unwrap_or("").to_owned(),
         };
         self.send_content(&host_id, Content::Channel(redeem.encode()), now_ms)
             .await
+    }
+
+    /// Set (or clear, with `None`) the join password for a server this client
+    /// hosts. It gates invite-link redemption; direct invites bypass it.
+    pub fn set_join_password(
+        &mut self,
+        server_root: &[u8; 32],
+        password: Option<&str>,
+    ) -> Result<(), CoreError> {
+        let h = self
+            .hosted
+            .get_mut(server_root)
+            .ok_or(CoreError::NotServerHost)?;
+        h.join_pw_hash = password.map(|pw| join_pw_hash(server_root, pw));
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Whether a server we host requires a join password.
+    pub fn has_join_password(&self, server_root: &[u8; 32]) -> bool {
+        self.hosted
+            .get(server_root)
+            .is_some_and(|h| h.join_pw_hash.is_some())
     }
 
     /// Eject a member from a channel this client hosts. Issues a server-root-
@@ -1141,7 +1191,7 @@ impl Engine {
                         .await;
                 }
             }
-            ChannelControl::Redeem { token } => {
+            ChannelControl::Redeem { token, pw } => {
                 let token = crate::invite::InviteToken::decode(&token)?;
                 token.verify()?;
                 if token.is_expired(now_ms) || token.host_id != self.my_member_id() {
@@ -1155,6 +1205,12 @@ impl Engine {
                     || !self.hosted.contains_key(&token.server_root)
                 {
                     return Ok(());
+                }
+                // Password gate.
+                if let Some(want) = self.hosted[&token.server_root].join_pw_hash {
+                    if join_pw_hash(&token.server_root, &pw) != want {
+                        return Ok(()); // wrong / missing password — ignore
+                    }
                 }
                 let used = *self.invite_uses.get(&token.nonce).unwrap_or(&0);
                 if token.max_uses != 0 && used >= token.max_uses {

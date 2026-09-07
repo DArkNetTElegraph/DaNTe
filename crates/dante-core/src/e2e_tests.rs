@@ -556,7 +556,7 @@ async fn invite_link_redeem_flow_with_use_limit() {
     assert!(link.starts_with("dante-invite:"));
 
     // Joiner redeems -> DMs the host a request.
-    joiner.redeem_invite(&link, now).await.unwrap();
+    joiner.redeem_invite(&link, None, now).await.unwrap();
     // Host processes it and invites the joiner; settle the bundle exchange.
     for _ in 0..4 {
         for e in [&mut host, &mut joiner] {
@@ -579,7 +579,7 @@ async fn invite_link_redeem_flow_with_use_limit() {
     );
 
     // The link is spent: a second person redeeming it never joins.
-    latecomer.redeem_invite(&link, now).await.unwrap();
+    latecomer.redeem_invite(&link, None, now).await.unwrap();
     for _ in 0..4 {
         for e in [&mut host, &mut latecomer] {
             e.receive_all(now).await.unwrap();
@@ -607,7 +607,7 @@ async fn forged_invite_link_is_rejected() {
     tok.server_root = SignSecret::from_bytes(&[9u8; 32]).public().to_bytes();
 
     assert!(matches!(
-        joiner.redeem_invite(&tok.to_link(), now).await,
+        joiner.redeem_invite(&tok.to_link(), None, now).await,
         Err(crate::CoreError::Invite(_))
     ));
 }
@@ -844,5 +844,62 @@ async fn roles_muting_and_delegated_kick() {
             .unwrap()
             .top_role_name(&alice_id),
         Some("Mod")
+    );
+}
+
+#[tokio::test]
+async fn password_gated_invite_link() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut joiner = engine(&relay).await;
+
+    for e in [&mut host, &mut joiner] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    joiner.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.set_join_password(&server, Some("hunter2")).unwrap();
+    assert!(host.has_join_password(&server));
+    let link = host.create_invite_link(&chan, 3_600_000, 0, now).unwrap();
+
+    // No password, then wrong password: the host ignores the redeem.
+    joiner.redeem_invite(&link, None, now).await.unwrap();
+    joiner
+        .redeem_invite(&link, Some("wrong"), now)
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        host.receive_all(now).await.unwrap();
+        joiner.receive_all(now).await.unwrap();
+    }
+    assert!(
+        joiner.channels().is_empty(),
+        "no join without the right password"
+    );
+
+    // Correct password: the joiner is added.
+    joiner
+        .redeem_invite(&link, Some("hunter2"), now)
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        host.receive_all(now).await.unwrap();
+        joiner.receive_all(now).await.unwrap();
+    }
+    assert!(joiner.channels().iter().any(|c| c.channel_id == chan));
+    host.send_channel(&chan, "welcome", now).await.unwrap();
+    assert_eq!(
+        joiner
+            .poll_channels(now)
+            .await
+            .unwrap()
+            .first()
+            .map(|m| m.text.clone()),
+        Some("welcome".to_string())
     );
 }

@@ -88,9 +88,12 @@ provide.
    Sealed sender hides the *sender* from the relay, not the *recipient*.
    **Channel messages** are worse for metadata than DMs: they go to a per-
    channel relay log keyed by a stable `channel_id` (a 32-byte capability), so a
-   relay sees which channel each opaque message belongs to, plus its size and
-   timing — it just cannot read the content (sender-keys encryption). The
-   `channel_id` is shared only with members, but it does not rotate.
+   relay sees which channel each opaque message belongs to, plus its size class
+   and timing — it just cannot read the content (sender-keys encryption).
+   Channel-log plaintexts are now padded to size buckets (64 B / 256 B / 1 KiB /
+   …) before encryption, so the relay learns only a coarse bucket, not the
+   exact length. The `channel_id` is shared only with members, but it does not
+   rotate.
    **Typing indicators** (DM and channel) add another activity-timing signal: an
    encrypted ephemeral control sent whenever the user is composing. They use a
    dedicated relay signal buffer (topic-keyed, ~12 s TTL, never logged, swept

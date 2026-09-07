@@ -884,6 +884,34 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 }
                 None => println!("usage: /leave #<channel-id>"),
             },
+            "delchannel" => match a {
+                Some(chan) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match parse_fingerprint(chan) {
+                        Ok(cid) => match engine.delete_channel(&cid, now_ms()).await {
+                            Ok(()) => {
+                                if matches!(target, Some(Target::Channel(c)) if *c == cid) {
+                                    *target = None;
+                                }
+                                println!("channel deleted");
+                            }
+                            Err(e) => println!("failed: {e}"),
+                        },
+                        Err(e) => println!("bad channel id: {e}"),
+                    }
+                }
+                None => println!("usage: /delchannel #<channel-id>"),
+            },
+            "delserver" => match a {
+                Some(root) => match parse_fingerprint(root) {
+                    Ok(sr) => match engine.delete_server(&sr, now_ms()).await {
+                        Ok(()) => println!("server deleted and delisted"),
+                        Err(e) => println!("failed: {e}"),
+                    },
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                None => println!("usage: /delserver <server-root>"),
+            },
             "channels" => {
                 for c in engine.channels() {
                     println!(

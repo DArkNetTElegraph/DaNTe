@@ -20,6 +20,7 @@
 //! `POST /api/emoji/remove {server,name}`,
 //! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
 //! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
+//! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
 //! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
@@ -185,6 +186,13 @@ enum Cmd {
     /// Leave a joined channel.
     Leave {
         channel: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Host: delete a channel (`server` empty) or a whole server (`channel`
+    /// empty).
+    Delete {
+        channel: String,
+        server: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// The blocked identities as a ready JSON array of fingerprints.
@@ -1035,6 +1043,33 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::Delete {
+            channel,
+            server,
+            reply,
+        } => {
+            let r = if !server.is_empty() {
+                match parse_fingerprint(&server) {
+                    Ok(sr) => engine
+                        .delete_server(&sr, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            } else {
+                let channel = channel.strip_prefix('#').unwrap_or(&channel);
+                match parse_fingerprint(channel) {
+                    Ok(cid) => engine
+                        .delete_channel(&cid, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            };
+            let _ = reply.send(r);
+        }
         Cmd::Blocked { reply } => {
             let rows: Vec<_> = engine.blocked().into_iter().map(|id| id_b32(&id)).collect();
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
@@ -1631,6 +1666,26 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             };
             dispatch(&mut stream, &shared, |reply| Cmd::Leave {
                 channel: r.channel,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/channel/delete") | ("POST", "/api/server/delete") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                #[serde(default)]
+                channel: String,
+                #[serde(default)]
+                server: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let is_server = path == "/api/server/delete";
+            dispatch(&mut stream, &shared, |reply| Cmd::Delete {
+                channel: if is_server { String::new() } else { r.channel },
+                server: if is_server { r.server } else { String::new() },
                 reply,
             })
             .await

@@ -23,6 +23,9 @@ pub mod merkle;
 pub mod pow;
 pub mod record;
 
+#[cfg(test)]
+mod proptests;
+
 pub use enc::{Reader, WireError, Writer};
 pub use envelope::{Envelope, SealedContent};
 pub use head::{SignedTreeHead, TreeHead};

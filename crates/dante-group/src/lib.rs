@@ -15,5 +15,8 @@
 pub mod error;
 pub mod group;
 
+#[cfg(test)]
+mod proptests;
+
 pub use error::GroupError;
 pub use group::{Group, GroupMessage, GroupState, MemberId, SenderKeyBundle, MAX_SKIP};

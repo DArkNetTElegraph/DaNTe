@@ -13,6 +13,7 @@ dante-crypto.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 hex-literal = "0.4"
 
 [lints.rust]

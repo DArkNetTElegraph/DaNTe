@@ -23,6 +23,9 @@ pub mod sync;
 pub mod transport;
 pub mod wire;
 
+#[cfg(test)]
+mod proptests;
+
 pub use error::NetError;
 pub use mailbox::Mailbox;
 pub use ratelimit::KeyedRateLimiter;

@@ -142,11 +142,36 @@ impl Envelope {
         deposited_ms: u64,
         ttl_ms: u32,
     ) -> Result<Self, CryptoError> {
+        Self::seal_with(
+            recipient_id,
+            recipient_ik_pub,
+            sender_idk.public().to_bytes(),
+            inner,
+            deposited_ms,
+            ttl_ms,
+            |m| sender_idk.sign(m),
+        )
+    }
+
+    /// As [`Envelope::seal`] but the caller supplies the sender's identity
+    /// public key and a signing closure, keeping its secret key encapsulated.
+    pub fn seal_with<F>(
+        recipient_id: &[u8; 32],
+        recipient_ik_pub: &[u8; 32],
+        sender_idk_pub: [u8; 32],
+        inner: &[u8],
+        deposited_ms: u64,
+        ttl_ms: u32,
+        sign: F,
+    ) -> Result<Self, CryptoError>
+    where
+        F: FnOnce(&[u8]) -> [u8; SIG_LEN],
+    {
         let hint = recipient_hint(recipient_id, deposited_ms);
 
         let content = SealedContent {
-            sender_idk: sender_idk.public().to_bytes(),
-            sender_sig: sender_idk.sign(&SealedContent::sig_challenge(&hint, inner)),
+            sender_idk: sender_idk_pub,
+            sender_sig: sign(&SealedContent::sig_challenge(&hint, inner)),
             inner: inner.to_vec(),
         };
         let plain = content.encode();

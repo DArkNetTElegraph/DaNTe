@@ -9,14 +9,19 @@ authors.workspace = true
 description = "DaNTe orchestration engine: wires identity, ledger, networking and DMs into one async API for clients."
 
 [dependencies]
+dante-crypto.workspace = true
 dante-identity.workspace = true
 dante-ledger.workspace = true
+dante-proto.workspace = true
 dante-net.workspace = true
 dante-dm.workspace = true
-dante-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+dante-relay = { path = "../dante-relay", version = "0.0.1" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "test-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"

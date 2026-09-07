@@ -82,6 +82,13 @@ impl Identity {
         self.ik.agree(their_ik)
     }
 
+    /// A clone of the long-term X25519 secret, for operations that need the key
+    /// itself (opening sealed-sender envelopes). Handle as secret material and
+    /// drop promptly.
+    pub fn agreement_secret(&self) -> AgreeSecret {
+        self.ik.clone()
+    }
+
     /// The local message-store key.
     pub fn ratchet_db_key(&self) -> &[u8; 32] {
         &self.ratchet_db_key

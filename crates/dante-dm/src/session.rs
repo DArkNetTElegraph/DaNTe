@@ -89,6 +89,49 @@ impl InitMessage {
     }
 }
 
+/// What travels as the inner payload of a sealed-sender `Envelope` for a DM:
+/// either the conversation-opening handshake or a subsequent message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Packet {
+    /// First contact.
+    Init(InitMessage),
+    /// Any message after the first.
+    Message(DmMessage),
+}
+
+impl Packet {
+    /// Encode with a 1-byte discriminant.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        match self {
+            Packet::Init(m) => {
+                w.u8(1).bytes(&m.encode());
+            }
+            Packet::Message(m) => {
+                w.u8(2).bytes(&m.encode());
+            }
+        }
+        w.into_vec()
+    }
+
+    /// Decode.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(bytes);
+        let out = match r.u8()? {
+            1 => Packet::Init(InitMessage::decode(r.bytes()?)?),
+            2 => Packet::Message(DmMessage::decode(r.bytes()?)?),
+            other => {
+                return Err(WireError::BadDiscriminant {
+                    ty: "dm::Packet",
+                    value: other.into(),
+                })
+            }
+        };
+        r.finish()?;
+        Ok(out)
+    }
+}
+
 /// An established 1:1 session. Not `Clone`: the ratchet is single-use state.
 pub struct Session {
     ratchet: Ratchet,
@@ -205,6 +248,22 @@ mod tests {
         assert_eq!(bob_pks.otps_remaining(), before - 1);
         // replaying the same init (same OTP) now fails
         assert!(Session::accept(&bob, &mut bob_pks, &init).is_err());
+    }
+
+    #[test]
+    fn packet_roundtrip_both_variants() {
+        let (alice, bob, mut bob_pks, bundle) = setup();
+        let (mut a_sess, init) = Session::initiate(&alice, &bundle, b"open").unwrap();
+        let p = Packet::Init(init);
+        assert_eq!(Packet::decode(&p.encode()).unwrap(), p);
+
+        let Packet::Init(init) = p else {
+            unreachable!()
+        };
+        Session::accept(&bob, &mut bob_pks, &init).unwrap();
+        let msg = Packet::Message(a_sess.encrypt(b"next").unwrap());
+        assert_eq!(Packet::decode(&msg.encode()).unwrap(), msg);
+        assert!(Packet::decode(&[9, 0, 0, 0, 0]).is_err());
     }
 
     #[test]

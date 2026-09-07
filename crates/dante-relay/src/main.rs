@@ -7,16 +7,13 @@
 //!
 //! Usage: `dante-relay [--listen ADDR]` (default `0.0.0.0:9944`).
 
-mod state;
-
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dante_ledger::LedgerParams;
 use dante_net::transport::serve;
+use dante_relay::state::{now_ms, Limits, RelayHandler, RelayState};
 use tokio::net::TcpListener;
-
-use crate::state::{Limits, RelayHandler, RelayState};
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
@@ -44,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
             let mut tick = tokio::time::interval(MAINTENANCE_INTERVAL);
             loop {
                 tick.tick().await;
-                let now = state::now_ms();
+                let now = now_ms();
                 let (dropped, evaporated) = handler.state().lock().await.maintain(now);
                 if dropped > 0 || evaporated > 0 {
                     tracing::info!(dropped, evaporated, "maintenance");

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DaNTe</title>
+<style>
+  :root { color-scheme: light dark; --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e9ef; --muted:#8b93a7; --accent:#6ee7b7; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
+  header { padding:.6rem 1rem; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:1rem; align-items:baseline; flex-wrap:wrap; }
+  header b { color:var(--accent); }
+  header .fp { font-family:ui-monospace,monospace; color:var(--muted); word-break:break-all; }
+  #peerbar { padding:.5rem 1rem; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:.5rem; }
+  #peerbar input { flex:1; }
+  input, button { font:inherit; background:#0b0d11; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:.45rem .6rem; }
+  button { background:var(--accent); color:#08130d; border:0; cursor:pointer; font-weight:600; }
+  #log { flex:1; overflow:auto; padding:1rem; display:flex; flex-direction:column; gap:.4rem; }
+  .msg { max-width:70ch; padding:.4rem .6rem; border-radius:8px; background:var(--panel); border:1px solid var(--line); }
+  .msg.me { align-self:flex-end; background:#123326; border-color:#1c5140; }
+  .msg .who { color:var(--muted); font-size:.8em; font-family:ui-monospace,monospace; }
+  .sys { color:var(--muted); font-style:italic; }
+  #composer { display:flex; gap:.5rem; padding:.75rem 1rem; background:var(--panel); border-top:1px solid var(--line); }
+  #composer input { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <b>DaNTe</b>
+  <span>you are <span class="fp" id="me">…</span></span>
+</header>
+<div id="peerbar">
+  <input id="peer" placeholder="peer fingerprint (base32 or 24 words)" spellcheck="false" />
+  <button id="setpeer">set peer</button>
+</div>
+<div id="log"></div>
+<form id="composer">
+  <input id="text" placeholder="message…" autocomplete="off" autofocus />
+  <button>send</button>
+</form>
+<script>
+const $ = s => document.querySelector(s);
+const log = $("#log");
+let peer = null;
+let seen = 0;
+
+function line(cls, who, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  if (who) { const w = document.createElement("div"); w.className = "who"; w.textContent = who; d.appendChild(w); }
+  const t = document.createElement("div"); t.textContent = text; d.appendChild(t);
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+function sys(t){ const d=document.createElement("div"); d.className="sys"; d.textContent=t; log.appendChild(d); log.scrollTop=log.scrollHeight; }
+
+async function init() {
+  const me = await (await fetch("/api/me")).json();
+  $("#me").textContent = me.fingerprint;
+  sys("your word phrase: " + me.words);
+  poll();
+  setInterval(poll, 2000);
+}
+async function poll() {
+  try {
+    const items = await (await fetch("/api/messages?since=" + seen)).json();
+    for (const it of items) {
+      seen = it.seq;
+      if (it.kind === "message") line("", it.from, it.text);
+      else if (it.kind === "file") sys(`${it.from} sent file "${it.filename}" (${it.size} bytes) — saved to ${it.saved}`);
+    }
+  } catch (e) { /* transient */ }
+}
+$("#setpeer").onclick = () => {
+  peer = $("#peer").value.trim();
+  sys(peer ? "peer set" : "peer cleared");
+};
+$("#composer").onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $("#text").value;
+  if (!text || !peer) { if (!peer) sys("set a peer first"); return; }
+  $("#text").value = "";
+  const r = await fetch("/api/send", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ to: peer, text }) });
+  if (r.ok) line("me", "you", text);
+  else sys("send failed: " + (await r.text()));
+};
+init();
+</script>
+</body>
+</html>

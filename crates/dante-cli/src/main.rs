@@ -1,17 +1,19 @@
 //! `dante` — a headless DaNTe client for development and demos.
 //!
 //! ```text
-//! dante gen  --out KEYSTORE                       # generate an identity
-//! dante fp   --keystore KEYSTORE                  # print the fingerprint
-//! dante chat --keystore KEYSTORE --relay ADDR     # interactive session
-//!            [--pow-bits N] [--hint NAME]
+//! dante gen   --out KEYSTORE                       # generate an identity
+//! dante fp    --keystore KEYSTORE                  # print the fingerprint
+//! dante chat  --keystore KEYSTORE --relay ADDR     # interactive terminal session
+//! dante serve --keystore KEYSTORE --relay ADDR     # local web UI
+//!             [--http 127.0.0.1:8080] [--pow-bits N] [--hint NAME]
 //! ```
 //!
 //! The keystore passphrase is read from `DANTE_PASSPHRASE`.
 //!
 //! In `chat`, lines starting with `/` are commands:
-//! `/to <fingerprint>`, `/whoami`, `/peer`, `/quit`. Any other line is sent as
-//! a message to the current peer.
+//! `/to <fingerprint>`, `/file <path>`, `/whoami`, `/peer`, `/quit`.
+
+mod serve;
 
 use std::{collections::HashMap, time::Duration};
 
@@ -23,7 +25,7 @@ use dante_identity::{id::IdentityId, keystore, Identity};
 use dante_ledger::LedgerParams;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -66,7 +68,7 @@ fn short_fp(idk: &[u8; 32]) -> String {
     }
 }
 
-fn parse_fingerprint(s: &str) -> Result<[u8; 32]> {
+pub(crate) fn parse_fingerprint(s: &str) -> Result<[u8; 32]> {
     let s = s.trim();
     let id = if s.contains(' ') {
         IdentityId::from_words(s)
@@ -95,14 +97,56 @@ async fn main() -> Result<()> {
         "gen" => cmd_gen(&flags),
         "fp" => cmd_fp(&flags),
         "chat" => cmd_chat(&flags).await,
+        "serve" => cmd_serve(&flags).await,
         _ => {
             eprintln!(
-                "usage:\n  dante gen  --out KEYSTORE\n  dante fp   --keystore KEYSTORE\n  \
-                 dante chat --keystore KEYSTORE --relay ADDR [--pow-bits N] [--hint NAME]"
+                "usage:\n  dante gen   --out KEYSTORE\n  dante fp    --keystore KEYSTORE\n  \
+                 dante chat  --keystore KEYSTORE --relay ADDR [--pow-bits N] [--hint NAME]\n  \
+                 dante serve --keystore KEYSTORE --relay ADDR [--http 127.0.0.1:8080] [--pow-bits N]"
             );
             std::process::exit(2);
         }
     }
+}
+
+async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
+    let engine = connect_engine(flags).await?;
+    let http = flags
+        .get("http")
+        .cloned()
+        .unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    serve::run(engine, &http).await
+}
+
+/// Shared connect + params logic for `chat` and `serve`.
+async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
+    let identity = load_identity(flags)?;
+    let relay = arg_value(flags, "relay")?;
+    let bits: u8 = flags
+        .get("pow-bits")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let params = LedgerParams {
+        min_announce_pow_bits: bits,
+        min_liveness_pow_bits: bits.saturating_sub(4).max(1),
+        ..Default::default()
+    };
+    // Light Argon2 cost for the local dev path; the deployed network's PoW
+    // floor comes from LedgerParams::default() (64 MiB, t=3, 20 bits).
+    let difficulty = Difficulty {
+        m_cost_kib: 4_096,
+        t_cost: 1,
+        bits,
+    };
+    eprintln!("connecting to relay {relay} (proof of work: {bits} bits) ...");
+    Ok(Engine::connect(
+        identity,
+        PreKeySecrets::generate(50),
+        &relay,
+        params,
+        difficulty,
+    )
+    .await?)
 }
 
 fn cmd_gen(flags: &HashMap<String, String>) -> Result<()> {
@@ -131,37 +175,11 @@ fn cmd_fp(flags: &HashMap<String, String>) -> Result<()> {
 }
 
 async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
-    let identity = load_identity(flags)?;
-    let relay = arg_value(flags, "relay")?;
     let hint = flags.get("hint").cloned().unwrap_or_default();
-    let bits: u8 = flags
-        .get("pow-bits")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20);
-
-    let params = LedgerParams {
-        min_announce_pow_bits: bits,
-        min_liveness_pow_bits: bits.saturating_sub(4).max(1),
-        ..Default::default()
-    };
-    let difficulty = Difficulty {
-        m_cost_kib: 16_384,
-        t_cost: 2,
-        bits,
-    };
-
-    eprintln!("connecting to relay {relay} ...");
-    let mut engine = Engine::connect(
-        identity,
-        PreKeySecrets::generate(50),
-        &relay,
-        params,
-        difficulty,
-    )
-    .await?;
+    let mut engine = connect_engine(flags).await?;
     let my_fp = engine.identity().id().to_base32();
 
-    eprintln!("announcing (solving proof of work, {bits} bits) ...");
+    eprintln!("announcing ...");
     engine.announce(&hint, now_ms()).await?;
     engine.publish_prekeys().await?;
     engine.sync(now_ms()).await?;

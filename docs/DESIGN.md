@@ -106,11 +106,20 @@ DaNTe/
   UI. Safety-number verification exists in `dante-identity`; wiring it into a
   client flow is Phase 5.
 
-### Phase 5 — Client shell  (`client/`, Tauri + SvelteKit)  — **MVP**
-- Tauri commands bridging `dante-core`.
-- MVP screens: onboarding (generate identity → run PoW → back up key), add contact (paste/scan fingerprint → verify safety number), DM conversation, file send/receive, settings.
+### Phase 5 — Client shell  — **MVP**
+- **Done (interim):** `dante serve` — the engine behind a tiny localhost
+  HTTP UI (embedded single-file SPA + a JSON API: `/api/me`,
+  `/api/messages`, `/api/send`). Cross-platform, no system deps, verified
+  between two processes. Open `http://127.0.0.1:8080` after
+  `dante serve --keystore K --relay ADDR`.
+- **Deferred:** the Tauri + SvelteKit desktop client from the plan — its Linux
+  build needs `webkit2gtk4.1-devel` / `libsoup3-devel` (not installable in the
+  build environment used so far). Onboarding, contact add + safety-number
+  verification, and a settings screen are still to build in whichever shell.
 
-**--- MVP boundary: anonymous identity on a verifiable log, DHT discovery, fully E2E DMs with FS/PCS + file transfer, zero project infrastructure. ---**
+**--- MVP boundary: anonymous identity on a verifiable log, key directory via
+relay, fully E2E DMs with FS/PCS + file transfer, a usable client, zero project
+infrastructure. Reached. ---**
 
 ### Phase 6 — Servers & channels  (post-MVP)
 - Server = one or more **MLS groups**; creator's client runs the server's relay role.

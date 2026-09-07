@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use dante_crypto::{hash::sha256, pow::Difficulty};
-use dante_dm::{Packet, PreKeyBundle, PreKeySecrets, Session};
+use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Session};
 use dante_identity::{
     records::{IdentityAnnounce, LivenessProof},
     Identity,
@@ -25,6 +25,23 @@ pub struct ReceivedDm {
     pub from_idk: [u8; 32],
     /// The plaintext.
     pub text: String,
+}
+
+/// Something decrypted from the relay: a text message or a fully reassembled
+/// file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Inbound {
+    /// A text message.
+    Message(ReceivedDm),
+    /// A received file.
+    File {
+        /// Sender's Ed25519 identity key.
+        from_idk: [u8; 32],
+        /// The sender-declared filename (display only — never used as a path).
+        filename: String,
+        /// The decrypted file bytes.
+        data: Vec<u8>,
+    },
 }
 
 /// The client engine.
@@ -118,30 +135,57 @@ impl Engine {
         text: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
+        self.send_content(peer_id, Content::Text(text.to_owned()), now_ms)
+            .await
+    }
+
+    /// Send a file DM: the ciphertext chunks go to the relay blob store, the
+    /// [`FileManifest`] goes through the ratchet like any other message.
+    pub async fn send_file(
+        &mut self,
+        peer_id: &[u8; 32],
+        filename: &str,
+        data: &[u8],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (manifest, chunks) = FileManifest::build(&self.identity, filename, data);
+        for chunk in &chunks {
+            sync::put_blob(&mut self.client, chunk).await?;
+        }
+        self.send_content(peer_id, Content::File(manifest), now_ms)
+            .await
+    }
+
+    async fn send_content(
+        &mut self,
+        peer_id: &[u8; 32],
+        content: Content,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
         let peer_idk = self
             .ledger
             .idk_for_id(peer_id)
             .ok_or(CoreError::UnknownPeer)?;
-        let peer_idk = &peer_idk;
         let peer_id = *peer_id;
         let peer_ik = self
             .ledger
-            .agreement_key(peer_idk)
+            .agreement_key(&peer_idk)
             .ok_or(CoreError::UnknownPeer)?;
+        let plaintext = content.encode();
 
-        let packet = if let Some(session) = self.sessions.get_mut(peer_idk) {
-            Packet::Message(session.encrypt(text.as_bytes())?)
+        let packet = if let Some(session) = self.sessions.get_mut(&peer_idk) {
+            Packet::Message(session.encrypt(&plaintext)?)
         } else {
             let blob = sync::get_prekeys(&mut self.client, &peer_id)
                 .await?
                 .ok_or(CoreError::NoPrekeys)?;
             let bundle = PreKeyBundle::decode(&blob)?;
-            if bundle.idk_pub != *peer_idk || bundle.identity_id != peer_id {
+            if bundle.idk_pub != peer_idk || bundle.identity_id != peer_id {
                 return Err(CoreError::BadPeerPrekeys);
             }
             bundle.verify().map_err(|_| CoreError::BadPeerPrekeys)?;
-            let (session, init) = Session::initiate(&self.identity, &bundle, text.as_bytes())?;
-            self.sessions.insert(*peer_idk, session);
+            let (session, init) = Session::initiate(&self.identity, &bundle, &plaintext)?;
+            self.sessions.insert(peer_idk, session);
             Packet::Init(init)
         };
 
@@ -159,8 +203,23 @@ impl Engine {
         Ok(())
     }
 
-    /// Poll the relay for inbound envelopes and return any newly decrypted DMs.
+    /// Poll the relay and return any newly decrypted messages / files.
+    /// Convenience wrapper returning only text messages.
     pub async fn receive(&mut self, now_ms: u64) -> Result<Vec<ReceivedDm>, CoreError> {
+        Ok(self
+            .receive_all(now_ms)
+            .await?
+            .into_iter()
+            .filter_map(|i| match i {
+                Inbound::Message(m) => Some(m),
+                Inbound::File { .. } => None,
+            })
+            .collect())
+    }
+
+    /// Poll the relay for inbound envelopes; decrypt messages and reassemble
+    /// files (fetching their chunks from the blob store).
+    pub async fn receive_all(&mut self, now_ms: u64) -> Result<Vec<Inbound>, CoreError> {
         let my_id = *self.identity.id().as_bytes();
         let hints = [
             recipient_hint(&my_id, now_ms),
@@ -182,44 +241,72 @@ impl Engine {
             if !self.seen_envelopes.insert(tag) {
                 continue;
             }
-            let Ok(content) = env.open(&ik) else { continue };
-            let Ok(packet) = Packet::decode(&content.inner) else {
+            let Ok(sealed) = env.open(&ik) else { continue };
+            let Ok(packet) = Packet::decode(&sealed.inner) else {
                 continue;
             };
-            match self.handle_packet(&content.sender_idk, packet) {
-                Ok(Some(text)) => out.push(ReceivedDm {
-                    from_idk: content.sender_idk,
+            let from = sealed.sender_idk;
+
+            let plaintext = match self.decrypt_packet(&from, packet) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!(error = %e, "dropping undecryptable inbound packet");
+                    continue;
+                }
+            };
+            match Content::decode(&plaintext) {
+                Ok(Content::Text(text)) => out.push(Inbound::Message(ReceivedDm {
+                    from_idk: from,
                     text,
-                }),
-                Ok(None) => {}
-                Err(e) => tracing::debug!(error = %e, "dropping undecryptable inbound packet"),
+                })),
+                Ok(Content::File(manifest)) => match self.fetch_file(manifest).await {
+                    Ok((filename, data)) => out.push(Inbound::File {
+                        from_idk: from,
+                        filename,
+                        data,
+                    }),
+                    Err(e) => tracing::debug!(error = %e, "dropping file with a failed transfer"),
+                },
+                Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }
         }
         self.last_fetch_since_ms = now_ms.saturating_sub(2 * dante_proto::envelope::EPOCH_MS);
         Ok(out)
     }
 
-    fn handle_packet(
+    fn decrypt_packet(
         &mut self,
         from_idk: &[u8; 32],
         packet: Packet,
-    ) -> Result<Option<String>, CoreError> {
+    ) -> Result<Vec<u8>, CoreError> {
         match packet {
             Packet::Init(init) => {
                 let (session, plaintext) =
                     Session::accept(&self.identity, &mut self.prekeys, &init)?;
                 self.sessions.insert(*from_idk, session);
-                Ok(Some(String::from_utf8_lossy(&plaintext).into_owned()))
+                Ok(plaintext)
             }
             Packet::Message(msg) => {
                 let session = self
                     .sessions
                     .get_mut(from_idk)
                     .ok_or(CoreError::NoSession)?;
-                let plaintext = session.decrypt(&msg)?;
-                Ok(Some(String::from_utf8_lossy(&plaintext).into_owned()))
+                Ok(session.decrypt(&msg)?)
             }
         }
+    }
+
+    async fn fetch_file(&mut self, manifest: FileManifest) -> Result<(String, Vec<u8>), CoreError> {
+        manifest.verify()?;
+        let mut chunks = Vec::with_capacity(manifest.blob_hashes().len());
+        for hash in manifest.blob_hashes() {
+            let blob = sync::get_blob(&mut self.client, hash)
+                .await?
+                .ok_or(CoreError::MissingBlob)?;
+            chunks.push(blob);
+        }
+        let data = manifest.reassemble(&chunks)?;
+        Ok((manifest.filename.clone(), data))
     }
 
     /// Records currently in the local replica (for inspection / tests).

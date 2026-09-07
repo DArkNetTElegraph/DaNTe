@@ -167,7 +167,10 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     engine.sync(now_ms()).await?;
 
     println!("you are {my_fp}");
-    println!("commands: /to <fingerprint>   /whoami   /peer   /quit");
+    println!(
+        "commands: /to <fingerprint>   /file <path>   /whoami   /peer   /quit\n\
+         (received files are written to ./dante-recv-<name>)"
+    );
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -178,10 +181,29 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
             _ = tick.tick() => {
                 let now = now_ms();
                 let _ = engine.sync(now).await;
-                match engine.receive(now).await {
-                    Ok(msgs) => {
-                        for m in msgs {
-                            println!("<{}> {}", short_fp(&m.from_idk), m.text);
+                match engine.receive_all(now).await {
+                    Ok(items) => {
+                        for item in items {
+                            match item {
+                                dante_core::Inbound::Message(m) => {
+                                    println!("<{}> {}", short_fp(&m.from_idk), m.text);
+                                }
+                                dante_core::Inbound::File { from_idk, filename, data } => {
+                                    let safe = filename
+                                        .rsplit(['/', '\\'])
+                                        .next()
+                                        .unwrap_or("file")
+                                        .replace(['/', '\\', '\0'], "_");
+                                    let out = format!("dante-recv-{safe}");
+                                    match std::fs::write(&out, &data) {
+                                        Ok(()) => println!(
+                                            "<{}> sent file \"{}\" ({} bytes) -> {}",
+                                            short_fp(&from_idk), filename, data.len(), out
+                                        ),
+                                        Err(e) => eprintln!("could not save received file: {e}"),
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => eprintln!("receive error: {e}"),
@@ -228,6 +250,23 @@ async fn handle_line(engine: &mut Engine, peer: &mut Option<[u8; 32]>, line: &st
                     Err(e) => println!("bad fingerprint: {e}"),
                 },
                 None => println!("usage: /to <fingerprint>"),
+            },
+            "file" => match (*peer, parts.next()) {
+                (Some(p), Some(path)) => match std::fs::read(path) {
+                    Ok(data) => {
+                        let name = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file");
+                        match engine.send_file(&p, name, &data, now_ms()).await {
+                            Ok(()) => println!("sent \"{name}\" ({} bytes)", data.len()),
+                            Err(e) => println!("send failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("cannot read {path}: {e}"),
+                },
+                (None, _) => println!("set a peer first: /to <fingerprint>"),
+                (_, None) => println!("usage: /file <path>"),
             },
             other => println!("unknown command: /{other}"),
         }

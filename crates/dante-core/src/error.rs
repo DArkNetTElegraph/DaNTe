@@ -43,4 +43,8 @@ pub enum CoreError {
     /// A message arrived for a conversation we have no session for.
     #[error("no session for an inbound message")]
     NoSession,
+
+    /// A file's chunk is no longer in the relay blob store (expired).
+    #[error("a file chunk is missing from the relay")]
+    MissingBlob,
 }

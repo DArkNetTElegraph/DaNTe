@@ -98,9 +98,13 @@ DaNTe/
   demoed live between two `dante` CLI processes over TCP through a relay.
 - **Done:** `dante-cli` (`dante gen` / `fp` / `chat`) — a scriptable headless
   client.
-- **Deferred:** chunked encrypted file transfer; encrypted local message store
-  (`rusqlite`); petname assignment UI. Safety-number verification exists in
-  `dante-identity`; wiring it into a client flow is Phase 5.
+- **Done:** chunked encrypted file transfer — `dante_dm::FileManifest`
+  (per-file XChaCha20-Poly1305 key, per-chunk nonce, signed manifest of
+  ciphertext-chunk hashes), relay `PutBlob`/`GetBlob` TTL'd blob store,
+  `Engine::send_file` / `receive_all`, `dante chat /file <path>`.
+- **Deferred:** encrypted local message store (`rusqlite`); petname assignment
+  UI. Safety-number verification exists in `dante-identity`; wiring it into a
+  client flow is Phase 5.
 
 ### Phase 5 — Client shell  (`client/`, Tauri + SvelteKit)  — **MVP**
 - Tauri commands bridging `dante-core`.

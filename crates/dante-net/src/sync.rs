@@ -96,6 +96,22 @@ pub async fn get_prekeys(
     }
 }
 
+/// Store a ciphertext blob (a file chunk) at the relay. Idempotent.
+pub async fn put_blob(client: &mut Client, bytes: &[u8]) -> Result<(), NetError> {
+    match client.request(&Request::PutBlob(bytes.to_vec())).await? {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("PutBlob: {other:?}"))),
+    }
+}
+
+/// Retrieve a blob by its `SHA-256`, if the relay still holds it.
+pub async fn get_blob(client: &mut Client, hash: &[u8; 32]) -> Result<Option<Vec<u8>>, NetError> {
+    match client.request(&Request::GetBlob(*hash)).await? {
+        Response::Blob(b) => Ok(b),
+        _ => Err(NetError::UnexpectedResponse("GetBlob")),
+    }
+}
+
 /// Fetch and decode mailbox envelopes for `hints` since `since_ms`.
 pub async fn fetch(
     client: &mut Client,

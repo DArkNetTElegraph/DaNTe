@@ -50,11 +50,19 @@ pub struct RelayState {
     mailbox: Mailbox,
     /// `identity_id` -> latest published, encoded `PreKeyBundle`.
     prekeys: std::collections::HashMap<[u8; 32], Vec<u8>>,
+    /// `SHA-256(bytes)` -> (ciphertext blob, deposited_ms). File chunks.
+    blobs: std::collections::HashMap<[u8; 32], (Vec<u8>, u64)>,
+    blob_bytes: usize,
     announce_rl: KeyedRateLimiter<IpAddr>,
     record_rl: KeyedRateLimiter<IpAddr>,
     deposit_rl: KeyedRateLimiter<IpAddr>,
     max_get_records: u64,
 }
+
+/// Total blob-store budget (all file chunks). 128 MiB.
+const BLOB_STORE_CAP: usize = 128 * 1024 * 1024;
+/// A blob is dropped this long after it was stored.
+const BLOB_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 impl RelayState {
     /// Fresh relay state.
@@ -63,6 +71,8 @@ impl RelayState {
             ledger: Ledger::new(MemoryStore::default(), params),
             mailbox: Mailbox::new(),
             prekeys: std::collections::HashMap::new(),
+            blobs: std::collections::HashMap::new(),
+            blob_bytes: 0,
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
             deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
@@ -83,6 +93,15 @@ impl RelayState {
         ] {
             rl.sweep(now, 3_600_000);
         }
+        let mut freed = 0usize;
+        self.blobs.retain(|_, (bytes, at)| {
+            let keep = now.saturating_sub(*at) <= BLOB_TTL_MS;
+            if !keep {
+                freed += bytes.len();
+            }
+            keep
+        });
+        self.blob_bytes -= freed;
         (dropped, evaporated)
     }
 
@@ -169,6 +188,23 @@ impl RelayState {
             }
 
             Request::GetPrekeys(id) => Response::Prekeys(self.prekeys.get(&id).cloned()),
+
+            Request::PutBlob(bytes) => {
+                if !self.deposit_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                let hash = dante_crypto::hash::sha256(&bytes);
+                if !self.blobs.contains_key(&hash) {
+                    if self.blob_bytes + bytes.len() > BLOB_STORE_CAP {
+                        return Response::Error("blob store full".into());
+                    }
+                    self.blob_bytes += bytes.len();
+                    self.blobs.insert(hash, (bytes, now));
+                }
+                Response::Ok
+            }
+
+            Request::GetBlob(hash) => Response::Blob(self.blobs.get(&hash).map(|(b, _)| b.clone())),
         }
     }
 }

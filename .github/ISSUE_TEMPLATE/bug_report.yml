@@ -1,0 +1,62 @@
+name: Bug report
+description: Something behaves incorrectly (not a security vulnerability)
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security vulnerabilities here.** Follow
+        [SECURITY.md](https://github.com/DArkNetTElegraph/DaNTe/blob/main/SECURITY.md).
+
+        DaNTe is pre-1.0 and only `main` is supported.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true
+        - label: I searched existing issues and Discussions for a duplicate.
+          required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit hash
+      description: Output of `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: "Fedora 41 / Windows 11 / macOS 15"
+    validations:
+      required: true
+  - type: input
+    id: rust
+    attributes:
+      label: Rust toolchain
+      description: Output of `rustc -V` (only if you built it yourself).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output with `RUST_LOG=debug`. Redact keys, fingerprints, and message content.
+      render: text

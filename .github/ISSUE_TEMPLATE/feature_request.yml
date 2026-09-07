@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a capability or change
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Larger or protocol-affecting proposals are usually better as a
+        [Discussion](https://github.com/DArkNetTElegraph/DaNTe/discussions) first.
+        See the roadmap in
+        [docs/DESIGN.md](https://github.com/DArkNetTElegraph/DaNTe/blob/main/docs/DESIGN.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today? Who is affected and when?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Related roadmap phase
+      description: See docs/DESIGN.md. Pick the earliest phase this could land in.
+      options:
+        - "Phase 1 — identity & keystore"
+        - "Phase 2 — verifiable ledger"
+        - "Phase 3 — networking & relay"
+        - "Phase 4 — 1:1 DMs (MVP)"
+        - "Phase 5 — client shell (MVP)"
+        - "Phase 6 — servers & channels"
+        - "Phase 7 — voice & media"
+        - "Phase 8 — rich features"
+        - "Unsure / cross-cutting"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: security
+    attributes:
+      label: Security / privacy impact
+      description: Does this change what a relay, server admin, or network observer can learn or do? Reference docs/THREAT_MODEL.md.

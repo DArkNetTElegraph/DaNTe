@@ -1,0 +1,18 @@
+[package]
+name = "dante-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DaNTe verifiable append-only log: records, Merkle tree, proofs, evaporation GC, replication."
+
+[dependencies]
+dante-crypto.workspace = true
+dante-proto.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

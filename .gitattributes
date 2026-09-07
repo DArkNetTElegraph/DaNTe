@@ -1,0 +1,9 @@
+# Normalize all text to LF in the repo; check out LF everywhere (this is a
+# cross-platform project whose primary target is Linux).
+* text=auto eol=lf
+
+# Explicit binary types (none yet, but future-proof).
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

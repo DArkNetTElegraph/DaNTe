@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/DArkNetTElegraph/DaNTe/security/advisories/new
+    about: Report privately via a GitHub Security Advisory. Never file a public issue for a vulnerability — see SECURITY.md.
+  - name: Question or design discussion
+    url: https://github.com/DArkNetTElegraph/DaNTe/discussions
+    about: Usage questions, protocol/architecture debate, and roadmap proposals belong in Discussions.

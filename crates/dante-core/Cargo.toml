@@ -1,0 +1,22 @@
+[package]
+name = "dante-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DaNTe orchestration engine: wires identity, ledger, networking and DMs into one async API for clients."
+
+[dependencies]
+dante-identity.workspace = true
+dante-ledger.workspace = true
+dante-net.workspace = true
+dante-dm.workspace = true
+dante-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

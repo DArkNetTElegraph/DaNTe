@@ -1,0 +1,23 @@
+[package]
+name = "dante-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Headless DaNTe client for development and the integration test harness."
+
+[[bin]]
+name = "dante"
+path = "src/main.rs"
+
+[dependencies]
+dante-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

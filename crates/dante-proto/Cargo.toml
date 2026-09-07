@@ -1,0 +1,16 @@
+[package]
+name = "dante-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Canonical wire types for DaNTe (records, envelopes, framing). Serialization only, no logic."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

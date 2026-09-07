@@ -1,0 +1,18 @@
+[package]
+name = "dante-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DaNTe networking: libp2p transport, DHT, gossipsub, request-response, relay client."
+
+[dependencies]
+dante-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

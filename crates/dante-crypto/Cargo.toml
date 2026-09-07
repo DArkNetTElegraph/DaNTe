@@ -1,0 +1,17 @@
+[package]
+name = "dante-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Cryptographic primitives for DaNTe: X25519, Ed25519, AEAD, HKDF, Argon2id PoW, Double Ratchet and MLS wrappers."
+
+[dependencies]
+thiserror.workspace = true
+zeroize.workspace = true
+rand_core.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

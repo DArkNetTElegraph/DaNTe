@@ -1,0 +1,22 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Tauri / client
+/client/node_modules
+/client/dist
+/client/.svelte-kit
+/client/src-tauri/target
+
+# Local runtime state / keys — must never be committed
+*.dante-key
+*.keystore
+/.dante-data/
+**/dante-local-state/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

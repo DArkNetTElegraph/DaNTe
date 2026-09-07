@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dante-crypto",
+    "crates/dante-identity",
+    "crates/dante-ledger",
+    "crates/dante-proto",
+    "crates/dante-net",
+    "crates/dante-relay",
+    "crates/dante-dm",
+    "crates/dante-core",
+    "crates/dante-cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.82"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/DArkNetTElegraph/DaNTe"
+authors = ["The DaNTe contributors"]
+
+[workspace.dependencies]
+# Internal crates
+dante-crypto = { path = "crates/dante-crypto" }
+dante-identity = { path = "crates/dante-identity" }
+dante-ledger = { path = "crates/dante-ledger" }
+dante-proto = { path = "crates/dante-proto" }
+dante-net = { path = "crates/dante-net" }
+dante-dm = { path = "crates/dante-dm" }
+dante-core = { path = "crates/dante-core" }
+
+# Shared third-party deps (kept minimal; phases add their own)
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Crypto and hashing want optimization even in dev/test.
+[profile.dev.package."*"]
+opt-level = 2

@@ -28,6 +28,7 @@
   .msg .who { color:var(--muted); font-size:.8em; font-family:ui-monospace,monospace; }
   .msg .chan { color:var(--accent); font-size:.8em; }
   .sys { color:var(--muted); font-style:italic; }
+  #typing { height:1.1rem; padding:0 1rem; font-size:.8em; color:var(--muted); font-style:italic; }
   #composer { display:flex; gap:.5rem; padding:.75rem 1rem; background:var(--panel); border-top:1px solid var(--line); }
   #composer input { flex:1; }
 </style>
@@ -47,10 +48,14 @@
 <div id="chans"><span class="lbl">channels:</span></div>
 <div id="targetbar"><span id="target">no target</span></div>
 <div id="log"></div>
+<div id="typing"></div>
 <form id="composer">
   <input id="text" placeholder="message…" autocomplete="off" autofocus />
   <button>send</button>
 </form>
+<label style="padding:0 1rem .5rem;font-size:.8em;color:var(--muted)">
+  <input type="checkbox" id="typingopt" checked /> broadcast when I'm typing
+</label>
 <script>
 const $ = s => document.querySelector(s);
 const log = $("#log");
@@ -107,6 +112,26 @@ async function init() {
   poll();
   setInterval(poll, 2000);
   setInterval(refreshChans, 5000);
+  setInterval(pollTyping, 1500);
+}
+
+async function pollTyping() {
+  try {
+    const r = await (await fetch("/api/typing")).json();
+    $("#typing").textContent = r.text || "";
+  } catch (e) { /* transient */ }
+}
+
+let lastTypingSent = 0;
+function noteTyping() {
+  if (!$("#typingopt").checked || !target) return;
+  const now = Date.now();
+  if (now - lastTypingSent < 3000) return;   // rate-limit: one signal per 3 s
+  lastTypingSent = now;
+  fetch("/api/typing", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ to: target }),
+  }).catch(() => {});
 }
 
 async function poll() {
@@ -150,6 +175,8 @@ $("#invite").onclick = async () => {
   const r = await post("/api/invite", { channel, peer });
   if (r) sys("invite sent");
 };
+
+$("#text").addEventListener("input", noteTyping);
 
 $("#composer").onsubmit = async (e) => {
   e.preventDefault();

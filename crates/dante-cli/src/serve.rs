@@ -5,7 +5,8 @@
 //! `GET /api/me`, `GET /api/messages?since=N`, `GET /api/channels`,
 //! `POST /api/send {to,text}` (`to` may be a fingerprint or `#<channel-id>`),
 //! `POST /api/server {name}`, `POST /api/channel {server,name}`,
-//! `POST /api/invite {channel,peer}`.
+//! `POST /api/invite {channel,peer}`, `GET /api/typing`,
+//! `POST /api/typing {to}`.
 
 use std::{
     collections::VecDeque,
@@ -17,7 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use dante_core::{Engine, Inbound};
+use dante_core::{Engine, Inbound, TypingScope};
 use dante_identity::id::IdentityId;
 use serde::Serialize;
 use tokio::{
@@ -30,6 +31,8 @@ use crate::{now_ms, parse_fingerprint};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const INBOX_CAP: usize = 500;
+/// A typing signal is shown for this long after it was last seen.
+const TYPING_FRESH_MS: u64 = 6_000;
 
 /// A request from the HTTP side to the single engine task. The reply carries a
 /// string (an id / root on success, or an error message).
@@ -53,6 +56,8 @@ enum Cmd {
         peer: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
+    Typing { to: String },
 }
 
 #[derive(Clone, Serialize)]
@@ -97,6 +102,8 @@ struct ChanView {
 struct Shared {
     inbox: Mutex<VecDeque<Item>>,
     channels: Mutex<Vec<ChanView>>,
+    /// Recently-seen typers: `(who label, last-seen ms)`. Pruned on read.
+    typing: Mutex<Vec<(String, u64)>>,
     /// Monotonic id stamped on every inbox item, drawn by both the engine tick
     /// loop and command handlers so the SPA's `since` cursor never regresses.
     next_seq: AtomicU64,
@@ -149,6 +156,7 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
     let shared = Arc::new(Shared {
         inbox: Mutex::new(VecDeque::new()),
         channels: Mutex::new(Vec::new()),
+        typing: Mutex::new(Vec::new()),
         next_seq: AtomicU64::new(0),
         me_fingerprint: engine.identity().id().to_base32(),
         me_words: engine.identity().id().to_words(),
@@ -280,6 +288,24 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                             while inbox.len() > INBOX_CAP { inbox.pop_front(); }
                         }
                     }
+
+                    if let Ok(events) = engine.poll_typing(now).await {
+                        let mut typing = engine_shared.typing.lock().await;
+                        for ev in events {
+                            let who = match ev.scope {
+                                TypingScope::Dm(_) => short_fp(&ev.who),
+                                TypingScope::Channel(_) => short_id(&ev.who),
+                            };
+                            // Key freshness off the signal's own timestamp so a
+                            // still-served-but-stale signal ages out on time.
+                            match typing.iter_mut().find(|(w, _)| *w == who) {
+                                Some(e) => e.1 = e.1.max(ev.at_ms),
+                                None => typing.push((who, ev.at_ms)),
+                            }
+                        }
+                        typing.retain(|(_, at)| now.saturating_sub(*at) <= TYPING_FRESH_MS);
+                    }
+
                     refresh_channels(&engine, &engine_shared).await;
                 }
             }
@@ -379,6 +405,30 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::Typing { to } => {
+            // DM only for now; channel typing needs the group signal key.
+            if let Ok((false, id)) = parse_target(&to) {
+                let _ = engine.send_typing_dm(&id, now_ms()).await;
+            }
+        }
+    }
+}
+
+/// Render the design's typing-indicator rule over the currently-fresh typers.
+fn typing_text(entries: &[(String, u64)], now: u64) -> String {
+    let mut who: Vec<&str> = entries
+        .iter()
+        .filter(|(_, seen)| now.saturating_sub(*seen) <= TYPING_FRESH_MS)
+        .map(|(w, _)| w.as_str())
+        .collect();
+    who.sort_unstable();
+    who.dedup();
+    match who.as_slice() {
+        [] => String::new(),
+        [a] => format!("{a} is typing…"),
+        [a, b] => format!("{a} and {b} are typing…"),
+        [a, b, c] => format!("{a}, {b} and {c} are typing…"),
+        _ => "several people are typing…".to_string(),
     }
 }
 
@@ -450,6 +500,28 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             let chans = shared.channels.lock().await;
             let body = serde_json::to_string(&*chans).unwrap_or_else(|_| "[]".into());
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/typing") => {
+            let text = {
+                let mut typing = shared.typing.lock().await;
+                let now = now_ms();
+                typing.retain(|(_, seen)| now.saturating_sub(*seen) <= TYPING_FRESH_MS);
+                typing_text(&typing, now)
+            };
+            let body = serde_json::json!({ "text": text }).to_string();
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/typing") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                to: String,
+            }
+            if let Ok(r) = serde_json::from_slice::<Req>(&body) {
+                let _ = shared.cmd.send(Cmd::Typing { to: r.to }).await;
+            }
+            respond(&mut stream, 200, "application/json", b"{\"ok\":\"ok\"}").await
         }
 
         ("GET", "/api/messages") => {
@@ -575,4 +647,37 @@ async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) ->
     stream.write_all(body).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{typing_text, TYPING_FRESH_MS};
+
+    const NOW: u64 = 1_000_000;
+
+    fn e(names: &[&str], age: u64) -> Vec<(String, u64)> {
+        names
+            .iter()
+            .map(|n| (n.to_string(), NOW.saturating_sub(age)))
+            .collect()
+    }
+
+    #[test]
+    fn typing_text_applies_the_coalescing_rule() {
+        assert_eq!(typing_text(&e(&[], 0), NOW), "");
+        assert_eq!(typing_text(&e(&["A"], 0), NOW), "A is typing…");
+        assert_eq!(typing_text(&e(&["A", "B"], 0), NOW), "A and B are typing…");
+        assert_eq!(
+            typing_text(&e(&["A", "B", "C"], 0), NOW),
+            "A, B and C are typing…"
+        );
+        assert_eq!(
+            typing_text(&e(&["A", "B", "C", "D"], 0), NOW),
+            "several people are typing…"
+        );
+        // Stale entries are ignored.
+        assert_eq!(typing_text(&e(&["A"], TYPING_FRESH_MS + 1), NOW), "");
+        // Duplicates collapse.
+        assert_eq!(typing_text(&e(&["A", "A"], 0), NOW), "A is typing…");
+    }
 }

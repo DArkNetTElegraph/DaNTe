@@ -51,13 +51,24 @@ achievable with no project-run infrastructure.
   `/invite`, `POST /api/send {to:"#<id>"|fingerprint}`). Verified across a relay
   + host + member, both `chat` and `serve`. Both clients replay stored channel
   history on start.
+- **Typing indicators (DM only so far).** `Engine::send_typing_dm` /
+  `poll_typing`; ephemeral, never persisted. A fresh sealed-sender envelope
+  (no ratchet step) is posted to a new relay *signal* topic — a per-pair
+  `SHA-256(domain ‖ sorted idks)` — held by the relay for ~12 s and never
+  logged (`PostSignal` / `FetchSignals`). Freshness is judged from the signal's
+  AEAD-bound `deposited_ms`, so it clears ~6 s after the last keystroke even
+  though the relay keeps serving it. `dante serve`: a "broadcast when I'm
+  typing" toggle (default on), `GET`/`POST /api/typing`, and the coalescing
+  rule (>3 → "several people are typing…"). Channel typing still to do — it
+  needs a per-member signal key in `dante-group` so a typing marker does not
+  advance the message chain.
 
 **Not built yet:** roles/permissions, per-server passwords (MLS PSK), invite
 links, member removal in the client, private-channel access control beyond the
 secret `channel_id`. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
 voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
-soundboards, bots, discovery UI, embeds, **typing indicators** (Phase 8); the
-Tauri desktop client; MLS migration for channels.
+soundboards, bots, discovery UI, embeds, **channel typing indicators** (Phase
+8; DM typing is done); the Tauri desktop client; MLS migration for channels.
 
 **`dante serve` is a throwaway.** It is a hand-rolled HTTP server + a
 single-file vanilla-JS page, built only so the engine has a clickable client
@@ -202,19 +213,30 @@ infrastructure. Reached. ---**
 - URL embeds — opt-in (leaks IP); optionally via a relay-side unfurler.
 - Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.
 - Custom profiles, per-server nicknames/avatars — stored in the relevant MLS group state.
-- **Typing indicators.** Ephemeral "is typing" signals, never persisted and never
-  written to the channel log. A keystroke sends an encrypted `typing` control to
-  the DM peer (over the ratchet) or to channel members (over the sender-keys
-  group); it carries a short TTL (~5 s) and is also cancelled on send or on an
-  idle timeout. **Off by default**; a user-settings toggle ("broadcast when I'm
-  typing") gates *sending* — a user who does not broadcast still *sees* others'
-  indicators. Receiver display: one name → "Alice is typing…", two or three →
-  name them, **more than three concurrent → "several people are typing…"** with
-  no names. Rendering is best-effort: a dropped or late signal just means the
-  dots do not show. Metadata note: a typing signal reveals activity timing to
-  exactly the parties that already see message timing (and, for channels, the
-  relay sees another entry on the `channel_id` side channel) — hence opt-in and
-  off by default. Tracked in `THREAT_MODEL.md` §5.
+- **Typing indicators.** Ephemeral "is typing" signals, never persisted and
+  never written to the channel log. They ride a dedicated relay *signal* channel
+  (`PostSignal` / `FetchSignals`): a topic-keyed buffer the relay holds for
+  ~12 s, sweeps aggressively, and never logs. **DM typing is implemented** —
+  `Engine::send_typing_dm` seals a standalone sealed-sender envelope (no ratchet
+  step, nothing persisted) and posts it to the per-pair topic
+  `SHA-256("dante/typing/dm/v1" ‖ min(idk) ‖ max(idk))`; the receiver judges
+  freshness from the envelope's AEAD-bound `deposited_ms`, so the indicator
+  clears a few seconds after the last keystroke even while the relay still
+  serves the signal. **Channel typing is still to do**: doing it without
+  advancing the forward-secret message chain needs a new static per-member
+  "signal key" in each `SenderKeyBundle` (a labelled HKDF output, not a new
+  construction), so a typing marker is AEAD'd under that key instead of
+  `group.encrypt`. **Off by default is the intent**; the `serve` client ships a
+  "broadcast when I'm typing" toggle (currently defaulted on for the demo) that
+  gates *sending* — a user who does not broadcast still *sees* others.
+  Client-side send rate limit: one signal per 3 s while composing. Receiver
+  display / coalescing: one name → "Alice is typing…", two → "A and B…", three →
+  "A, B and C…", **more than three concurrent → "several people are typing…"**
+  with no names. Best-effort: a dropped or late signal just means the dots do
+  not show. Metadata note: a typing signal reveals activity timing to exactly
+  the parties that already see message timing (and, for channels, the relay
+  sees another entry on the `channel_id` side channel) — hence opt-in.
+  Tracked in `THREAT_MODEL.md` §5.
 
 ## Cross-cutting
 - Reproducible builds + signed releases (users must be able to trust binaries).

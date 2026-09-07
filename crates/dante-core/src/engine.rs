@@ -36,6 +36,13 @@ const SEEN_CAP: usize = 5000;
 /// Cap on persisted channel-history lines (oldest dropped first).
 const CHANNEL_HISTORY_CAP: usize = 2000;
 
+/// TTL on a typing signal's carrier envelope. Deliberately short: a stale
+/// "is typing" is worse than a missing one.
+const TYPING_TTL_MS: u32 = 10_000;
+
+/// Domain tag for the shared per-conversation typing-signal topic.
+const DM_TYPING_TOPIC_DOMAIN: &[u8] = b"dante/typing/dm/v1";
+
 /// A decrypted inbound direct message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceivedDm {
@@ -43,6 +50,30 @@ pub struct ReceivedDm {
     pub from_idk: [u8; 32],
     /// The plaintext.
     pub text: String,
+}
+
+/// Where a typing signal belongs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypingScope {
+    /// A 1:1 conversation with the peer whose Ed25519 identity key this is.
+    Dm([u8; 32]),
+    /// A channel, by `channel_id`.
+    Channel([u8; 32]),
+}
+
+/// An ephemeral "someone is typing" event. Not persisted; the caller shows it
+/// for a few seconds and then forgets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypingEvent {
+    /// The conversation the signal is for.
+    pub scope: TypingScope,
+    /// The typer: an Ed25519 identity key for `Dm`, a member id for `Channel`.
+    pub who: [u8; 32],
+    /// When the signal was created (its carrier's `deposited_ms`, AEAD-bound).
+    /// Freshness is judged from this, not from when it was fetched, so a signal
+    /// stops showing a few seconds after the last keystroke even though the
+    /// relay keeps serving it until its TTL.
+    pub at_ms: u64,
 }
 
 /// Something decrypted from the relay: a text message or a fully reassembled
@@ -588,6 +619,85 @@ impl Engine {
             .await
     }
 
+    /// The shared relay topic both ends of a DM derive for typing signals:
+    /// `SHA-256(domain || min(idk) || max(idk))`. Order-independent so either
+    /// party computes the same value; opaque to the relay.
+    fn dm_typing_topic(&self, peer_idk: &[u8; 32]) -> [u8; 32] {
+        let mine = self.identity.sign_public().to_bytes();
+        let (lo, hi) = if mine <= *peer_idk {
+            (mine, *peer_idk)
+        } else {
+            (*peer_idk, mine)
+        };
+        let mut buf = Vec::with_capacity(DM_TYPING_TOPIC_DOMAIN.len() + 64);
+        buf.extend_from_slice(DM_TYPING_TOPIC_DOMAIN);
+        buf.extend_from_slice(&lo);
+        buf.extend_from_slice(&hi);
+        sha256(&buf)
+    }
+
+    /// Broadcast a short-lived "I am typing" signal to a DM peer. Stateless:
+    /// it seals a fresh sealed-sender envelope (no ratchet step, nothing
+    /// persisted) and posts it to the pair's ephemeral relay topic. Callers
+    /// gate this on a user setting and rate-limit it.
+    pub async fn send_typing_dm(
+        &mut self,
+        peer_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let peer_idk = self
+            .ledger
+            .idk_for_id(peer_id)
+            .ok_or(CoreError::UnknownPeer)?;
+        let peer_ik = self
+            .ledger
+            .agreement_key(&peer_idk)
+            .ok_or(CoreError::UnknownPeer)?;
+        let topic = self.dm_typing_topic(&peer_idk);
+        let env = Envelope::seal_with(
+            peer_id,
+            &peer_ik,
+            self.identity.sign_public().to_bytes(),
+            &Content::Typing.encode(),
+            now_ms,
+            TYPING_TTL_MS,
+            |m| self.identity.sign(m),
+        )?;
+        sync::post_signal(&mut self.client, &topic, &env.encode()).await?;
+        Ok(())
+    }
+
+    /// Poll for inbound typing signals across every open DM. Ephemeral: the
+    /// result is a snapshot, nothing is stored, and re-polling re-reports a
+    /// signal that is still within its TTL on the relay.
+    pub async fn poll_typing(&mut self, _now_ms: u64) -> Result<Vec<TypingEvent>, CoreError> {
+        let ik = self.identity.agreement_secret();
+        let peer_idks: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
+        let mut out = Vec::new();
+        for peer_idk in peer_idks {
+            let topic = self.dm_typing_topic(&peer_idk);
+            let blobs = sync::fetch_signals(&mut self.client, &topic).await?;
+            for blob in blobs {
+                let Ok(env) = Envelope::decode(&blob) else {
+                    continue;
+                };
+                // Our own signal is sealed to the peer, so `open` fails for us.
+                let Ok(sealed) = env.open(&ik) else { continue };
+                if sealed.sender_idk != peer_idk {
+                    continue;
+                }
+                if let Ok(Content::Typing) = Content::decode(&sealed.inner) {
+                    out.push(TypingEvent {
+                        scope: TypingScope::Dm(peer_idk),
+                        who: sealed.sender_idk,
+                        at_ms: env.deposited_ms,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
     async fn send_content(
         &mut self,
         peer_id: &[u8; 32],
@@ -610,6 +720,7 @@ impl Engine {
                 size: m.total_size,
             }),
             Content::Channel(_) => None, // control traffic, not conversation
+            Content::Typing => None,     // ephemeral; never sent via this path
         };
         let plaintext = content.encode();
 
@@ -740,6 +851,9 @@ impl Engine {
                         tracing::debug!(error = %e, "dropping channel-control message");
                     }
                 }
+                // Typing signals travel the ephemeral signal path, not the
+                // mailbox; ignore one that somehow arrives here.
+                Ok(Content::Typing) => {}
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }
             self.dirty = true;

@@ -91,13 +91,18 @@ provide.
    relay sees which channel each opaque message belongs to, plus its size and
    timing — it just cannot read the content (sender-keys encryption). The
    `channel_id` is shared only with members, but it does not rotate.
-   **Typing indicators** (planned, Phase 8) add another activity-timing signal:
-   an encrypted ephemeral control sent to the DM peer or channel members
-   whenever the user is composing. It is never persisted, but it reveals
-   "this identity is active right now" to the same parties that already see
-   message timing, and for channels it is another entry the relay observes on
-   the `channel_id` side channel. It is therefore **opt-in and off by default**
-   — the setting gates sending only; a non-broadcasting user still sees others.
+   **Typing indicators** add another activity-timing signal: an encrypted
+   ephemeral control sent whenever the user is composing. DM typing is
+   implemented; channel typing is planned. They use a dedicated relay signal
+   buffer (topic-keyed, ~12 s TTL, never logged, swept aggressively) rather
+   than the mailbox or the channel log. A typing signal is never persisted, but
+   it reveals "this identity is active right now" to the same parties that
+   already see message timing; for DMs the relay also sees the per-pair topic
+   `SHA-256("dante/typing/dm/v1" ‖ sorted idks)` (linkable to the pair only by
+   someone who already knows both identity keys), and for channels it is another
+   entry the relay observes on the `channel_id` side channel. It is therefore
+   **opt-in** — the setting gates sending only; a non-broadcasting user still
+   sees others.
 5. **Anonymity of network location.** DaNTe does not hide your IP address from
    peers you connect to directly or from relays. Run it over Tor/VPN if network-
    level anonymity is required. (A future phase may integrate transport-level

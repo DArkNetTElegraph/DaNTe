@@ -56,6 +56,9 @@ pub struct RelayState {
     /// `channel_id` -> the channel's append-only log. Opaque E2E channel
     /// messages; the relay never reads them.
     channels: std::collections::HashMap<[u8; 32], ChannelLog>,
+    /// `topic` -> ephemeral signals `(blob, deposited_ms)`. Typing indicators
+    /// and the like: never persisted, swept aggressively by TTL.
+    signals: std::collections::HashMap<[u8; 32], Vec<(Vec<u8>, u64)>>,
     announce_rl: KeyedRateLimiter<IpAddr>,
     record_rl: KeyedRateLimiter<IpAddr>,
     deposit_rl: KeyedRateLimiter<IpAddr>,
@@ -68,6 +71,12 @@ const BLOB_STORE_CAP: usize = 128 * 1024 * 1024;
 const BLOB_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// Per-channel message retention (oldest dropped past this).
 const MAX_CHANNEL_ENTRIES: usize = 5_000;
+/// An ephemeral signal is dropped this long after it arrives.
+const SIGNAL_TTL_MS: u64 = 12_000;
+/// Cap on buffered signals per topic (bounds a spammer).
+const MAX_SIGNALS_PER_TOPIC: usize = 64;
+/// Largest accepted signal payload.
+const MAX_SIGNAL_BYTES: usize = 4 * 1024;
 
 /// `(next_seq, entries)` where each entry is `(seq, blob, ts_ms)`.
 type ChannelLog = (u64, Vec<(u64, Vec<u8>, u64)>);
@@ -82,6 +91,7 @@ impl RelayState {
             blobs: std::collections::HashMap::new(),
             blob_bytes: 0,
             channels: std::collections::HashMap::new(),
+            signals: std::collections::HashMap::new(),
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
             deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
@@ -116,6 +126,11 @@ impl RelayState {
             entries.retain(|(_, _, ts)| now.saturating_sub(*ts) <= BLOB_TTL_MS);
         }
         self.channels.retain(|_, (_, entries)| !entries.is_empty());
+
+        for sigs in self.signals.values_mut() {
+            sigs.retain(|(_, ts)| now.saturating_sub(*ts) <= SIGNAL_TTL_MS);
+        }
+        self.signals.retain(|_, sigs| !sigs.is_empty());
 
         (dropped, evaporated)
     }
@@ -253,6 +268,37 @@ impl RelayState {
                     })
                     .unwrap_or_default();
                 Response::ChannelLog(out)
+            }
+
+            Request::PostSignal { topic, blob } => {
+                if !self.deposit_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                if blob.len() > MAX_SIGNAL_BYTES {
+                    return Response::Error("signal too large".into());
+                }
+                let sigs = self.signals.entry(topic).or_default();
+                sigs.retain(|(_, ts)| now.saturating_sub(*ts) <= SIGNAL_TTL_MS);
+                sigs.push((blob, now));
+                if sigs.len() > MAX_SIGNALS_PER_TOPIC {
+                    let excess = sigs.len() - MAX_SIGNALS_PER_TOPIC;
+                    sigs.drain(..excess);
+                }
+                Response::Ok
+            }
+
+            Request::FetchSignals { topic } => {
+                let out = self
+                    .signals
+                    .get(&topic)
+                    .map(|sigs| {
+                        sigs.iter()
+                            .filter(|(_, ts)| now.saturating_sub(*ts) <= SIGNAL_TTL_MS)
+                            .map(|(blob, _)| blob.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Response::Signals(out)
             }
         }
     }
@@ -393,6 +439,60 @@ mod tests {
             Response::Envelopes(v) => assert_eq!(v.len(), 1),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn signals_are_buffered_read_without_draining_and_expire() {
+        let mut s = state();
+        let topic = [7u8; 32];
+
+        assert_eq!(
+            s.handle(
+                Request::PostSignal {
+                    topic,
+                    blob: vec![1, 2, 3],
+                },
+                IP,
+                1_000,
+            ),
+            Response::Ok
+        );
+
+        // Two independent readers both see it (no drain-on-read).
+        for t in [1_100u64, 1_200] {
+            match s.handle(Request::FetchSignals { topic }, IP, t) {
+                Response::Signals(v) => assert_eq!(v, vec![vec![1, 2, 3]]),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        // Past the TTL it is gone.
+        match s.handle(
+            Request::FetchSignals { topic },
+            IP,
+            1_000 + SIGNAL_TTL_MS + 1,
+        ) {
+            Response::Signals(v) => assert!(v.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        s.maintain(1_000 + SIGNAL_TTL_MS + 1);
+        assert!(s.signals.is_empty());
+    }
+
+    #[test]
+    fn oversized_signal_rejected() {
+        let mut s = state();
+        assert!(matches!(
+            s.handle(
+                Request::PostSignal {
+                    topic: [1u8; 32],
+                    blob: vec![0u8; MAX_SIGNAL_BYTES + 1],
+                },
+                IP,
+                0,
+            ),
+            Response::Error(_)
+        ));
     }
 
     #[test]

@@ -18,6 +18,10 @@ pub enum Content {
     /// A channel-control message (invite, sender-key exchange). The bytes are
     /// opaque to `dante-dm`; `dante-core` defines their shape.
     Channel(Vec<u8>),
+    /// An ephemeral "I am typing" signal. Never persisted, never acknowledged;
+    /// the receiver shows it for a few seconds and then forgets it. Sending is
+    /// gated by a user setting; see `docs/DESIGN.md` Phase 8.
+    Typing,
 }
 
 impl Content {
@@ -34,6 +38,9 @@ impl Content {
             Content::Channel(b) => {
                 w.u8(3).bytes(b);
             }
+            Content::Typing => {
+                w.u8(4);
+            }
         }
         w.into_vec()
     }
@@ -45,6 +52,7 @@ impl Content {
             1 => Content::Text(r.string()?),
             2 => Content::File(FileManifest::decode(r.bytes()?)?),
             3 => Content::Channel(r.bytes()?.to_vec()),
+            4 => Content::Typing,
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "dm::Content",
@@ -74,6 +82,12 @@ mod tests {
         let id = Identity::generate(0);
         let (m, _) = FileManifest::build(&id, "a.bin", &[1u8; 1000]);
         let c = Content::File(m);
+        assert_eq!(Content::decode(&c.encode()).unwrap(), c);
+    }
+
+    #[test]
+    fn typing_roundtrip() {
+        let c = Content::Typing;
         assert_eq!(Content::decode(&c.encode()).unwrap(), c);
     }
 

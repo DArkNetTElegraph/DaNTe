@@ -68,4 +68,8 @@ pub enum CoreError {
     /// An invite link was malformed, forged, expired, or used up.
     #[error("invalid invite link: {0}")]
     Invite(&'static str),
+
+    /// A channel membership operation was rejected.
+    #[error("channel operation: {0}")]
+    Channel(&'static str),
 }

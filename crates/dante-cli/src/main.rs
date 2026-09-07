@@ -254,7 +254,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     }
     println!(
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
-         /invitelink #<chan> [days] [uses]  /redeem <link>  \
+         /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -441,6 +441,21 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     }
                 }
                 None => println!("usage: /redeem <invite-link>"),
+            },
+            "kick" => match (a, b) {
+                (Some(chan), Some(fp)) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match (parse_fingerprint(chan), parse_fingerprint(fp)) {
+                        (Ok(cid), Ok(mid)) => {
+                            match engine.remove_from_channel(&cid, &mid, now_ms()).await {
+                                Ok(()) => println!("removed"),
+                                Err(e) => println!("remove failed: {e}"),
+                            }
+                        }
+                        _ => println!("bad channel id or fingerprint"),
+                    }
+                }
+                _ => println!("usage: /kick #<channel-id> <fingerprint>"),
             },
             "channels" => {
                 for c in engine.channels() {

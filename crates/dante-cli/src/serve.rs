@@ -6,8 +6,8 @@
 //! `POST /api/send {to,text}` (`to` may be a fingerprint or `#<channel-id>`),
 //! `POST /api/server {name}`, `POST /api/channel {server,name}`,
 //! `POST /api/invite {channel,peer}`, `POST /api/invite-link
-//! {channel,ttl_secs,max_uses}`, `POST /api/redeem {link}`, `GET /api/typing`,
-//! `POST /api/typing {to}`.
+//! {channel,ttl_secs,max_uses}`, `POST /api/redeem {link}`, `POST /api/remove
+//! {channel,member}`, `GET /api/typing`, `POST /api/typing {to}`.
 
 use std::{
     collections::VecDeque,
@@ -65,6 +65,11 @@ enum Cmd {
     },
     Redeem {
         link: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    RemoveMember {
+        channel: String,
+        member: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
@@ -458,6 +463,22 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 .map_err(|e| e.to_string());
             let _ = reply.send(r);
         }
+        Cmd::RemoveMember {
+            channel,
+            member,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match (parse_fingerprint(channel), parse_fingerprint(&member)) {
+                (Ok(cid), Ok(mid)) => engine
+                    .remove_from_channel(&cid, &mid, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                _ => Err("bad channel id or fingerprint".into()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::Typing { to } => match parse_target(&to) {
             Ok((true, id)) => {
                 let _ = engine.send_typing_channel(&id, now_ms()).await;
@@ -691,6 +712,23 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             };
             dispatch(&mut stream, &shared, |reply| Cmd::Redeem {
                 link: r.link,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/remove") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                member: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::RemoveMember {
+                channel: r.channel,
+                member: r.member,
                 reply,
             })
             .await

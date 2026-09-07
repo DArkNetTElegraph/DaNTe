@@ -8,7 +8,89 @@
 //! (`dante_dm::Content::Channel`). Channel messages themselves go to a per-
 //! channel log on the relay (opaque; the relay never decrypts them).
 
+use dante_crypto::{
+    hash::sha256,
+    sign::{SignPublic, SignSecret, SIG_LEN},
+};
 use dante_proto::enc::{Reader, WireError, Writer};
+
+use crate::error::CoreError;
+
+const REMOVE_SIG_DOMAIN: &[u8] = b"dante/channel-remove/v1";
+
+/// A server-root-signed order to eject one member from a channel. Verifiable by
+/// any member, so it can propagate member-to-member.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoveOrder {
+    /// The owning server's root public key (the signature verifier).
+    pub server_root: [u8; 32],
+    /// The channel the member is being removed from.
+    pub channel_id: [u8; 32],
+    /// `IdentityId` of the member to eject.
+    pub member: [u8; 32],
+    /// When the order was issued (Unix ms) — also its epoch, for dedup.
+    pub issued_ms: u64,
+    /// `server_root` over `SHA-256(REMOVE_SIG_DOMAIN || body)`.
+    pub sig: [u8; SIG_LEN],
+}
+
+impl RemoveOrder {
+    /// Mint and sign with the server root secret.
+    pub fn mint(root: &SignSecret, channel_id: [u8; 32], member: [u8; 32], issued_ms: u64) -> Self {
+        let mut o = Self {
+            server_root: root.public().to_bytes(),
+            channel_id,
+            member,
+            issued_ms,
+            sig: [0u8; SIG_LEN],
+        };
+        o.sig = root.sign(&o.challenge());
+        o
+    }
+
+    fn challenge(&self) -> [u8; 32] {
+        let mut w = Writer::new();
+        w.bytes(REMOVE_SIG_DOMAIN)
+            .fixed(&self.server_root)
+            .fixed(&self.channel_id)
+            .fixed(&self.member)
+            .u64(self.issued_ms);
+        sha256(&w.into_vec())
+    }
+
+    /// Check the signature against the embedded server root key.
+    pub fn verify(&self) -> Result<(), CoreError> {
+        let pk = SignPublic::from_bytes(&self.server_root)
+            .map_err(|_| CoreError::Invite("bad server key"))?;
+        pk.verify(&self.challenge(), &self.sig)
+            .map_err(|_| CoreError::Invite("bad remove-order signature"))
+    }
+
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.fixed(&self.server_root)
+            .fixed(&self.channel_id)
+            .fixed(&self.member)
+            .u64(self.issued_ms)
+            .fixed(&self.sig);
+        w.into_vec()
+    }
+
+    /// Decode.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(bytes);
+        let out = Self {
+            server_root: r.fixed::<32>()?,
+            channel_id: r.fixed::<32>()?,
+            member: r.fixed::<32>()?,
+            issued_ms: r.u64()?,
+            sig: r.fixed::<SIG_LEN>()?,
+        };
+        r.finish()?;
+        Ok(out)
+    }
+}
 
 /// Public description of a channel a client belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +164,11 @@ pub enum ChannelControl {
         /// Encoded [`crate::invite::InviteToken`].
         token: Vec<u8>,
     },
+    /// Eject a member: everyone drops them and rotates their own sender chain.
+    Remove {
+        /// Encoded [`RemoveOrder`].
+        order: Vec<u8>,
+    },
 }
 
 impl ChannelControl {
@@ -111,6 +198,9 @@ impl ChannelControl {
             ChannelControl::Redeem { token } => {
                 w.u8(3).bytes(token);
             }
+            ChannelControl::Remove { order } => {
+                w.u8(4).bytes(order);
+            }
         }
         w.into_vec()
     }
@@ -135,6 +225,9 @@ impl ChannelControl {
             },
             3 => ChannelControl::Redeem {
                 token: r.bytes()?.to_vec(),
+            },
+            4 => ChannelControl::Remove {
+                order: r.bytes()?.to_vec(),
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -219,6 +312,28 @@ mod tests {
         };
         assert_eq!(ChannelControl::decode(&kb.encode()).unwrap(), kb);
 
+        let rm = ChannelControl::Remove {
+            order: vec![1, 2, 3, 4],
+        };
+        assert_eq!(ChannelControl::decode(&rm.encode()).unwrap(), rm);
+
         assert!(ChannelControl::decode(&[9]).is_err());
+    }
+
+    #[test]
+    fn remove_order_sign_verify_roundtrip() {
+        use dante_crypto::sign::SignSecret;
+        let root = SignSecret::from_bytes(&[5u8; 32]);
+        let o = RemoveOrder::mint(&root, [1u8; 32], [2u8; 32], 42);
+        o.verify().unwrap();
+        assert_eq!(RemoveOrder::decode(&o.encode()).unwrap(), o);
+
+        let mut bad = o.clone();
+        bad.member[0] ^= 1;
+        assert!(bad.verify().is_err());
+
+        let mut wrong = o.clone();
+        wrong.server_root = SignSecret::from_bytes(&[6u8; 32]).public().to_bytes();
+        assert!(wrong.verify().is_err());
     }
 }

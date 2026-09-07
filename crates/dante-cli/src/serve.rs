@@ -97,6 +97,8 @@ struct ChanView {
     id: String,
     name: String,
     server: String,
+    /// Base32 of the owning server's root key — what `POST /api/channel` wants.
+    root: String,
 }
 
 struct Shared {
@@ -347,6 +349,7 @@ async fn refresh_channels(engine: &Engine, shared: &Shared) {
             id: id_b32(&c.channel_id),
             name: c.channel_name,
             server: c.server_name,
+            root: id_b32(&c.server_root),
         })
         .collect();
     *shared.channels.lock().await = views;

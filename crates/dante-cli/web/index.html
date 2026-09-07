@@ -5,191 +5,709 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DaNTe</title>
 <style>
-  :root { color-scheme: light dark; --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e9ef; --muted:#8b93a7; --accent:#6ee7b7; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
-  header { padding:.6rem 1rem; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:1rem; align-items:baseline; flex-wrap:wrap; }
-  header b { color:var(--accent); }
-  header .fp { font-family:ui-monospace,monospace; color:var(--muted); word-break:break-all; }
-  #bar { padding:.5rem 1rem; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
-  #bar input { flex:1; min-width:14rem; }
-  input, button { font:inherit; background:#0b0d11; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:.45rem .6rem; }
-  button { background:var(--accent); color:#08130d; border:0; cursor:pointer; font-weight:600; }
-  button.ghost { background:#0b0d11; color:var(--fg); border:1px solid var(--line); font-weight:500; }
-  #chans { padding:.4rem 1rem; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:.4rem; flex-wrap:wrap; align-items:center; }
-  #chans .lbl { color:var(--muted); font-size:.85em; }
-  .chip { background:#0b0d11; border:1px solid var(--line); border-radius:999px; padding:.25rem .7rem; cursor:pointer; font-size:.85em; }
-  .chip.active { background:#123326; border-color:#1c5140; color:var(--accent); }
-  #targetbar { padding:.3rem 1rem; }
-  #target { color:var(--muted); font-size:.85em; font-family:ui-monospace,monospace; word-break:break-all; }
-  #log { flex:1; overflow:auto; padding:1rem; display:flex; flex-direction:column; gap:.4rem; }
-  .msg { max-width:70ch; padding:.4rem .6rem; border-radius:8px; background:var(--panel); border:1px solid var(--line); }
-  .msg.me { align-self:flex-end; background:#123326; border-color:#1c5140; }
-  .msg .who { color:var(--muted); font-size:.8em; font-family:ui-monospace,monospace; }
-  .msg .chan { color:var(--accent); font-size:.8em; }
-  .sys { color:var(--muted); font-style:italic; }
-  #typing { height:1.1rem; padding:0 1rem; font-size:.8em; color:var(--muted); font-style:italic; }
-  #composer { display:flex; gap:.5rem; padding:.75rem 1rem; background:var(--panel); border-top:1px solid var(--line); }
-  #composer input { flex:1; }
+/* ============================================================================
+   DaNTe web client — a deliberately throwaway UI, but structured so panes can
+   be replaced piece by piece. Layout mirrors Discord: server rail | channel
+   list | chat | member list. Baseline 800x500; below 800px the shell scrolls
+   rather than collapsing.
+   ========================================================================== */
+
+:root {
+  /* ---- palette (from the project's inspiration set) ---------------------- */
+  --blazing-flame:  #ff3c00;
+  --space-indigo:   #2e294e;
+  --alabaster-grey: #e2e2e2;
+  --orange:         #ffae03;
+  --cornflower-blue:#7692ff;
+
+  /* ---- derived surfaces (dark) ----------------------------------------- */
+  --bg-rail:    #171526;
+  --bg-pane:    #211d3b;
+  --bg-chat:    #29244a;
+  --bg-input:   #1b1832;
+  --bg-hover:   rgba(226, 226, 226, 0.06);
+  --bg-active:  rgba(118, 146, 255, 0.16);
+
+  --text:        var(--alabaster-grey);
+  --text-muted:  #9591b0;
+  --text-faint:  #6f6b8a;
+  --divider:     rgba(226, 226, 226, 0.07);
+
+  --accent:      var(--blazing-flame);
+  --accent-warm: var(--orange);
+  --link:        var(--cornflower-blue);
+
+  /* ---- metrics ------------------------------------------------------------ */
+  --rail:    64px;
+  --pane:    228px;
+  --members: 200px;
+  --header-h: 48px;
+  --radius:  8px;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  overflow: auto;                 /* shell overflows & scrolls under 800px */
+  font: 15px/1.45 ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg-rail);
+  color: var(--text);
+}
+button, input, textarea { font: inherit; color: inherit; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,.35); border-radius: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================ shell ====================================== */
+#app {
+  display: grid;
+  grid-template-columns: var(--rail) var(--pane) minmax(320px, 1fr) var(--members);
+  grid-template-rows: 100vh;
+  min-width: 800px;
+  min-height: 500px;
+}
+#app[data-members="hidden"] {
+  grid-template-columns: var(--rail) var(--pane) minmax(320px, 1fr) 0;
+}
+#app[data-members="hidden"] #members { display: none; }
+
+.col { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ======================== server rail =================================== */
+#rail {
+  background: var(--bg-rail);
+  align-items: center;
+  padding: 10px 0;
+  gap: 8px;
+  overflow-y: auto;
+}
+.rail-btn {
+  position: relative;
+  width: 44px; height: 44px;
+  flex: 0 0 44px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-pane);
+  color: var(--text);
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: border-radius .15s ease, background .15s ease;
+}
+.rail-btn:hover { border-radius: 34%; background: var(--accent-warm); color: #1b1832; }
+.rail-btn.active { border-radius: 34%; background: var(--accent); color: #fff; }
+.rail-btn.active::before,
+.rail-btn:hover::before {
+  content: "";
+  position: absolute;
+  left: -10px; top: 50%;
+  width: 4px; height: 22px;
+  background: var(--text);
+  border-radius: 0 4px 4px 0;
+  transform: translateY(-50%);
+}
+.rail-btn.active::before { height: 30px; }
+.rail-sep { width: 32px; height: 2px; background: var(--divider); border-radius: 2px; flex: 0 0 2px; }
+.rail-btn.add { color: var(--accent-warm); background: var(--bg-pane); }
+.rail-btn.add:hover { color: #1b1832; }
+
+/* ====================== channel / dm pane ============================== */
+#pane { background: var(--bg-pane); }
+.pane-head {
+  height: var(--header-h);
+  flex: 0 0 var(--header-h);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 14px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--divider);
+  box-shadow: 0 1px 0 rgba(0,0,0,.2);
+}
+.pane-head .head-actions { display: flex; gap: 4px; }
+.icon-btn {
+  border: 0; background: transparent; color: var(--text-muted);
+  width: 26px; height: 26px; border-radius: 6px; cursor: pointer;
+  display: grid; place-items: center; font-size: 16px; line-height: 1;
+}
+.icon-btn:hover { color: var(--text); background: var(--bg-hover); }
+
+.pane-scroll { flex: 1; overflow-y: auto; padding: 10px 8px; }
+.group-label {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 8px 4px;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-faint);
+}
+.group-label button { border: 0; background: transparent; color: var(--text-faint); cursor: pointer; font-size: 15px; }
+.group-label button:hover { color: var(--text); }
+
+.chan-row {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-muted);
+  cursor: pointer; text-align: left;
+  font-size: 14px;
+}
+.chan-row:hover { background: var(--bg-hover); color: var(--text); }
+.chan-row.active { background: var(--bg-active); color: #fff; }
+.chan-row .hash { color: var(--text-faint); font-weight: 700; }
+.chan-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chan-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: 0 0 8px; }
+.chan-row .avatar { width: 20px; height: 20px; font-size: 10px; }
+
+/* user panel */
+#user-panel {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border-top: 1px solid var(--divider);
+}
+#user-panel .who { flex: 1; min-width: 0; }
+#user-panel .fp {
+  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: pointer;
+}
+#user-panel .fp:hover { color: var(--link); }
+#user-panel .sub { font-size: 11px; color: var(--text-faint); }
+
+.avatar {
+  flex: 0 0 auto;
+  width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 12px; font-weight: 700;
+  background: var(--space-indigo); color: var(--text);
+}
+
+/* ============================ chat ==================================== */
+#chat { background: var(--bg-chat); }
+.chat-head {
+  height: var(--header-h);
+  flex: 0 0 var(--header-h);
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--divider);
+  box-shadow: 0 1px 0 rgba(0,0,0,.2);
+}
+.chat-head .title { font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.chat-head .title .hash { color: var(--text-faint); }
+.chat-head .spacer { flex: 1; }
+.chat-head .topic {
+  color: var(--text-faint); font-size: 13px;
+  padding-left: 10px; margin-left: 4px; border-left: 1px solid var(--divider);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch;
+}
+
+#log { flex: 1; overflow-y: auto; padding: 14px 16px 4px; }
+.msg-group { display: flex; gap: 12px; padding: 6px 0; }
+.msg-group .avatar { width: 38px; height: 38px; margin-top: 2px; }
+.msg-group .body { min-width: 0; flex: 1; }
+.msg-group .meta { display: flex; align-items: baseline; gap: 8px; }
+.msg-group .author { font-weight: 600; color: #fff; }
+.msg-group .author.you { color: var(--accent-warm); }
+.msg-group .stamp { font-size: 11px; color: var(--text-faint); }
+.msg-group .fp { font: 11px/1 ui-monospace, monospace; color: var(--text-faint); }
+.msg-line { color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
+.msg-line.file { color: var(--link); }
+.sys { color: var(--text-faint); font-style: italic; padding: 4px 0; font-size: 13px; }
+.empty { color: var(--text-faint); text-align: center; margin-top: 20vh; }
+
+#typing { height: 22px; padding: 0 18px; font-size: 12px; color: var(--text-muted); font-style: italic; }
+
+.composer { padding: 6px 16px 16px; }
+.composer form {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-input);
+  border-radius: var(--radius);
+  padding: 0 6px 0 14px;
+}
+.composer input {
+  flex: 1;
+  border: 0; background: transparent; outline: none;
+  padding: 12px 0;
+}
+.composer input::placeholder { color: var(--text-faint); }
+.composer button {
+  border: 0; cursor: pointer;
+  background: var(--accent); color: #fff;
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 8px 14px;
+  margin: 5px 0;
+}
+.composer button:hover { background: var(--accent-warm); color: #1b1832; }
+.composer button:disabled { opacity: .4; cursor: default; }
+
+/* ========================== members ================================== */
+#members { background: var(--bg-pane); border-left: 1px solid var(--divider); }
+#members .pane-head { justify-content: flex-start; gap: 8px; font-size: 13px; color: var(--text-muted); }
+.role-label {
+  padding: 14px 12px 4px;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.member-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px;
+  color: var(--text-muted); font-size: 14px;
+}
+.member-row .avatar { width: 26px; height: 26px; font-size: 10px; }
+.member-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-row.you .name { color: var(--accent-warm); }
+
+/* misc */
+.hint { padding: 16px; color: var(--text-faint); font-size: 13px; }
 </style>
 </head>
 <body>
-<header>
-  <b>DaNTe</b>
-  <span>you are <span class="fp" id="me">…</span></span>
-</header>
-<div id="bar">
-  <input id="peer" placeholder="peer fingerprint (base32 or 24 words), or #channel-id" spellcheck="false" />
-  <button id="settarget">set target</button>
-  <button id="newserver" class="ghost">new server</button>
-  <button id="newchannel" class="ghost">new channel</button>
-  <button id="invite" class="ghost">invite</button>
+<div id="app" data-members="shown">
+
+  <!-- ---------- server rail ---------- -->
+  <nav id="rail" class="col" aria-label="Servers"></nav>
+
+  <!-- ---------- channel / DM pane ---------- -->
+  <section id="pane" class="col">
+    <header class="pane-head">
+      <span id="pane-title">DaNTe</span>
+      <span class="head-actions" id="pane-actions"></span>
+    </header>
+    <div class="pane-scroll" id="pane-list"></div>
+    <div id="user-panel">
+      <div class="avatar" id="me-avatar">·</div>
+      <div class="who">
+        <div class="fp" id="me-fp" title="click to copy">…</div>
+        <div class="sub" id="me-sub">connecting…</div>
+      </div>
+      <button class="icon-btn" id="me-gear" title="recovery phrase">⚙</button>
+    </div>
+  </section>
+
+  <!-- ---------- chat ---------- -->
+  <section id="chat" class="col">
+    <header class="chat-head">
+      <span class="title" id="chat-title"><span class="hash">#</span> …</span>
+      <span class="topic" id="chat-topic"></span>
+      <span class="spacer"></span>
+      <button class="icon-btn" id="btn-invite" title="Invite people" hidden>➕👤</button>
+      <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
+    </header>
+    <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
+    <div id="typing"></div>
+    <div class="composer">
+      <form id="composer">
+        <input id="text" autocomplete="off" placeholder="Message" disabled />
+        <button id="send" disabled>Send</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ---------- members ---------- -->
+  <aside id="members" class="col" aria-label="Members">
+    <header class="pane-head"><span id="members-count">Members</span></header>
+    <div class="pane-scroll" id="members-list"></div>
+  </aside>
+
 </div>
-<div id="chans"><span class="lbl">channels:</span></div>
-<div id="targetbar"><span id="target">no target</span></div>
-<div id="log"></div>
-<div id="typing"></div>
-<form id="composer">
-  <input id="text" placeholder="message…" autocomplete="off" autofocus />
-  <button>send</button>
-</form>
-<label style="padding:0 1rem .5rem;font-size:.8em;color:var(--muted)">
-  <input type="checkbox" id="typingopt" checked /> broadcast when I'm typing
-</label>
+
 <script>
-const $ = s => document.querySelector(s);
-const log = $("#log");
-let target = null;       // a fingerprint, or "#<channel-id>"
-let seen = 0;
-let channels = [];       // [{id,name,server}]
+"use strict";
+/* ============================================================================
+   Small modular front-end. Sections: dom helpers · store · api · views · wiring.
+   No framework, no build step (served via include_str! by `dante serve`).
+   ========================================================================== */
 
-function line(cls, who, text, chan) {
-  const d = document.createElement("div");
-  d.className = "msg " + cls;
-  if (chan) { const c = document.createElement("div"); c.className = "chan"; c.textContent = "#" + chan; d.appendChild(c); }
-  if (who) { const w = document.createElement("div"); w.className = "who"; w.textContent = who; d.appendChild(w); }
-  const t = document.createElement("div"); t.textContent = text; d.appendChild(t);
-  log.appendChild(d); log.scrollTop = log.scrollHeight;
+/* ---------- dom helpers -------------------------------------------------- */
+const $  = (s, r = document) => r.querySelector(s);
+const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+const initials = s => (s || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
+const short = s => (s && s.includes("-")) ? s.split("-").slice(0, 2).join("-") : (s || "");
+
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem("dante." + k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
+  set(k, v) { try { localStorage.setItem("dante." + k, JSON.stringify(v)); } catch (_) {} },
+};
+
+/* ---------- store ------------------------------------------------------- */
+const store = {
+  me: { fingerprint: "", words: "" },
+  channels: [],                       // [{id,name,server}]
+  dms: LS.get("dms", []),             // [{fp}]
+  messages: [],                       // flat inbox, each tagged with _target
+  seen: 0,
+  unread: new Set(),                  // targets with unseen messages
+  view: LS.get("view", { server: "@dm", target: null }),
+  typingText: "",
+
+  servers() {
+    const names = [];
+    for (const c of this.channels) if (!names.includes(c.server)) names.push(c.server);
+    return names;
+  },
+  channelsOf(server) { return this.channels.filter(c => c.server === server); },
+  rootOf(server) { const c = this.channels.find(c => c.server === server); return c ? c.root : null; },
+  channelName(id) { const c = this.channels.find(c => c.id === id); return c ? c.name : short(id); },
+  msgsFor(target) { return this.messages.filter(m => m._target === target); },
+  membersFor(target) {
+    const set = new Set();
+    for (const m of this.msgsFor(target)) if (m.from && m.from !== "you") set.add(m.from);
+    return [...set].sort((a, b) => a.localeCompare(b));
+  },
+};
+
+/* ---------- api ------------------------------------------------------- */
+const api = {
+  async get(p) { const r = await fetch(p); if (!r.ok) throw new Error(await r.text()); return r.json(); },
+  async post(p, body) {
+    const r = await fetch(p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || r.statusText);
+    try { return JSON.parse(t); } catch (_) { return {}; }
+  },
+  me()        { return this.get("/api/me"); },
+  channels()  { return this.get("/api/channels"); },
+  messages(since) { return this.get("/api/messages?since=" + since); },
+  typing()    { return this.get("/api/typing"); },
+  send(to, text)          { return this.post("/api/send", { to, text }); },
+  createServer(name)      { return this.post("/api/server", { name }); },
+  createChannel(server, name) { return this.post("/api/channel", { server, name }); },
+  invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
+  sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
+};
+
+/* ---------- tiny ui affordances (swap for real modals later) ---------- */
+const ui = {
+  ask: (msg, def) => { const v = window.prompt(msg, def || ""); return v == null ? null : v.trim(); },
+  say: msg => window.alert(msg),
+  sys(text) {
+    const log = $("#log");
+    if (log.querySelector(".empty")) log.innerHTML = "";
+    log.appendChild(el("div", "sys", text));
+    log.scrollTop = log.scrollHeight;
+  },
+};
+
+/* ---------- view helpers -------------------------------------------- */
+const isDM      = () => store.view.server === "@dm";
+const curTarget = () => store.view.target;
+
+function selectTarget(server, target) {
+  store.view = { server, target };
+  LS.set("view", store.view);
+  store.unread.delete(target);
+  render();
+  const box = $("#text");
+  box.disabled = !target; $("#send").disabled = !target;
+  if (target) box.focus();
 }
-function sys(t){ const d=document.createElement("div"); d.className="sys"; d.textContent=t; log.appendChild(d); log.scrollTop=log.scrollHeight; }
 
-function setTarget(v) {
-  target = v ? v.trim() : null;
-  $("#target").textContent = target ? ("target: " + target) : "no target";
-  renderChans();
-}
+/* ---------- renderers --------------------------------------------- */
+function renderRail() {
+  const rail = $("#rail");
+  rail.innerHTML = "";
 
-function renderChans() {
-  const box = $("#chans");
-  box.querySelectorAll(".chip").forEach(e => e.remove());
-  for (const c of channels) {
-    const chip = document.createElement("span");
-    chip.className = "chip" + (target === "#" + c.id ? " active" : "");
-    chip.textContent = "#" + c.name + " (" + c.server + ")";
-    chip.title = c.id;
-    chip.onclick = () => setTarget("#" + c.id);
-    box.appendChild(chip);
+  const dm = el("button", "rail-btn" + (isDM() ? " active" : ""), "DM");
+  dm.title = "Direct Messages";
+  dm.onclick = () => selectTarget("@dm", store.dms[0] ? store.dms[0].fp : null);
+  rail.appendChild(dm);
+  rail.appendChild(el("div", "rail-sep"));
+
+  for (const name of store.servers()) {
+    const b = el("button", "rail-btn" + (store.view.server === name ? " active" : ""), initials(name));
+    b.title = name;
+    b.onclick = () => { const ch = store.channelsOf(name)[0]; selectTarget(name, ch ? "#" + ch.id : null); };
+    rail.appendChild(b);
   }
-  if (!channels.length) {
-    const s = document.createElement("span");
-    s.className = "chip"; s.style.cursor = "default"; s.style.opacity = ".6";
-    s.textContent = "none yet";
-    box.appendChild(s);
+
+  const add = el("button", "rail-btn add", "+");
+  add.title = "Create a server";
+  add.onclick = createServerFlow;
+  rail.appendChild(add);
+}
+
+function renderPane() {
+  const list = $("#pane-list");
+  const actions = $("#pane-actions");
+  list.innerHTML = ""; actions.innerHTML = "";
+
+  if (isDM()) {
+    $("#pane-title").textContent = "Direct Messages";
+    const lbl = el("div", "group-label");
+    lbl.appendChild(el("span", null, "Direct Messages"));
+    const plus = el("button", null, "+"); plus.title = "New DM"; plus.onclick = addDmFlow;
+    lbl.appendChild(plus);
+    list.appendChild(lbl);
+
+    for (const d of store.dms) {
+      const row = el("button", "chan-row" + (curTarget() === d.fp ? " active" : ""));
+      row.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(d.fp) }));
+      const n = el("span", "name", short(d.fp)); row.appendChild(n);
+      if (store.unread.has(d.fp)) row.appendChild(el("span", "dot"));
+      row.onclick = () => selectTarget("@dm", d.fp);
+      list.appendChild(row);
+    }
+    if (!store.dms.length) list.appendChild(el("div", "hint", "No conversations yet. Use + to add someone by fingerprint."));
+    return;
+  }
+
+  const server = store.view.server;
+  $("#pane-title").textContent = server;
+
+  const mk = (glyph, title, fn) => { const b = el("button", "icon-btn", glyph); b.title = title; b.onclick = fn; return b; };
+  actions.appendChild(mk("#＋", "Create channel", () => createChannelFlow(server)));
+
+  const lbl = el("div", "group-label");
+  lbl.appendChild(el("span", null, "Text Channels"));
+  const plus = el("button", null, "+"); plus.title = "Create channel"; plus.onclick = () => createChannelFlow(server);
+  lbl.appendChild(plus);
+  list.appendChild(lbl);
+
+  for (const c of store.channelsOf(server)) {
+    const t = "#" + c.id;
+    const row = el("button", "chan-row" + (curTarget() === t ? " active" : ""));
+    row.appendChild(el("span", "hash", "#"));
+    row.appendChild(el("span", "name", c.name));
+    if (store.unread.has(t)) row.appendChild(el("span", "dot"));
+    row.onclick = () => selectTarget(server, t);
+    list.appendChild(row);
   }
 }
 
-async function refreshChans() {
-  try { channels = await (await fetch("/api/channels")).json(); renderChans(); }
-  catch (e) { /* transient */ }
+function renderChat() {
+  const target = curTarget();
+  const titleEl = $("#chat-title");
+  const log = $("#log");
+  const inviteBtn = $("#btn-invite");
+
+  if (!target) {
+    titleEl.innerHTML = '<span class="hash">#</span> —';
+    $("#chat-topic").textContent = "";
+    inviteBtn.hidden = true;
+    log.innerHTML = '<div class="empty">Pick a channel or start a DM.</div>';
+    return;
+  }
+
+  if (target.startsWith("#")) {
+    titleEl.innerHTML = '<span class="hash">#</span> ' + esc(store.channelName(target.slice(1)));
+    $("#chat-topic").textContent = store.view.server;
+    inviteBtn.hidden = false;
+    inviteBtn.onclick = () => inviteFlow(target);
+  } else {
+    titleEl.innerHTML = '<span class="hash">@</span> ' + esc(short(target));
+    $("#chat-topic").textContent = "direct message · " + target;
+    inviteBtn.hidden = true;
+  }
+
+  const msgs = store.msgsFor(target);
+  log.innerHTML = "";
+  if (!msgs.length) { log.appendChild(el("div", "empty", "No messages yet — say hello.")); return; }
+
+  let lastAuthor = null;
+  for (const m of msgs) {
+    if (m.kind === "file") {
+      const g = groupShell(m, m.from === lastAuthor);
+      g.body.appendChild(Object.assign(el("div", "msg-line file"),
+        { textContent: `📎 ${m.filename} (${m.size} bytes)` + (m.saved ? ` — saved to ${m.saved}` : "") }));
+      log.appendChild(g.node); lastAuthor = m.from;
+      continue;
+    }
+    const g = groupShell(m, m.from === lastAuthor);
+    g.body.appendChild(Object.assign(el("div", "msg-line"), { textContent: m.text }));
+    log.appendChild(g.node);
+    lastAuthor = m.from;
+  }
+  log.scrollTop = log.scrollHeight;
 }
 
-async function init() {
-  const me = await (await fetch("/api/me")).json();
-  $("#me").textContent = me.fingerprint;
-  sys("your word phrase: " + me.words);
-  setTarget(null);
-  await refreshChans();
-  poll();
-  setInterval(poll, 700);
-  setInterval(refreshChans, 5000);
-  setInterval(pollTyping, 1500);
+function groupShell(m, sameAuthor) {
+  const node = el("div", "msg-group");
+  const av = el("div", "avatar", initials(m.from === "you" ? store.me.fingerprint : m.from));
+  const body = el("div", "body");
+  if (!sameAuthor) {
+    const meta = el("div", "meta");
+    const a = el("span", "author" + (m.from === "you" ? " you" : ""), m.from === "you" ? "you" : short(m.from));
+    meta.appendChild(a);
+    if (m.from !== "you" && m.from) meta.appendChild(el("span", "fp", m.from));
+    meta.appendChild(el("span", "stamp", m._at ? new Date(m._at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""));
+    body.appendChild(meta);
+  } else {
+    av.style.visibility = "hidden";
+  }
+  node.appendChild(av); node.appendChild(body);
+  return { node, body };
 }
 
-async function pollTyping() {
+function renderMembers() {
+  const target = curTarget();
+  const wrap = $("#members-list");
+  wrap.innerHTML = "";
+  const names = target ? store.membersFor(target) : [];
+  const all = ["you", ...names];
+  $("#members-count").textContent = `Members — ${all.length}`;
+
+  wrap.appendChild(el("div", "role-label", "Members"));   // roles: TODO
+  for (const n of all) {
+    const row = el("div", "member-row" + (n === "you" ? " you" : ""));
+    row.appendChild(el("div", "avatar", initials(n === "you" ? store.me.fingerprint : n)));
+    row.appendChild(el("span", "name", n === "you" ? "you" : short(n)));
+    wrap.appendChild(row);
+  }
+}
+
+function renderTyping() { $("#typing").textContent = store.typingText || ""; }
+
+function render() { renderRail(); renderPane(); renderChat(); renderMembers(); renderTyping(); }
+const esc = s => { const d = el("div"); d.textContent = s; return d.innerHTML; };
+
+/* ---------- flows -------------------------------------------------- */
+async function createServerFlow() {
+  const name = ui.ask("Server name?");
+  if (!name) return;
   try {
-    const r = await (await fetch("/api/typing")).json();
-    $("#typing").textContent = r.text || "";
-  } catch (e) { /* transient */ }
+    const { ok: root } = await api.createServer(name);
+    const chan = ui.ask("First channel name?", "general") || "general";
+    await api.createChannel(root, chan);
+    await refreshChannels();
+    const c = store.channelsOf(name)[0];
+    selectTarget(name, c ? "#" + c.id : null);
+  } catch (e) { ui.say("Could not create server: " + e.message); }
+}
+async function createChannelFlow(server) {
+  const root = store.rootOf(server);
+  if (!root) return ui.say("Unknown server root — open a channel in this server first.");
+  const name = ui.ask("New channel name?");
+  if (!name) return;
+  try {
+    await api.createChannel(root, name);
+    await refreshChannels();
+  } catch (e) { ui.say("Could not create channel (are you the host?): " + e.message); }
+}
+async function inviteFlow(channelTarget) {
+  const peer = ui.ask("Invite whom? (fingerprint)");
+  if (!peer) return;
+  try { await api.invite(channelTarget, peer); ui.sys("Invite sent to " + short(peer)); }
+  catch (e) { ui.say("Invite failed: " + e.message); }
+}
+function addDmFlow() {
+  const fp = ui.ask("Their fingerprint (base32) or 24 words:");
+  if (!fp) return;
+  if (!store.dms.some(d => d.fp === fp)) { store.dms.push({ fp }); LS.set("dms", store.dms); }
+  selectTarget("@dm", fp);
 }
 
-let lastTypingSent = 0;
-function noteTyping() {
-  if (!$("#typingopt").checked || !target) return;
-  const now = Date.now();
-  if (now - lastTypingSent < 3000) return;   // rate-limit: one signal per 3 s
-  lastTypingSent = now;
-  fetch("/api/typing", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ to: target }),
-  }).catch(() => {});
+/* ---------- polling ---------------------------------------------- */
+function ingest(items) {
+  for (const it of items) {
+    store.seen = Math.max(store.seen, it.seq);
+    it._at = Date.now();
+    if (it.kind === "channel") {
+      it._target = "#" + it.channel;
+      if (!it.from) it.from = "you";
+    } else {
+      // message / file: attribute to the DM it belongs to
+      it._target = it.from === "you" ? (store._pendingDmTarget || curTarget()) : it.from;
+    }
+    store.messages.push(it);
+    if (it._target && it._target !== curTarget()) store.unread.add(it._target);
+    // auto-list an unknown DM partner
+    if (it.kind !== "channel" && it.from !== "you" && it.from && !store.dms.some(d => short(d.fp) === it.from || d.fp === it.from)) {
+      store.dms.push({ fp: it.from }); LS.set("dms", store.dms);
+    }
+  }
+  if (store.messages.length > 4000) store.messages.splice(0, store.messages.length - 4000);
 }
 
 async function poll() {
   try {
-    const items = await (await fetch("/api/messages?since=" + seen)).json();
-    for (const it of items) {
-      seen = it.seq;
-      if (it.kind === "message") line("", it.from, it.text);
-      else if (it.kind === "channel") line(it.from === "you" ? "me" : "", it.from, it.text, it.channel_name || it.channel.split("-")[0]);
-      else if (it.kind === "file") sys(`${it.from} sent file "${it.filename}" (${it.size} bytes) — saved to ${it.saved}`);
+    const items = await api.messages(store.seen);
+    if (items.length) { ingest(items); render(); }
+  } catch (_) {}
+}
+async function pollTyping() {
+  try {
+    const r = await api.typing();
+    if (r.text !== store.typingText) { store.typingText = r.text; renderTyping(); }
+  } catch (_) {}
+}
+async function refreshChannels() {
+  try {
+    const ch = await api.channels();
+    const changed = JSON.stringify(ch) !== JSON.stringify(store.channels);
+    store.channels = ch;
+    if (changed) render();
+  } catch (_) {}
+}
+
+/* ---------- wiring ----------------------------------------------- */
+let lastTyping = 0;
+function noteTyping() {
+  const t = curTarget();
+  if (!t) return;
+  const now = Date.now();
+  if (now - lastTyping < 3000) return;
+  lastTyping = now;
+  api.sendTyping(t);
+}
+
+$("#composer").addEventListener("submit", async e => {
+  e.preventDefault();
+  const box = $("#text");
+  const text = box.value.trim();
+  const t = curTarget();
+  if (!text || !t) return;
+  box.value = "";
+  try {
+    if (t.startsWith("#")) {
+      await api.send(t, text);                 // channel echo comes back via poll
+    } else {
+      store._pendingDmTarget = t;
+      await api.send(t, text);
+      store._pendingDmTarget = null;
+      store.messages.push({ kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1 });
+      renderChat();
     }
-  } catch (e) { /* transient */ }
-}
-
-async function post(url, obj) {
-  const r = await fetch(url, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(obj) });
-  const body = await r.text();
-  if (!r.ok) { sys(url + " failed: " + body); return null; }
-  try { return JSON.parse(body); } catch (e) { return {}; }
-}
-
-$("#settarget").onclick = () => { setTarget($("#peer").value); sys(target ? "target set" : "target cleared"); };
-
-$("#newserver").onclick = async () => {
-  const name = prompt("server name?"); if (!name) return;
-  const r = await post("/api/server", { name });
-  if (r) sys(`server "${name}" created — root ${r.ok}`);
-};
-
-$("#newchannel").onclick = async () => {
-  const server = prompt("server root key (base32)?"); if (!server) return;
-  const name = prompt("channel name?"); if (!name) return;
-  const r = await post("/api/channel", { server, name });
-  if (r) { sys(`channel "${name}" created — #${r.ok}`); refreshChans(); }
-};
-
-$("#invite").onclick = async () => {
-  let channel = target && target.startsWith("#") ? target : prompt("channel id (base32)?");
-  if (!channel) return;
-  const peer = prompt("invitee fingerprint (base32)?"); if (!peer) return;
-  const r = await post("/api/invite", { channel, peer });
-  if (r) sys("invite sent");
-};
-
+  } catch (err) { ui.sys("Send failed: " + err.message); }
+});
 $("#text").addEventListener("input", noteTyping);
 
-$("#composer").onsubmit = async (e) => {
-  e.preventDefault();
-  const text = $("#text").value;
-  if (!text) return;
-  if (!target) { sys("set a target first"); return; }
-  $("#text").value = "";
-  const r = await fetch("/api/send", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ to: target, text }) });
-  if (r.ok) {
-    if (target.startsWith("#")) { /* echoed back by the server via the inbox */ }
-    else line("me", "you", text);
-  } else sys("send failed: " + (await r.text()));
+$("#btn-members").onclick = () => {
+  const app = $("#app");
+  const next = app.dataset.members === "shown" ? "hidden" : "shown";
+  app.dataset.members = next; LS.set("members", next);
 };
+$("#me-fp").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Fingerprint copied."); };
+$("#me-gear").onclick = () => ui.say("Recovery phrase (keep it secret):\n\n" + store.me.words);
+
+/* ---------- boot ----------------------------------------------- */
+async function init() {
+  $("#app").dataset.members = LS.get("members", "shown");
+  try {
+    store.me = await api.me();
+    $("#me-fp").textContent = short(store.me.fingerprint);
+    $("#me-fp").title = store.me.fingerprint + "  (click to copy)";
+    $("#me-avatar").textContent = initials(store.me.fingerprint);
+    $("#me-sub").textContent = "online";
+  } catch (_) { $("#me-sub").textContent = "offline"; }
+
+  await refreshChannels();
+
+  // restore last view if still valid
+  const v = store.view;
+  if (v.server !== "@dm" && !store.servers().includes(v.server)) store.view = { server: "@dm", target: store.dms[0] ? store.dms[0].fp : null };
+  selectTarget(store.view.server, store.view.target);
+
+  poll();
+  setInterval(poll, 700);
+  setInterval(pollTyping, 1200);
+  setInterval(refreshChannels, 5000);
+}
 init();
 </script>
 </body>

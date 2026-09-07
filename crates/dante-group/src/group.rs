@@ -34,6 +34,8 @@ pub const MAX_SKIP: u32 = 2000;
 
 const MK_INFO: &[u8] = b"DaNTe/group/msg/v1";
 const SIG_DOMAIN: &[u8] = b"dante/group/message/v1";
+/// AAD domain for out-of-band ephemeral signals (typing indicators, etc.).
+const SIGNAL_DOMAIN: &[u8] = b"dante/group/signal/v1";
 
 fn kdf_ck(ck: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     (hmac_sha256(ck, &[0x02]), hmac_sha256(ck, &[0x01])) // (next_ck, mk)
@@ -71,6 +73,12 @@ fn msg_aad(group_id: &[u8; 32], sender: &MemberId, iteration: u32) -> Vec<u8> {
     w.into_vec()
 }
 
+fn signal_aad(group_id: &[u8; 32], sender: &MemberId) -> Vec<u8> {
+    let mut w = Writer::with_capacity(SIGNAL_DOMAIN.len() + 64);
+    w.bytes(SIGNAL_DOMAIN).fixed(group_id).fixed(sender);
+    w.into_vec()
+}
+
 /// What a member distributes so others can decrypt its channel messages.
 /// **Contains a live chain key — send only over an authenticated DM.**
 #[derive(Clone)]
@@ -83,16 +91,21 @@ pub struct SenderKeyBundle {
     pub chain_key: [u8; 32],
     /// The iteration `chain_key` is at.
     pub iteration: u32,
+    /// The member's **static** key for ephemeral out-of-band signals (typing
+    /// indicators). Never advanced, so a signal does not touch the forward-
+    /// secret message chain. Rotated only on a member removal.
+    pub signal_key: [u8; 32],
 }
 
 impl SenderKeyBundle {
     /// Encode.
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::with_capacity(100);
+        let mut w = Writer::with_capacity(132);
         w.fixed(&self.member)
             .fixed(&self.sig_pub)
             .fixed(&self.chain_key)
-            .u32(self.iteration);
+            .u32(self.iteration)
+            .fixed(&self.signal_key);
         w.into_vec()
     }
 
@@ -103,12 +116,14 @@ impl SenderKeyBundle {
         let sig_pub = r.fixed::<32>()?;
         let chain_key = r.fixed::<32>()?;
         let iteration = r.u32()?;
+        let signal_key = r.fixed::<32>()?;
         r.finish()?;
         Ok(Self {
             member,
             sig_pub,
             chain_key,
             iteration,
+            signal_key,
         })
     }
 }
@@ -116,6 +131,7 @@ impl SenderKeyBundle {
 impl Drop for SenderKeyBundle {
     fn drop(&mut self) {
         self.chain_key.zeroize();
+        self.signal_key.zeroize();
     }
 }
 
@@ -164,11 +180,13 @@ struct SenderState {
     sig: SignSecret,
     chain_key: [u8; 32],
     iteration: u32,
+    signal_key: [u8; 32],
 }
 
 impl Drop for SenderState {
     fn drop(&mut self) {
         self.chain_key.zeroize();
+        self.signal_key.zeroize();
     }
 }
 
@@ -177,11 +195,13 @@ struct ReceiverState {
     chain_key: [u8; 32],
     iteration: u32,
     skipped: HashMap<u32, [u8; 32]>,
+    signal_key: [u8; 32],
 }
 
 impl Drop for ReceiverState {
     fn drop(&mut self) {
         self.chain_key.zeroize();
+        self.signal_key.zeroize();
         for mk in self.skipped.values_mut() {
             mk.zeroize();
         }
@@ -203,11 +223,13 @@ impl Group {
     pub fn create(group_id: [u8; 32], me: MemberId) -> (Self, SenderKeyBundle) {
         let sig = SignSecret::generate();
         let chain_key = random_array::<32>();
+        let signal_key = random_array::<32>();
         let bundle = SenderKeyBundle {
             member: me,
             sig_pub: sig.public().to_bytes(),
             chain_key,
             iteration: 0,
+            signal_key,
         };
         let group = Self {
             group_id,
@@ -216,6 +238,7 @@ impl Group {
                 sig,
                 chain_key,
                 iteration: 0,
+                signal_key,
             },
             receivers: HashMap::new(),
         };
@@ -251,24 +274,29 @@ impl Group {
                 chain_key: bundle.chain_key,
                 iteration: bundle.iteration,
                 skipped: HashMap::new(),
+                signal_key: bundle.signal_key,
             },
         );
         Ok(())
     }
 
-    /// Remove a member and rotate our own chain. Returns our **new** bundle,
-    /// which must be redistributed to the remaining members.
+    /// Remove a member and rotate our own chain (and signal key, so the removed
+    /// member can no longer read our ephemeral signals either). Returns our
+    /// **new** bundle, which must be redistributed to the remaining members.
     pub fn remove_member(&mut self, member: &MemberId) -> SenderKeyBundle {
         self.receivers.remove(member);
         let new_key = random_array::<32>();
         self.sender.chain_key.zeroize();
         self.sender.chain_key = new_key;
         self.sender.iteration = 0;
+        self.sender.signal_key.zeroize();
+        self.sender.signal_key = random_array::<32>();
         SenderKeyBundle {
             member: self.me,
             sig_pub: self.sender.sig.public().to_bytes(),
             chain_key: self.sender.chain_key,
             iteration: 0,
+            signal_key: self.sender.signal_key,
         }
     }
 
@@ -279,7 +307,44 @@ impl Group {
             sig_pub: self.sender.sig.public().to_bytes(),
             chain_key: self.sender.chain_key,
             iteration: self.sender.iteration,
+            signal_key: self.sender.signal_key,
         }
+    }
+
+    /// AEAD-seal an ephemeral signal (e.g. a typing marker) under our static
+    /// signal key. Does **not** advance any chain and touches no persisted
+    /// state, so it is safe to send often. A member holding our
+    /// [`SenderKeyBundle`] recovers `(our member id, plaintext)` via
+    /// [`Group::open_signal`].
+    pub fn seal_signal(&self, plaintext: &[u8]) -> Vec<u8> {
+        let nonce = random_array::<24>();
+        let ct = aead::xchacha_seal(
+            &self.sender.signal_key,
+            &nonce,
+            plaintext,
+            &signal_aad(&self.group_id, &self.me),
+        );
+        let mut w = Writer::new();
+        w.fixed(&self.me).fixed(&nonce).bytes(&ct);
+        w.into_vec()
+    }
+
+    /// Open a signal blob against the sealing member's signal key. Returns the
+    /// authenticated `(member, plaintext)`, or `None` if the blob is malformed,
+    /// from an unknown member, or fails authentication.
+    pub fn open_signal(&self, blob: &[u8]) -> Option<(MemberId, Vec<u8>)> {
+        let mut r = Reader::new(blob);
+        let member = r.fixed::<32>().ok()?;
+        let nonce = r.fixed::<24>().ok()?;
+        let ct = r.bytes().ok()?.to_vec();
+        r.finish().ok()?;
+        let key = if member == self.me {
+            &self.sender.signal_key
+        } else {
+            &self.receivers.get(&member)?.signal_key
+        };
+        let pt = aead::xchacha_open(key, &nonce, &ct, &signal_aad(&self.group_id, &member)).ok()?;
+        Some((member, pt))
     }
 
     /// Snapshot for the encrypted local store. **All secret.**
@@ -290,6 +355,7 @@ impl Group {
             sender_sig_secret: self.sender.sig.to_bytes(),
             sender_chain_key: self.sender.chain_key,
             sender_iteration: self.sender.iteration,
+            sender_signal_key: self.sender.signal_key,
             receivers: self
                 .receivers
                 .iter()
@@ -299,6 +365,7 @@ impl Group {
                     chain_key: r.chain_key,
                     iteration: r.iteration,
                     skipped: r.skipped.iter().map(|(&n, &mk)| (n, mk)).collect(),
+                    signal_key: r.signal_key,
                 })
                 .collect(),
         }
@@ -316,6 +383,7 @@ impl Group {
                     chain_key: r.chain_key,
                     iteration: r.iteration,
                     skipped: r.skipped.iter().copied().collect(),
+                    signal_key: r.signal_key,
                 },
             );
         }
@@ -326,6 +394,7 @@ impl Group {
                 sig: SignSecret::from_bytes(&s.sender_sig_secret),
                 chain_key: s.sender_chain_key,
                 iteration: s.sender_iteration,
+                signal_key: s.sender_signal_key,
             },
             receivers,
         })
@@ -419,6 +488,7 @@ pub struct GroupState {
     sender_sig_secret: [u8; 32],
     sender_chain_key: [u8; 32],
     sender_iteration: u32,
+    sender_signal_key: [u8; 32],
     receivers: Vec<ReceiverSnapshot>,
 }
 
@@ -429,6 +499,7 @@ struct ReceiverSnapshot {
     chain_key: [u8; 32],
     iteration: u32,
     skipped: Vec<(u32, [u8; 32])>,
+    signal_key: [u8; 32],
 }
 
 impl GroupState {
@@ -450,6 +521,12 @@ impl GroupState {
             for (n, mk) in &r.skipped {
                 w.u32(*n).fixed(mk);
             }
+        }
+        // Tail block (absent in snapshots written before signal keys existed):
+        // our signal key, then one per receiver in the order emitted above.
+        w.fixed(&self.sender_signal_key);
+        for r in &self.receivers {
+            w.fixed(&r.signal_key);
         }
         w.into_vec()
     }
@@ -480,7 +557,23 @@ impl GroupState {
                 chain_key,
                 iteration,
                 skipped,
+                signal_key: [0u8; 32],
             });
+        }
+        // Tail block; if this snapshot predates signal keys, mint fresh ones so
+        // the group still loads (typing signals just won't interop until the
+        // next bundle exchange refreshes them).
+        let sender_signal_key = if r.remaining() > 0 {
+            r.fixed::<32>()?
+        } else {
+            random_array::<32>()
+        };
+        for rcv in &mut receivers {
+            rcv.signal_key = if r.remaining() > 0 {
+                r.fixed::<32>()?
+            } else {
+                random_array::<32>()
+            };
         }
         r.finish()?;
         Ok(Self {
@@ -489,6 +582,7 @@ impl GroupState {
             sender_sig_secret,
             sender_chain_key,
             sender_iteration,
+            sender_signal_key,
             receivers,
         })
     }
@@ -498,8 +592,10 @@ impl Drop for GroupState {
     fn drop(&mut self) {
         self.sender_sig_secret.zeroize();
         self.sender_chain_key.zeroize();
+        self.sender_signal_key.zeroize();
         for r in &mut self.receivers {
             r.chain_key.zeroize();
+            r.signal_key.zeroize();
             for (_, mk) in &mut r.skipped {
                 mk.zeroize();
             }
@@ -642,6 +738,71 @@ mod tests {
         );
         let m = a.encrypt(b"x");
         assert_eq!(GroupMessage::decode(&m.encode()).unwrap(), m);
+    }
+
+    #[test]
+    fn signals_seal_open_between_members_and_survive_reload() {
+        let (mut a, ba) = Group::create(GID, member(0));
+        let (mut b, bb) = Group::create(GID, member(1));
+        a.upsert_member(&bb).unwrap();
+        b.upsert_member(&ba).unwrap();
+
+        let s = a.seal_signal(b"typing");
+        assert_eq!(b.open_signal(&s).unwrap(), (*a.me(), b"typing".to_vec()));
+        // Sealing does not advance the message chain.
+        let m = a.encrypt(b"real message");
+        assert_eq!(m.iteration, 0);
+        assert_eq!(b.decrypt(&m).unwrap(), b"real message");
+
+        // Signal keys ride the snapshot.
+        let bytes = b.export().encode();
+        drop(b);
+        let b = Group::import(&GroupState::decode(&bytes).unwrap()).unwrap();
+        assert_eq!(
+            b.open_signal(&a.seal_signal(b"still typing")).unwrap().1,
+            b"still typing"
+        );
+    }
+
+    #[test]
+    fn signal_from_unknown_member_or_tampered_blob_is_rejected() {
+        let (a, ba) = Group::create(GID, member(0));
+        let (mut b, _bb) = Group::create(GID, member(1));
+        // b does not know a yet.
+        assert!(b.open_signal(&a.seal_signal(b"x")).is_none());
+
+        b.upsert_member(&ba).unwrap();
+        let mut s = a.seal_signal(b"x");
+        *s.last_mut().unwrap() ^= 1;
+        assert!(b.open_signal(&s).is_none());
+    }
+
+    #[test]
+    fn removed_member_loses_signal_access() {
+        let (m0, m1, m2) = (member(0), member(1), member(2));
+        let (mut g0, b0) = Group::create(GID, m0);
+        let (mut g1, b1) = Group::create(GID, m1);
+        let (mut g2, b2) = Group::create(GID, m2);
+        for (g, o) in [
+            (&mut g0, [&b1, &b2]),
+            (&mut g1, [&b0, &b2]),
+            (&mut g2, [&b0, &b1]),
+        ] {
+            for b in o {
+                g.upsert_member(b).unwrap();
+            }
+        }
+        let old = g0.seal_signal(b"before");
+        assert_eq!(g2.open_signal(&old).unwrap().1, b"before");
+
+        let n0 = g0.remove_member(&m2);
+        g1.upsert_member(&n0).unwrap();
+        // g2 still holds g0's old signal key -> cannot open the new one.
+        assert!(g2.open_signal(&g0.seal_signal(b"after")).is_none());
+        assert_eq!(
+            g1.open_signal(&g0.seal_signal(b"after")).unwrap().1,
+            b"after"
+        );
     }
 
     #[test]

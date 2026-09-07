@@ -667,9 +667,30 @@ impl Engine {
         Ok(())
     }
 
-    /// Poll for inbound typing signals across every open DM. Ephemeral: the
-    /// result is a snapshot, nothing is stored, and re-polling re-reports a
-    /// signal that is still within its TTL on the relay.
+    /// Broadcast a short-lived "I am typing" signal to a channel. Stateless:
+    /// [`Group::seal_signal`] AEADs the marker under the member's static signal
+    /// key without advancing the message chain, so nothing is persisted.
+    pub async fn send_typing_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let blob = {
+            let ch = self
+                .channels
+                .get(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            let mut pt = now_ms.to_be_bytes().to_vec();
+            pt.extend_from_slice(&Content::Typing.encode());
+            ch.group.seal_signal(&pt)
+        };
+        sync::post_signal(&mut self.client, channel_id, &blob).await?;
+        Ok(())
+    }
+
+    /// Poll for inbound typing signals across every open DM and channel.
+    /// Ephemeral: the result is a snapshot, nothing is stored, and re-polling
+    /// re-reports a signal that is still within its TTL on the relay.
     pub async fn poll_typing(&mut self, _now_ms: u64) -> Result<Vec<TypingEvent>, CoreError> {
         let ik = self.identity.agreement_secret();
         let peer_idks: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
@@ -691,6 +712,31 @@ impl Engine {
                         scope: TypingScope::Dm(peer_idk),
                         who: sealed.sender_idk,
                         at_ms: env.deposited_ms,
+                    });
+                }
+            }
+        }
+
+        let me = self.my_member_id();
+        let channel_ids: Vec<[u8; 32]> = self.channels.keys().copied().collect();
+        for channel_id in channel_ids {
+            let blobs = sync::fetch_signals(&mut self.client, &channel_id).await?;
+            let Some(ch) = self.channels.get(&channel_id) else {
+                continue;
+            };
+            for blob in blobs {
+                let Some((member, pt)) = ch.group.open_signal(&blob) else {
+                    continue;
+                };
+                if member == me || pt.len() < 8 {
+                    continue;
+                }
+                let at_ms = u64::from_be_bytes(pt[..8].try_into().unwrap());
+                if let Ok(Content::Typing) = Content::decode(&pt[8..]) {
+                    out.push(TypingEvent {
+                        scope: TypingScope::Channel(channel_id),
+                        who: member,
+                        at_ms,
                     });
                 }
             }

@@ -278,8 +278,19 @@ infrastructure. Reached. ---**
   `Engine::reaction_snapshot()`; `serve` seeds its in-memory view from that at
   boot (`GET /api/reactions`, `POST /api/react`), the SPA renders toggle chips
   under each message. You still cannot react to your own optimistic echo (no
-  `seq` until it round-trips). Custom per-server emoji / stickers / soundboards
-  (content-hash blobs) still to do.
+  `seq` until it round-trips).
+- **Custom per-server emoji** *(done)*: `ServerPolicy` gained an `emojis:
+  Vec<(shortcode, [u8;32])>` tail field (back-compat: only written when
+  non-empty, so pre-emoji signatures still verify). `Engine::set_server_emoji`
+  `PutBlob`s the image (**unencrypted**, keyed by SHA-256, subject to the
+  relay's 7-day blob TTL) and bumps + re-signs + broadcasts the policy;
+  `remove_server_emoji`, `server_emojis`, `fetch_blob`. Names are
+  `[a-z0-9_]{1..32}`, images ≤ 256 KiB, ≤ 200 per server. `serve`:
+  `POST /api/emoji {server,name,image_hex}`, `POST /api/emoji/remove`,
+  `GET /api/emoji?hash=` (MIME-sniffed). SPA renders `:shortcode:` in channel
+  messages and reaction chips as `<img>`, and a 😀 button uploads/removes.
+  `chat`: `/emoji <root> <name> <path|remove>`. Stickers / soundboards still to
+  do.
 - Tenor/Giphy search — opt-in, off by default, warns it contacts a third party.
 - URL embeds — opt-in (leaks IP); optionally via a relay-side unfurler.
 - Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.

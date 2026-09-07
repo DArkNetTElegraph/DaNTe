@@ -95,6 +95,11 @@ provide.
    …) before encryption, so the relay learns only a coarse bucket, not the
    exact length. The `channel_id` is shared only with members, but it does not
    rotate.
+   **Custom server emoji** images are stored in the relay blob store
+   **unencrypted** (keyed by SHA-256, 7-day TTL), exactly like Discord's — the
+   relay and anyone with the hash can see the artwork. Only the message text
+   referencing `:shortcode:` is E2E-encrypted; the shortcode→hash map travels
+   inside the signed `ServerPolicy` over authenticated DMs.
    **Typing indicators** (DM and channel) add another activity-timing signal: an
    encrypted ephemeral control sent whenever the user is composing. They use a
    dedicated relay signal buffer (topic-keyed, ~12 s TTL, never logged, swept

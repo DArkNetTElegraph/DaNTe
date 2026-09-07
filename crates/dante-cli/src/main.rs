@@ -745,6 +745,32 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 },
                 _ => println!("usage: /role <server-root> <name> [kick] [mute] [manage]"),
             },
+            "emoji" => match (a, b) {
+                (Some(root), Some(rest)) => match parse_fingerprint(root) {
+                    Ok(sr) => {
+                        let mut it = rest.split_whitespace();
+                        let name = it.next().unwrap_or("");
+                        let arg = it.next().unwrap_or("");
+                        let res = if arg.eq_ignore_ascii_case("remove") || arg == "-" {
+                            engine.remove_server_emoji(&sr, name, now_ms()).await
+                        } else {
+                            match std::fs::read(arg) {
+                                Ok(img) => engine.set_server_emoji(&sr, name, &img, now_ms()).await,
+                                Err(e) => {
+                                    println!("cannot read {arg}: {e}");
+                                    return Ok(false);
+                                }
+                            }
+                        };
+                        match res {
+                            Ok(()) => println!("emoji :{name}: updated"),
+                            Err(e) => println!("failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /emoji <server-root> <name> <image-path|remove>"),
+            },
             "assignrole" => match (a, b) {
                 (Some(root), Some(rest)) => {
                     let mut it = rest.split_whitespace();

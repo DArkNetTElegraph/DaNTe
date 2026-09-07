@@ -856,6 +856,60 @@ async fn inactivity_auto_kick() {
 }
 
 #[tokio::test]
+async fn custom_server_emoji_reaches_a_member() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    macro_rules! settle {
+        () => {
+            for _ in 0..6 {
+                for e in [&mut host, &mut alice] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+
+    let img = b"\x89PNG\r\n\x1a\n-fake-emoji-bytes-".to_vec();
+    host.set_server_emoji(&server, "blobwave", &img, now)
+        .await
+        .unwrap();
+    // bad names are rejected before any blob is stored
+    assert!(host
+        .set_server_emoji(&server, "Bad Name", &img, now)
+        .await
+        .is_err());
+    settle!();
+
+    let seen = alice.server_emojis(&server);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "blobwave");
+    let hash = seen[0].1;
+    assert_eq!(alice.fetch_blob(&hash).await.unwrap(), Some(img));
+
+    host.remove_server_emoji(&server, "blobwave", now)
+        .await
+        .unwrap();
+    settle!();
+    assert!(alice.server_emojis(&server).is_empty());
+}
+
+#[tokio::test]
 async fn roles_muting_and_delegated_kick() {
     use crate::roles::PERM_KICK;
 

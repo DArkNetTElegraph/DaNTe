@@ -39,6 +39,11 @@ pub const PERM_DEFAULT: u32 = PERM_SEND;
 
 const SIG_DOMAIN: &[u8] = b"dante/server-policy/v1";
 
+/// Max bytes of a custom-emoji shortcode (the `name` in `:name:`).
+pub const EMOJI_NAME_MAX: usize = 32;
+/// Max custom emoji a single server may register.
+pub const MAX_SERVER_EMOJIS: usize = 200;
+
 /// One named role. Permissions are allow/deny masks layered over the
 /// `@everyone` default ([`PERM_DEFAULT`]); denies win, so a zero-`allow`
 /// full-`deny` role is a mute.
@@ -88,6 +93,9 @@ pub struct ServerPolicy {
     pub roles: Vec<Role>,
     /// `member -> role ids`.
     pub assignments: Vec<([u8; 32], Vec<u16>)>,
+    /// Custom emoji: `shortcode -> SHA-256 of the (plaintext) image blob on the
+    /// relay blob store`. Rendered client-side as `:shortcode:`.
+    pub emojis: Vec<(String, [u8; 32])>,
     /// When it was issued (Unix ms).
     pub issued_ms: u64,
     /// `server_root` over `SHA-256(SIG_DOMAIN || body)`.
@@ -97,16 +105,26 @@ pub struct ServerPolicy {
 impl ServerPolicy {
     /// A fresh empty policy for a newly-created server.
     pub fn genesis(root: &SignSecret, owner_id: [u8; 32], now_ms: u64) -> Self {
-        Self::signed(root, owner_id, 1, Vec::new(), Vec::new(), now_ms)
+        Self::signed(
+            root,
+            owner_id,
+            1,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            now_ms,
+        )
     }
 
     /// Build and sign a policy at `version`.
+    #[allow(clippy::too_many_arguments)]
     pub fn signed(
         root: &SignSecret,
         owner_id: [u8; 32],
         version: u64,
         roles: Vec<Role>,
         assignments: Vec<([u8; 32], Vec<u16>)>,
+        emojis: Vec<(String, [u8; 32])>,
         now_ms: u64,
     ) -> Self {
         let mut p = Self {
@@ -115,11 +133,17 @@ impl ServerPolicy {
             version,
             roles,
             assignments,
+            emojis,
             issued_ms: now_ms,
             sig: [0u8; SIG_LEN],
         };
         p.sig = root.sign(&challenge(&p.body()));
         p
+    }
+
+    /// The relay blob hash for a custom emoji shortcode, if the server has one.
+    pub fn emoji_hash(&self, name: &str) -> Option<[u8; 32]> {
+        self.emojis.iter().find(|(n, _)| n == name).map(|(_, h)| *h)
     }
 
     fn body(&self) -> Vec<u8> {
@@ -137,6 +161,14 @@ impl ServerPolicy {
             w.fixed(m).u32(ids.len() as u32);
             for id in ids {
                 w.u16(*id);
+            }
+        }
+        // Tail-appended so a policy signed before custom emoji existed still
+        // verifies (its body ends after `assignments`, `emojis` is empty).
+        if !self.emojis.is_empty() {
+            w.u32(self.emojis.len() as u32);
+            for (name, hash) in &self.emojis {
+                w.string(name).fixed(hash);
             }
         }
         w.into_vec()
@@ -217,6 +249,14 @@ impl ServerPolicy {
             }
             assignments.push((m, ids));
         }
+        let mut emojis = Vec::new();
+        if b.remaining() > 0 {
+            let ne = bounded(&mut b)?;
+            emojis.reserve(ne);
+            for _ in 0..ne {
+                emojis.push((b.string()?, b.fixed::<32>()?));
+            }
+        }
         b.finish()?;
         Ok(Self {
             server_root,
@@ -224,6 +264,7 @@ impl ServerPolicy {
             version,
             roles,
             assignments,
+            emojis,
             issued_ms,
             sig,
         })
@@ -286,6 +327,7 @@ mod tests {
             5,
             vec![mod_role, muted],
             vec![(alice, vec![1, 2])],
+            vec![],
             0,
         );
         p.verify().unwrap();
@@ -299,6 +341,7 @@ mod tests {
             6,
             p.roles.clone(),
             vec![(carol, vec![1])],
+            vec![],
             0,
         );
         assert_eq!(p2.effective_perms(&carol), PERM_DEFAULT | PERM_KICK);
@@ -307,6 +350,25 @@ mod tests {
         assert_eq!(p.top_role_name(&[0u8; 32]), None);
 
         assert_eq!(ServerPolicy::decode(&p.encode()).unwrap(), p);
+    }
+
+    #[test]
+    fn custom_emoji_roundtrips_and_is_signed() {
+        let owner = [1u8; 32];
+        let emojis = vec![
+            ("blobwave".to_string(), [9u8; 32]),
+            ("party_parrot".to_string(), [8u8; 32]),
+        ];
+        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], emojis.clone(), 0);
+        p.verify().unwrap();
+        assert_eq!(p.emoji_hash("party_parrot"), Some([8u8; 32]));
+        assert_eq!(p.emoji_hash("nope"), None);
+        assert_eq!(ServerPolicy::decode(&p.encode()).unwrap(), p);
+
+        // An emoji-free policy still encodes to the pre-emoji body layout.
+        let plain = ServerPolicy::genesis(&root(), owner, 0);
+        assert!(plain.emojis.is_empty());
+        assert_eq!(ServerPolicy::decode(&plain.encode()).unwrap(), plain);
     }
 
     #[test]

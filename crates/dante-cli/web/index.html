@@ -134,6 +134,8 @@ button, input, textarea { font: inherit; color: inherit; }
   display: grid; place-items: center; font-size: 16px; line-height: 1;
 }
 .icon-btn:hover { color: var(--text); background: var(--bg-hover); }
+#btn-verify:not(.verified) { filter: saturate(1.4); }
+#btn-verify.verified { color: var(--cornflower-blue); }
 
 .pane-scroll { flex: 1; overflow-y: auto; padding: 10px 8px; }
 .group-label {
@@ -332,6 +334,7 @@ button, input, textarea { font: inherit; color: inherit; }
       <span class="title" id="chat-title"><span class="hash">#</span> …</span>
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
+      <button class="icon-btn" id="btn-verify" title="Safety number" hidden>🛡️</button>
       <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
       <button class="icon-btn" id="btn-link" title="Create invite link" hidden>🔗</button>
       <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
@@ -393,6 +396,7 @@ const store = {
   typingText: "",
   policies: {},                       // server root -> policy JSON
   reactions: {},                      // ref_seq -> [{emoji,count,by}]
+  safety: {},                         // dm fp -> {number,verified,available}
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -446,6 +450,7 @@ const api = {
 const ui = {
   ask: (msg, def) => { const v = window.prompt(msg, def || ""); return v == null ? null : v.trim(); },
   say: msg => window.alert(msg),
+  confirm: msg => window.confirm(msg),
   sys(text) {
     const log = $("#log");
     if (log.querySelector(".empty")) log.innerHTML = "";
@@ -608,6 +613,8 @@ function renderChat() {
   const log = $("#log");
   const inviteBtn = $("#btn-invite");
   const linkBtn = $("#btn-link");
+  const verifyBtn = $("#btn-verify");
+  verifyBtn.hidden = true;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
@@ -632,6 +639,16 @@ function renderChat() {
     titleEl.innerHTML = '<span class="hash">@</span> ' + esc(short(target));
     $("#chat-topic").textContent = "direct message · " + target;
     inviteBtn.hidden = true; linkBtn.hidden = true;
+
+    const s = store.safety[target];
+    if (s === undefined) { loadSafety(target); }
+    else if (s && s.available) {
+      verifyBtn.hidden = false;
+      verifyBtn.textContent = s.verified ? "🛡️" : "⚠️";
+      verifyBtn.classList.toggle("verified", !!s.verified);
+      verifyBtn.title = s.verified ? "Verified — safety number confirmed" : "Unverified — compare the safety number";
+      verifyBtn.onclick = () => verifyFlow(target);
+    }
   }
 
   const msgs = store.msgsFor(target);
@@ -689,6 +706,37 @@ async function refreshReactions() {
     const r = await (await fetch("/api/reactions")).json();
     if (JSON.stringify(r) !== JSON.stringify(store.reactions)) { store.reactions = r; renderChat(); }
   } catch (_) {}
+}
+
+async function loadSafety(fp) {
+  store.safety[fp] = null;                         // "pending" — avoids a refetch loop
+  try {
+    store.safety[fp] = await api.get("/api/safety?peer=" + encodeURIComponent(fp));
+  } catch (_) {
+    store.safety[fp] = { available: false };
+  }
+  if (curTarget() === fp) renderChat();
+}
+
+function fmtSafety(n) {                            // 12 groups -> 3 rows of 4
+  const g = (n || "").split(" ");
+  return [g.slice(0, 4), g.slice(4, 8), g.slice(8, 12)].map(r => r.join("  ")).join("\n");
+}
+
+async function verifyFlow(fp) {
+  const s = store.safety[fp];
+  if (!s || !s.available) { ui.say("No safety number yet — the peer must be known to the ledger."); return; }
+  const msg =
+    "Safety number for " + short(fp) + "\n\n" + fmtSafety(s.number) +
+    "\n\nCompare this with your contact over a channel you already trust " +
+    "(in person, a call, …). It matches on both sides only if no one is in the middle." +
+    "\n\nCurrently: " + (s.verified ? "VERIFIED" : "not verified") +
+    "\n\nOK = " + (s.verified ? "clear verification" : "mark as verified") + ".";
+  if (!ui.confirm(msg)) return;
+  try {
+    await api.post("/api/verify", { peer: fp, verified: !s.verified });
+    await loadSafety(fp);
+  } catch (e) { ui.sys("verify failed: " + e.message); }
 }
 
 function groupShell(m, sameAuthor) {
@@ -945,6 +993,14 @@ async function refreshPolicies() {
         store.policies[root] = p;
         if (changed) render();
       }
+    } catch (_) {}
+  }
+  // Keep the open DM's verification badge fresh (a key rotation can flip it).
+  const t = curTarget();
+  if (isDM() && t && !isSelf(t)) {
+    try {
+      const s = await api.get("/api/safety?peer=" + encodeURIComponent(t));
+      if (JSON.stringify(s) !== JSON.stringify(store.safety[t])) { store.safety[t] = s; renderChat(); }
     } catch (_) {}
   }
 }

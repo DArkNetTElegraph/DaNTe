@@ -14,7 +14,8 @@
 //! `GET /api/state`, `POST /api/onboard {mode,passphrase,blob}`,
 //! `GET /api/discover`, `POST /api/discover {server,on,summary,tags}`,
 //! `POST /api/discover/join {server,password}`, `GET /api/reactions`,
-//! `POST /api/react {channel,seq,emoji,remove}`.
+//! `POST /api/react {channel,seq,emoji,remove}`,
+//! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -140,6 +141,17 @@ enum Cmd {
     },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
+    /// The DM pair's safety number + verification state as a ready JSON object.
+    Safety {
+        peer: [u8; 32],
+        reply: oneshot::Sender<String>,
+    },
+    /// Set/clear safety-number verification for a DM peer.
+    Verify {
+        peer: String,
+        on: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -832,6 +844,28 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(json);
         }
+        Cmd::Safety { peer, reply } => {
+            let json = match engine.safety_number(&peer) {
+                Some(number) => serde_json::json!({
+                    "available": true,
+                    "number": number,
+                    "verified": engine.is_verified(&peer),
+                })
+                .to_string(),
+                None => serde_json::json!({ "available": false }).to_string(),
+            };
+            let _ = reply.send(json);
+        }
+        Cmd::Verify { peer, on, reply } => {
+            let r = match parse_fingerprint(&peer) {
+                Ok(id) => engine
+                    .set_verified(&id, on)
+                    .map(|_| if on { "verified" } else { "cleared" }.to_string())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::AutoKick {
             server,
             days,
@@ -1309,6 +1343,50 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::AutoKick {
                 server: r.server,
                 days: r.days,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/safety") => {
+            let peer = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("peer="))
+                .unwrap_or("");
+            let body = match parse_fingerprint(peer) {
+                Ok(id) => {
+                    let (tx, rx) = oneshot::channel();
+                    if shared
+                        .cmd
+                        .send(Cmd::Safety {
+                            peer: id,
+                            reply: tx,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+                    }
+                    rx.await.unwrap_or_else(|_| "{\"available\":false}".into())
+                }
+                Err(_) => "{\"available\":false}".into(),
+            };
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/verify") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+                #[serde(default)]
+                verified: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Verify {
+                peer: r.peer,
+                on: r.verified,
                 reply,
             })
             .await

@@ -9,8 +9,8 @@
 //! {channel,ttl_secs,max_uses}`, `POST /api/redeem {link}`, `POST /api/remove
 //! {channel,member}`, `POST /api/autokick {server,days}`, `GET
 //! /api/policy?server=`, `POST /api/role {server,id,name,allow,deny,rank}`,
-//! `POST /api/roleassign {server,member,role_id,add}`, `GET /api/typing`,
-//! `POST /api/typing {to}`.
+//! `POST /api/roleassign {server,member,role_id,add}`, `POST /api/joinpw
+//! {server,password}`, `GET /api/typing`, `POST /api/typing {to}`.
 
 use std::{
     collections::VecDeque,
@@ -68,6 +68,12 @@ enum Cmd {
     },
     Redeem {
         link: String,
+        password: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    JoinPw {
+        server: String,
+        password: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     RemoveMember {
@@ -500,12 +506,31 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
-        Cmd::Redeem { link, reply } => {
+        Cmd::Redeem {
+            link,
+            password,
+            reply,
+        } => {
+            let pw = (!password.is_empty()).then_some(password.as_str());
             let r = engine
-                .redeem_invite(&link, now_ms())
+                .redeem_invite(&link, pw, now_ms())
                 .await
                 .map(|_| "ok".into())
                 .map_err(|e| e.to_string());
+            let _ = reply.send(r);
+        }
+        Cmd::JoinPw {
+            server,
+            password,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(root) => engine
+                    .set_join_password(&root, (!password.is_empty()).then_some(password.as_str()))
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
             let _ = reply.send(r);
         }
         Cmd::RemoveMember {
@@ -836,12 +861,33 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             #[derive(serde::Deserialize)]
             struct Req {
                 link: String,
+                #[serde(default)]
+                password: String,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
             };
             dispatch(&mut stream, &shared, |reply| Cmd::Redeem {
                 link: r.link,
+                password: r.password,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/joinpw") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                #[serde(default)]
+                password: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::JoinPw {
+                server: r.server,
+                password: r.password,
                 reply,
             })
             .await

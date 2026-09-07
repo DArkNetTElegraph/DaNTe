@@ -503,6 +503,7 @@ function renderPane() {
   const mk = (glyph, title, fn) => { const b = el("button", "icon-btn", glyph); b.title = title; b.onclick = fn; return b; };
   actions.appendChild(mk("#＋", "Create channel", () => createChannelFlow(server)));
   actions.appendChild(mk("🛡", "Roles", () => rolesFlow(server)));
+  actions.appendChild(mk("🔑", "Set a join password", () => joinPwFlow(server)));
   const akDays = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
   actions.appendChild(mk("⏲", akDays ? `Auto-kick after ${akDays}d — click to change` : "Auto-kick inactive members", () => autoKickFlow(server)));
 
@@ -754,11 +755,22 @@ async function inviteLinkFlow(channelTarget) {
 async function redeemFlow() {
   const link = ui.ask("Paste an invite link:");
   if (!link) return;
+  const password = ui.ask("Server password? (leave blank if none)") || "";
   try {
-    await api.post("/api/redeem", { link });
+    await api.post("/api/redeem", { link, password });
     ui.sys("Redeemed — you'll join once the host is online.");
     setTimeout(refreshChannels, 3000);
   } catch (e) { ui.say("Redeem failed: " + e.message); }
+}
+async function joinPwFlow(server) {
+  const root = store.rootOf(server);
+  if (!root) return ui.say("Unknown server root.");
+  const pw = ui.ask("Set a join password for this server (blank = disable):") ?? null;
+  if (pw === null) return;
+  try {
+    await api.post("/api/joinpw", { server: root, password: pw });
+    ui.sys(pw ? "Join password set." : "Join password disabled.");
+  } catch (e) { ui.say("Could not set (host only): " + e.message); }
 }
 function addDmFlow() {
   const fp = ui.ask("Their fingerprint (base32) or 24 words:");

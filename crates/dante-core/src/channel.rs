@@ -159,10 +159,13 @@ pub enum ChannelControl {
         /// Encoded `dante_group::SenderKeyBundle`.
         bundle: Vec<u8>,
     },
-    /// A joiner presents a signed invite token to the host to be added.
+    /// A joiner presents a signed invite token (and, if the server is
+    /// password-gated, the password) to the host to be added.
     Redeem {
         /// Encoded [`crate::invite::InviteToken`].
         token: Vec<u8>,
+        /// The server join password, or empty if none.
+        pw: String,
     },
     /// Eject a member: everyone drops them and rotates their own sender chain.
     Remove {
@@ -207,8 +210,8 @@ impl ChannelControl {
             ChannelControl::KeyBundle { channel_id, bundle } => {
                 w.u8(2).fixed(channel_id).bytes(bundle);
             }
-            ChannelControl::Redeem { token } => {
-                w.u8(3).bytes(token);
+            ChannelControl::Redeem { token, pw } => {
+                w.u8(3).bytes(token).string(pw);
             }
             ChannelControl::Remove { order } => {
                 w.u8(4).bytes(order);
@@ -243,6 +246,7 @@ impl ChannelControl {
             },
             3 => ChannelControl::Redeem {
                 token: r.bytes()?.to_vec(),
+                pw: r.string()?,
             },
             4 => ChannelControl::Remove {
                 order: r.bytes()?.to_vec(),

@@ -194,10 +194,18 @@ DaNTe/
   `/api/messages`, `/api/send`). Cross-platform, no system deps, verified
   between two processes. Open `http://127.0.0.1:8080` after
   `dante serve --keystore K --relay ADDR`.
+- **Onboarding *(done)*:** `dante serve` no longer needs a keystore up front.
+  With none present, the page shows a create / unlock / import flow —
+  `GET /api/state`, `POST /api/onboard {mode,passphrase,blob}`. *create* mints
+  an `Identity`, seals a keystore to `--keystore` (default `dante.keystore`),
+  returns the recovery-backup blob (hex of `backup::export`) for the user to
+  save, and connects the engine; *unlock* opens the existing keystore file
+  with a passphrase; *import* accepts a pasted keystore **or** recovery blob.
+  `DANTE_PASSPHRASE` still short-circuits to a direct load when set.
 - **Deferred:** the Tauri + SvelteKit desktop client from the plan — its Linux
   build needs `webkit2gtk4.1-devel` / `libsoup3-devel` (not installable in the
-  build environment used so far). Onboarding, contact add + safety-number
-  verification, and a settings screen are still to build in whichever shell.
+  build environment used so far). Contact add + safety-number verification and
+  a settings screen are still to build in whichever shell.
 
 **--- MVP boundary: anonymous identity on a verifiable log, key directory via
 relay, fully E2E DMs with FS/PCS + file transfer, a usable client, zero project

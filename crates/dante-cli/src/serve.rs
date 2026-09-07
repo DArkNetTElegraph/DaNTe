@@ -10,12 +10,17 @@
 //! {channel,member}`, `POST /api/autokick {server,days}`, `GET
 //! /api/policy?server=`, `POST /api/role {server,id,name,allow,deny,rank}`,
 //! `POST /api/roleassign {server,member,role_id,add}`, `POST /api/joinpw
-//! {server,password}`, `GET /api/typing`, `POST /api/typing {to}`.
+//! {server,password}`, `GET /api/typing`, `POST /api/typing {to}`,
+//! `GET /api/state`, `POST /api/onboard {mode,passphrase,blob}`.
+//!
+//! `serve` can start with no identity: the page then shows a create / unlock /
+//! import flow and connects the engine when it completes.
 
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -23,7 +28,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use dante_core::{Engine, Inbound, TypingScope};
-use dante_identity::id::IdentityId;
+use dante_crypto::pow::Difficulty;
+use dante_identity::{backup, id::IdentityId, keystore, Identity};
+use dante_ledger::LedgerParams;
 use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -154,6 +161,15 @@ struct ChanView {
     auto_kick_days: u64,
 }
 
+/// Everything `serve` needs to build the engine once the user has an identity.
+pub struct Bootstrap {
+    pub relay: String,
+    pub keystore_path: PathBuf,
+    pub store_path: Option<PathBuf>,
+    pub params: LedgerParams,
+    pub pow: Difficulty,
+}
+
 struct Shared {
     inbox: Mutex<VecDeque<Item>>,
     channels: Mutex<Vec<ChanView>>,
@@ -162,9 +178,15 @@ struct Shared {
     /// Monotonic id stamped on every inbox item, drawn by both the engine tick
     /// loop and command handlers so the SPA's `since` cursor never regresses.
     next_seq: AtomicU64,
-    me_fingerprint: String,
-    me_words: String,
+    /// `(fingerprint, word-phrase)`; empty until an identity is set up.
+    me: Mutex<(String, String)>,
+    /// True once the engine is connected and the tick loop is running.
+    ready: AtomicBool,
     cmd: mpsc::Sender<Cmd>,
+    /// How to connect the engine after onboarding.
+    boot: Bootstrap,
+    /// The command receiver, handed to the engine task when it starts.
+    pending_rx: Mutex<Option<mpsc::Receiver<Cmd>>>,
 }
 
 impl Shared {
@@ -177,6 +199,30 @@ impl Shared {
 /// which are already `IdentityId` bytes).
 fn id_b32(bytes: &[u8; 32]) -> String {
     IdentityId::from_bytes(*bytes).to_base32()
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+    }
+    s
+}
+
+fn hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.len() % 2 != 0 || s.is_empty() {
+        return None;
+    }
+    let b = s.as_bytes();
+    (0..b.len() / 2)
+        .map(|i| {
+            let hi = (b[2 * i] as char).to_digit(16)?;
+            let lo = (b[2 * i + 1] as char).to_digit(16)?;
+            Some(((hi << 4) | lo) as u8)
+        })
+        .collect()
 }
 
 /// Label for a channel sender (bytes are already an `IdentityId`).
@@ -205,193 +251,38 @@ fn parse_target(to: &str) -> Result<(bool, [u8; 32]), String> {
     }
 }
 
-/// Entry point for the `serve` subcommand.
-pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Cmd>(32);
+/// Entry point for the `serve` subcommand. `existing` is `Some` when a keystore
+/// was already loaded; `None` starts the page in onboarding mode.
+pub async fn run(existing: Option<Engine>, http_addr: &str, boot: Bootstrap) -> Result<()> {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(32);
     let shared = Arc::new(Shared {
         inbox: Mutex::new(VecDeque::new()),
         channels: Mutex::new(Vec::new()),
         typing: Mutex::new(Vec::new()),
         next_seq: AtomicU64::new(0),
-        me_fingerprint: engine.identity().id().to_base32(),
-        me_words: engine.identity().id().to_words(),
+        me: Mutex::new((String::new(), String::new())),
+        ready: AtomicBool::new(false),
         cmd: cmd_tx,
+        boot,
+        pending_rx: Mutex::new(Some(cmd_rx)),
     });
 
     let listener = TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("binding {http_addr}"))?;
-    eprintln!(
-        "dante UI on http://{http_addr}  (you are {})",
-        shared.me_fingerprint
-    );
 
-    let engine_shared = Arc::clone(&shared);
-    tokio::spawn(async move {
-        let mut engine = engine;
-
-        // Replay stored history.
+    if let Some(engine) = existing {
         {
-            let mut inbox = engine_shared.inbox.lock().await;
-            for h in engine.history() {
-                let seq = engine_shared.next();
-                let from = if h.outgoing {
-                    "you".to_string()
-                } else {
-                    short_fp(&h.peer_idk)
-                };
-                inbox.push_back(match &h.kind {
-                    dante_core::HistoryKind::Text(t) => Item::Message {
-                        seq,
-                        from,
-                        text: t.clone(),
-                    },
-                    dante_core::HistoryKind::File { filename, size } => Item::File {
-                        seq,
-                        from,
-                        filename: filename.clone(),
-                        size: *size as usize,
-                        saved: String::new(),
-                    },
-                });
-            }
-
-            let names: std::collections::HashMap<[u8; 32], String> = engine
-                .channels()
-                .into_iter()
-                .map(|c| (c.channel_id, c.channel_name))
-                .collect();
-            for e in engine.channel_history() {
-                inbox.push_back(Item::Channel {
-                    seq: engine_shared.next(),
-                    channel: id_b32(&e.channel_id),
-                    channel_name: names.get(&e.channel_id).cloned().unwrap_or_default(),
-                    from: if e.outgoing {
-                        "you".to_string()
-                    } else {
-                        short_id(&e.sender)
-                    },
-                    text: e.text.clone(),
-                });
-            }
+            let id = engine.identity().id();
+            *shared.me.lock().await = (id.to_base32(), id.to_words());
         }
-
-        eprintln!("announcing to the relay ...");
-        if let Err(e) = async {
-            engine.announce_if_stale("", now_ms()).await?;
-            engine.publish_prekeys().await?;
-            engine.sync(now_ms()).await?;
-            Ok::<_, dante_core::CoreError>(())
-        }
-        .await
-        {
-            eprintln!("engine startup error: {e}");
-        } else {
-            eprintln!("ready");
-        }
-        refresh_channels(&engine, &engine_shared).await;
-
-        let mut tick = tokio::time::interval(Duration::from_millis(700));
-        let mut save_tick = tokio::time::interval(Duration::from_secs(15));
-        let mut sweep_tick = tokio::time::interval(Duration::from_secs(120));
-        // Last inbound message time per sender label. A real message supersedes
-        // any typing signal that predates it (the relay keeps serving the stale
-        // signal for a few seconds, which otherwise flashes "is typing" right
-        // after the message lands).
-        let mut last_msg_ms: std::collections::HashMap<String, u64> =
-            std::collections::HashMap::new();
-        loop {
-            tokio::select! {
-                _ = save_tick.tick() => { let _ = engine.persist(); }
-
-                _ = sweep_tick.tick() => {
-                    if let Ok(kicked) = engine.sweep_inactive_members(now_ms()).await {
-                        for k in kicked {
-                            eprintln!("auto-kicked inactive member {}", id_b32(&k));
-                        }
-                        refresh_channels(&engine, &engine_shared).await;
-                    }
-                }
-
-                Some(cmd) = cmd_rx.recv() => {
-                    handle_cmd(&mut engine, &engine_shared, cmd).await;
-                    refresh_channels(&engine, &engine_shared).await;
-                }
-
-                _ = tick.tick() => {
-                    let now = now_ms();
-                    let _ = engine.sync(now).await;
-
-                    if let Ok(msgs) = engine.poll_channels(now).await {
-                        let mut inbox = engine_shared.inbox.lock().await;
-                        for m in msgs {
-                            let from = short_id(&m.sender);
-                            last_msg_ms.insert(from.clone(), now);
-                            inbox.push_back(Item::Channel {
-                                seq: engine_shared.next(),
-                                channel: id_b32(&m.channel_id),
-                                channel_name: m.channel_name,
-                                from,
-                                text: m.text,
-                            });
-                            while inbox.len() > INBOX_CAP { inbox.pop_front(); }
-                        }
-                    }
-
-                    if let Ok(items) = engine.receive_all(now).await {
-                        let mut inbox = engine_shared.inbox.lock().await;
-                        for it in items {
-                            let seq = engine_shared.next();
-                            let entry = match it {
-                                Inbound::Message(m) => {
-                                    let from = short_fp(&m.from_idk);
-                                    last_msg_ms.insert(from.clone(), now);
-                                    Item::Message { seq, from, text: m.text }
-                                }
-                                Inbound::File { from_idk, filename, data } => {
-                                    let safe = filename.rsplit(['/', '\\']).next().unwrap_or("file")
-                                        .replace(['/', '\\', '\0'], "_");
-                                    let saved = format!("dante-recv-{safe}");
-                                    let _ = std::fs::write(&saved, &data);
-                                    let from = short_fp(&from_idk);
-                                    last_msg_ms.insert(from.clone(), now);
-                                    Item::File { seq, from, filename, size: data.len(), saved }
-                                }
-                            };
-                            inbox.push_back(entry);
-                            while inbox.len() > INBOX_CAP { inbox.pop_front(); }
-                        }
-                    }
-
-                    if let Ok(events) = engine.poll_typing(now).await {
-                        let mut typing = engine_shared.typing.lock().await;
-                        for ev in events {
-                            let who = match ev.scope {
-                                TypingScope::Dm(_) => short_fp(&ev.who),
-                                TypingScope::Channel(_) => short_id(&ev.who),
-                            };
-                            // Drop a signal that predates this sender's last
-                            // actual message — they typed, then sent, and the
-                            // relay is still serving the stale "typing".
-                            if ev.at_ms <= last_msg_ms.get(&who).copied().unwrap_or(0) {
-                                continue;
-                            }
-                            // Key freshness off the signal's own timestamp so a
-                            // still-served-but-stale signal ages out on time.
-                            match typing.iter_mut().find(|(w, _)| *w == who) {
-                                Some(e) => e.1 = e.1.max(ev.at_ms),
-                                None => typing.push((who, ev.at_ms)),
-                            }
-                        }
-                        typing.retain(|(_, at)| now.saturating_sub(*at) <= TYPING_FRESH_MS);
-                    }
-                    last_msg_ms.retain(|_, t| now.saturating_sub(*t) <= 60_000);
-
-                    refresh_channels(&engine, &engine_shared).await;
-                }
-            }
-        }
-    });
+        shared.ready.store(true, Ordering::Relaxed);
+        let rx = shared.pending_rx.lock().await.take().unwrap();
+        tokio::spawn(engine_task(engine, Arc::clone(&shared), rx));
+        eprintln!("dante UI on http://{http_addr}");
+    } else {
+        eprintln!("dante UI on http://{http_addr}  (open it to create or import an identity)");
+    }
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -401,6 +292,202 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                 tracing::debug!(error = %e, "http connection ended");
             }
         });
+    }
+}
+
+/// Connect the engine with `identity` using the stored bootstrap params and
+/// start the tick loop. Returns `(fingerprint, words)`.
+async fn connect_and_start(
+    shared: Arc<Shared>,
+    identity: Identity,
+) -> Result<(String, String), String> {
+    if shared.ready.load(Ordering::Relaxed) {
+        return Err("already set up".into());
+    }
+    let b = &shared.boot;
+    let engine = Engine::connect(identity, &b.relay, b.params, b.pow, b.store_path.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let out = {
+        let id = engine.identity().id();
+        (id.to_base32(), id.to_words())
+    };
+    let rx = shared
+        .pending_rx
+        .lock()
+        .await
+        .take()
+        .ok_or("engine already starting")?;
+    *shared.me.lock().await = out.clone();
+    shared.ready.store(true, Ordering::Relaxed);
+    tokio::spawn(engine_task(engine, Arc::clone(&shared), rx));
+    Ok(out)
+}
+
+async fn engine_task(
+    mut engine: Engine,
+    engine_shared: Arc<Shared>,
+    mut cmd_rx: mpsc::Receiver<Cmd>,
+) {
+    // Replay stored history.
+    {
+        let mut inbox = engine_shared.inbox.lock().await;
+        for h in engine.history() {
+            let seq = engine_shared.next();
+            let from = if h.outgoing {
+                "you".to_string()
+            } else {
+                short_fp(&h.peer_idk)
+            };
+            inbox.push_back(match &h.kind {
+                dante_core::HistoryKind::Text(t) => Item::Message {
+                    seq,
+                    from,
+                    text: t.clone(),
+                },
+                dante_core::HistoryKind::File { filename, size } => Item::File {
+                    seq,
+                    from,
+                    filename: filename.clone(),
+                    size: *size as usize,
+                    saved: String::new(),
+                },
+            });
+        }
+
+        let names: std::collections::HashMap<[u8; 32], String> = engine
+            .channels()
+            .into_iter()
+            .map(|c| (c.channel_id, c.channel_name))
+            .collect();
+        for e in engine.channel_history() {
+            inbox.push_back(Item::Channel {
+                seq: engine_shared.next(),
+                channel: id_b32(&e.channel_id),
+                channel_name: names.get(&e.channel_id).cloned().unwrap_or_default(),
+                from: if e.outgoing {
+                    "you".to_string()
+                } else {
+                    short_id(&e.sender)
+                },
+                text: e.text.clone(),
+            });
+        }
+    }
+
+    eprintln!("announcing to the relay ...");
+    if let Err(e) = async {
+        engine.announce_if_stale("", now_ms()).await?;
+        engine.publish_prekeys().await?;
+        engine.sync(now_ms()).await?;
+        Ok::<_, dante_core::CoreError>(())
+    }
+    .await
+    {
+        eprintln!("engine startup error: {e}");
+    } else {
+        eprintln!("ready");
+    }
+    refresh_channels(&engine, &engine_shared).await;
+
+    let mut tick = tokio::time::interval(Duration::from_millis(700));
+    let mut save_tick = tokio::time::interval(Duration::from_secs(15));
+    let mut sweep_tick = tokio::time::interval(Duration::from_secs(120));
+    // Last inbound message time per sender label. A real message supersedes
+    // any typing signal that predates it (the relay keeps serving the stale
+    // signal for a few seconds, which otherwise flashes "is typing" right
+    // after the message lands).
+    let mut last_msg_ms: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    loop {
+        tokio::select! {
+            _ = save_tick.tick() => { let _ = engine.persist(); }
+
+            _ = sweep_tick.tick() => {
+                if let Ok(kicked) = engine.sweep_inactive_members(now_ms()).await {
+                    for k in kicked {
+                        eprintln!("auto-kicked inactive member {}", id_b32(&k));
+                    }
+                    refresh_channels(&engine, &engine_shared).await;
+                }
+            }
+
+            Some(cmd) = cmd_rx.recv() => {
+                handle_cmd(&mut engine, &engine_shared, cmd).await;
+                refresh_channels(&engine, &engine_shared).await;
+            }
+
+            _ = tick.tick() => {
+                let now = now_ms();
+                let _ = engine.sync(now).await;
+
+                if let Ok(msgs) = engine.poll_channels(now).await {
+                    let mut inbox = engine_shared.inbox.lock().await;
+                    for m in msgs {
+                        let from = short_id(&m.sender);
+                        last_msg_ms.insert(from.clone(), now);
+                        inbox.push_back(Item::Channel {
+                            seq: engine_shared.next(),
+                            channel: id_b32(&m.channel_id),
+                            channel_name: m.channel_name,
+                            from,
+                            text: m.text,
+                        });
+                        while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                    }
+                }
+
+                if let Ok(items) = engine.receive_all(now).await {
+                    let mut inbox = engine_shared.inbox.lock().await;
+                    for it in items {
+                        let seq = engine_shared.next();
+                        let entry = match it {
+                            Inbound::Message(m) => {
+                                let from = short_fp(&m.from_idk);
+                                last_msg_ms.insert(from.clone(), now);
+                                Item::Message { seq, from, text: m.text }
+                            }
+                            Inbound::File { from_idk, filename, data } => {
+                                let safe = filename.rsplit(['/', '\\']).next().unwrap_or("file")
+                                    .replace(['/', '\\', '\0'], "_");
+                                let saved = format!("dante-recv-{safe}");
+                                let _ = std::fs::write(&saved, &data);
+                                let from = short_fp(&from_idk);
+                                last_msg_ms.insert(from.clone(), now);
+                                Item::File { seq, from, filename, size: data.len(), saved }
+                            }
+                        };
+                        inbox.push_back(entry);
+                        while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                    }
+                }
+
+                if let Ok(events) = engine.poll_typing(now).await {
+                    let mut typing = engine_shared.typing.lock().await;
+                    for ev in events {
+                        let who = match ev.scope {
+                            TypingScope::Dm(_) => short_fp(&ev.who),
+                            TypingScope::Channel(_) => short_id(&ev.who),
+                        };
+                        // Drop a signal that predates this sender's last
+                        // actual message — they typed, then sent, and the
+                        // relay is still serving the stale "typing".
+                        if ev.at_ms <= last_msg_ms.get(&who).copied().unwrap_or(0) {
+                            continue;
+                        }
+                        // Key freshness off the signal's own timestamp so a
+                        // still-served-but-stale signal ages out on time.
+                        match typing.iter_mut().find(|(w, _)| *w == who) {
+                            Some(e) => e.1 = e.1.max(ev.at_ms),
+                            None => typing.push((who, ev.at_ms)),
+                        }
+                    }
+                    typing.retain(|(_, at)| now.saturating_sub(*at) <= TYPING_FRESH_MS);
+                }
+                last_msg_ms.retain(|_, t| now.saturating_sub(*t) <= 60_000);
+
+                refresh_channels(&engine, &engine_shared).await;
+            }
+        }
     }
 }
 
@@ -720,12 +807,86 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         }
 
         ("GET", "/api/me") => {
+            let (fp, words) = shared.me.lock().await.clone();
+            let body = serde_json::json!({ "fingerprint": fp, "words": words }).to_string();
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/state") => {
+            let ready = shared.ready.load(Ordering::Relaxed);
+            let fp = shared.me.lock().await.0.clone();
             let body = serde_json::json!({
-                "fingerprint": shared.me_fingerprint,
-                "words": shared.me_words,
+                "ready": ready,
+                "fingerprint": fp,
+                "has_keystore": shared.boot.keystore_path.exists(),
             })
             .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/onboard") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                mode: String,
+                passphrase: String,
+                #[serde(default)]
+                blob: String,
+            }
+            if shared.ready.load(Ordering::Relaxed) {
+                return respond(&mut stream, 409, "text/plain", b"already set up").await;
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            if r.passphrase.len() < 6 {
+                return respond(&mut stream, 400, "text/plain", b"passphrase too short").await;
+            }
+            let identity = match r.mode.as_str() {
+                "create" => Ok(Identity::generate(now_ms())),
+                "unlock" => std::fs::read(&shared.boot.keystore_path)
+                    .map_err(|_| "no keystore file to unlock".to_string())
+                    .and_then(|bytes| {
+                        keystore::open(&bytes, r.passphrase.as_bytes())
+                            .map_err(|_| "wrong passphrase".to_string())
+                    }),
+                "import" => match hex_bytes(&r.blob) {
+                    Some(bytes) => keystore::open(&bytes, r.passphrase.as_bytes())
+                        .or_else(|_| backup::import(&bytes, r.passphrase.as_bytes()))
+                        .map_err(|_| "could not open that blob with this passphrase".to_string()),
+                    None => Err("recovery blob is not valid hex".to_string()),
+                },
+                _ => Err("mode must be create, unlock or import".to_string()),
+            };
+            let identity = match identity {
+                Ok(id) => id,
+                Err(e) => return respond(&mut stream, 400, "text/plain", e.as_bytes()).await,
+            };
+
+            // Persist the keystore so the next run loads it directly.
+            match keystore::seal(&identity, r.passphrase.as_bytes()) {
+                Ok(sealed) => {
+                    if let Err(e) = std::fs::write(&shared.boot.keystore_path, sealed) {
+                        return respond(&mut stream, 500, "text/plain", e.to_string().as_bytes())
+                            .await;
+                    }
+                }
+                Err(_) => return respond(&mut stream, 500, "text/plain", b"seal failed").await,
+            }
+            let backup_hex = backup::export(&identity, r.passphrase.as_bytes())
+                .ok()
+                .map(|b| to_hex(&b))
+                .unwrap_or_default();
+
+            match connect_and_start(Arc::clone(&shared), identity).await {
+                Ok((fp, words)) => {
+                    let out = serde_json::json!({
+                        "fingerprint": fp, "words": words, "backup": backup_hex,
+                    })
+                    .to_string();
+                    respond(&mut stream, 200, "application/json", out.as_bytes()).await
+                }
+                Err(e) => respond(&mut stream, 502, "text/plain", e.as_bytes()).await,
+            }
         }
 
         ("GET", "/api/channels") => {

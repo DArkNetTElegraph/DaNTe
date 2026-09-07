@@ -48,6 +48,8 @@ impl Default for Limits {
 pub struct RelayState {
     ledger: Ledger<MemoryStore>,
     mailbox: Mailbox,
+    /// `identity_id` -> latest published, encoded `PreKeyBundle`.
+    prekeys: std::collections::HashMap<[u8; 32], Vec<u8>>,
     announce_rl: KeyedRateLimiter<IpAddr>,
     record_rl: KeyedRateLimiter<IpAddr>,
     deposit_rl: KeyedRateLimiter<IpAddr>,
@@ -60,6 +62,7 @@ impl RelayState {
         Self {
             ledger: Ledger::new(MemoryStore::default(), params),
             mailbox: Mailbox::new(),
+            prekeys: std::collections::HashMap::new(),
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
             deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
@@ -149,6 +152,23 @@ impl RelayState {
                     .collect();
                 Response::Envelopes(envs)
             }
+
+            Request::PublishPrekeys(blob) => {
+                if !self.record_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                // The bundle's `identity_id` is its first 32 bytes; the relay
+                // stores the blob opaquely and the recipient re-validates.
+                match blob.get(..32).and_then(|s| <[u8; 32]>::try_from(s).ok()) {
+                    Some(id) => {
+                        self.prekeys.insert(id, blob);
+                        Response::Ok
+                    }
+                    None => Response::Error("malformed prekey bundle".into()),
+                }
+            }
+
+            Request::GetPrekeys(id) => Response::Prekeys(self.prekeys.get(&id).cloned()),
         }
     }
 }

@@ -1,10 +1,18 @@
-//! `dante-core` — the orchestration engine consumed by DaNTe clients.
+//! `dante-core` — the orchestration engine DaNTe clients drive.
 //!
-//! Ties [`dante_identity`], [`dante_ledger`], [`dante_net`] and [`dante_dm`]
-//! together behind a task-oriented async API plus an event stream (new message,
-//! contact verified, peer incompatible, ledger split-view detected, ...).
+//! [`Engine`] owns one user's identity, a local [`dante_ledger`] replica, a
+//! relay connection, prekeys, and live [`dante_dm`] sessions, and exposes a
+//! small async API: [`Engine::announce`], [`Engine::publish_prekeys`],
+//! [`Engine::sync`], [`Engine::send_dm`], [`Engine::receive`].
 //!
-//! Holds no UI concerns and no direct terminal/GUI output. Both `dante-cli` and
-//! the Tauri client are thin shells over this crate.
+//! It holds no UI concerns — `dante-cli` and the Tauri client are thin shells
+//! over this crate.
 
-// Phase 4/5 begin implementation here.
+pub mod engine;
+pub mod error;
+
+pub use engine::{Engine, ReceivedDm, DM_TTL_MS};
+pub use error::CoreError;
+
+#[cfg(test)]
+mod e2e_tests;

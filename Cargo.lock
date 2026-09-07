@@ -303,11 +303,13 @@ dependencies = [
 name = "dante-core"
 version = "0.0.1"
 dependencies = [
+ "dante-crypto",
  "dante-dm",
  "dante-identity",
  "dante-ledger",
  "dante-net",
  "dante-proto",
+ "dante-relay",
  "thiserror",
  "tokio",
  "tracing",

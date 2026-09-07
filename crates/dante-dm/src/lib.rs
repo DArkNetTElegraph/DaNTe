@@ -21,5 +21,5 @@ pub mod x3dh;
 
 pub use error::DmError;
 pub use ratchet::{Header, Ratchet, MAX_SKIP};
-pub use session::{DmMessage, InitMessage, Session};
+pub use session::{DmMessage, InitMessage, Packet, Session};
 pub use x3dh::{PreKeyBundle, PreKeySecrets};

@@ -74,6 +74,28 @@ pub async fn deposit(client: &mut Client, env: &Envelope) -> Result<(), NetError
     }
 }
 
+/// Publish an encoded prekey bundle to the relay.
+pub async fn publish_prekeys(client: &mut Client, bundle: &[u8]) -> Result<(), NetError> {
+    match client
+        .request(&Request::PublishPrekeys(bundle.to_vec()))
+        .await?
+    {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("PublishPrekeys: {other:?}"))),
+    }
+}
+
+/// Retrieve a peer's encoded prekey bundle from the relay, if it has one.
+pub async fn get_prekeys(
+    client: &mut Client,
+    identity_id: &[u8; 32],
+) -> Result<Option<Vec<u8>>, NetError> {
+    match client.request(&Request::GetPrekeys(*identity_id)).await? {
+        Response::Prekeys(b) => Ok(b),
+        _ => Err(NetError::UnexpectedResponse("GetPrekeys")),
+    }
+}
+
 /// Fetch and decode mailbox envelopes for `hints` since `since_ms`.
 pub async fn fetch(
     client: &mut Client,

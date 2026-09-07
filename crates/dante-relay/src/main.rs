@@ -4,6 +4,7 @@
 //! - Encrypted sealed-sender mailbox with per-envelope TTL
 //! - Ledger replication and `TreeHead` gossip
 //! - Per-IP / per-/24 rate limiting on `IdentityAnnounce`
+//!
 //! Later: TURN and SFU roles for group voice/video.
 //!
 //! A relay sees only ciphertext plus coarse routing metadata. See

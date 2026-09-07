@@ -264,11 +264,15 @@ infrastructure. Reached. ---**
   emoji, remove }` rides the channel log like a normal message (advances the
   sender chain, same encryption). `poll_channels` folds reactions out of the
   message stream into `Engine::take_reactions()`; `ChannelMessage` gained a
-  `seq` so clients can key reactions to a message. `serve` accumulates them in
-  memory (`GET /api/reactions`, `POST /api/react`), the SPA renders toggle
-  chips under each message. Live-session only — not persisted, and you cannot
-  react to your own optimistic echo (no `seq` until it round-trips). Custom
-  per-server emoji / stickers / soundboards (content-hash blobs) still to do.
+  `seq` so clients can key reactions to a message. `Engine` also folds every
+  reaction into a standing `channel_id -> seq -> emoji -> members` map that is
+  written to the encrypted local store (the channel log is only re-polled from
+  `last_seq`, so a replay would not rebuild it) and re-exposed on restart via
+  `Engine::reaction_snapshot()`; `serve` seeds its in-memory view from that at
+  boot (`GET /api/reactions`, `POST /api/react`), the SPA renders toggle chips
+  under each message. You still cannot react to your own optimistic echo (no
+  `seq` until it round-trips). Custom per-server emoji / stickers / soundboards
+  (content-hash blobs) still to do.
 - Tenor/Giphy search — opt-in, off by default, warns it contacts a third party.
 - URL embeds — opt-in (leaks IP); optionally via a relay-side unfurler.
 - Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.

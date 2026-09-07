@@ -113,6 +113,9 @@ pub struct PersistedState {
     pub server_join_pw: Vec<([u8; 32], [u8; 32])>,
     /// Encoded `roles::ServerPolicy` for each known server (hosted or joined).
     pub server_policies: Vec<Vec<u8>>,
+    /// Standing channel reactions: `(channel_id, target_seq, emoji, member)`,
+    /// one row per member who currently holds that reaction.
+    pub channel_reactions: Vec<([u8; 32], u64, String, [u8; 32])>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -274,6 +277,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for (root, hash) in &s.server_join_pw {
         w.fixed(root).fixed(hash);
     }
+
+    w.u32(s.channel_reactions.len() as u32);
+    for (chan, seq, emoji, member) in &s.channel_reactions {
+        w.fixed(chan).u64(*seq).string(emoji).fixed(member);
+    }
     w.into_vec()
 }
 
@@ -423,6 +431,15 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut channel_reactions = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        channel_reactions.reserve(n);
+        for _ in 0..n {
+            channel_reactions.push((r.fixed::<32>()?, r.u64()?, r.string()?, r.fixed::<32>()?));
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -436,6 +453,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         server_autokick,
         server_join_pw,
         server_policies,
+        channel_reactions,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -495,6 +513,10 @@ mod tests {
             server_autokick: vec![([4u8; 32], 86_400_000)],
             server_policies: vec![vec![1, 2, 3], vec![]],
             server_join_pw: vec![([1u8; 32], [2u8; 32])],
+            channel_reactions: vec![
+                ([7u8; 32], 12, "👍".into(), [6u8; 32]),
+                ([7u8; 32], 12, "🔥".into(), [5u8; 32]),
+            ],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -511,6 +533,7 @@ mod tests {
         assert_eq!(back.server_autokick, state.server_autokick);
         assert_eq!(back.server_policies, state.server_policies);
         assert_eq!(back.server_join_pw, state.server_join_pw);
+        assert_eq!(back.channel_reactions, state.channel_reactions);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -537,6 +560,7 @@ mod tests {
             server_autokick: vec![],
             server_policies: vec![],
             server_join_pw: vec![],
+            channel_reactions: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

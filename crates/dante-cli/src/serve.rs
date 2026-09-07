@@ -410,6 +410,18 @@ async fn engine_task(
         }
     }
 
+    {
+        let mut reacts = engine_shared.reactions.lock().await;
+        for r in engine.reaction_snapshot() {
+            reacts
+                .entry(r.target_seq)
+                .or_default()
+                .entry(r.emoji)
+                .or_default()
+                .insert(short_id(&r.member));
+        }
+    }
+
     eprintln!("announcing to the relay ...");
     if let Err(e) = async {
         engine.announce_if_stale("", now_ms()).await?;

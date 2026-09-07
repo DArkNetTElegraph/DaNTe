@@ -1023,3 +1023,85 @@ async fn channel_emoji_reactions() {
     // Draining twice yields nothing.
     assert!(host.take_reactions().is_empty());
 }
+
+#[tokio::test]
+async fn channel_reactions_survive_a_restart() {
+    use dante_identity::keystore;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-react-persist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("alice.state");
+
+    let mut host = engine(&relay).await;
+    let alice_ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+    let alice_id = *keystore::open(&alice_ks, b"pw").unwrap().id().as_bytes();
+
+    let (chan, target);
+    {
+        let mut alice = Engine::connect(
+            keystore::open(&alice_ks, b"pw").unwrap(),
+            &relay,
+            test_params(),
+            D,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap();
+        for e in [&mut host, &mut alice] {
+            e.announce("", now).await.unwrap();
+            e.publish_prekeys().await.unwrap();
+        }
+        host.sync(now).await.unwrap();
+        alice.sync(now).await.unwrap();
+
+        let server = host.create_server("lodge", now).await.unwrap();
+        chan = host.create_channel(&server, "general", true).unwrap();
+        host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+        for _ in 0..4 {
+            host.receive_all(now).await.unwrap();
+            alice.receive_all(now).await.unwrap();
+        }
+
+        host.send_channel(&chan, "big news", now).await.unwrap();
+        let got = alice.poll_channels(now).await.unwrap();
+        target = got[0].seq;
+        alice
+            .send_react(&chan, target, "🔥", false, now)
+            .await
+            .unwrap();
+        // Also fold in a reaction from the host so both sides are covered.
+        alice
+            .send_react(&chan, target, "👍", false, now)
+            .await
+            .unwrap();
+        alice
+            .send_react(&chan, target, "👍", true, now)
+            .await
+            .unwrap();
+
+        let snap = alice.reaction_snapshot();
+        assert_eq!(snap.len(), 1, "one standing reaction after the toggle");
+        alice.persist().unwrap();
+    } // alice's process exits
+
+    let alice = Engine::connect(
+        keystore::open(&alice_ks, b"pw").unwrap(),
+        &relay,
+        test_params(),
+        D,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    let snap = alice.reaction_snapshot();
+    assert_eq!(snap.len(), 1, "reaction restored from the store");
+    assert_eq!(snap[0].channel_id, chan);
+    assert_eq!(snap[0].target_seq, target);
+    assert_eq!(snap[0].emoji, "🔥");
+    assert_eq!(snap[0].member, alice_id);
+    assert!(!snap[0].removed);
+
+    std::fs::remove_dir_all(&dir).ok();
+}

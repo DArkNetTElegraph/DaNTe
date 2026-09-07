@@ -1,0 +1,18 @@
+[package]
+name = "dante-group"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Group message encryption for DaNTe channels: a sender-keys ratchet (an MLS migration is planned)."
+
+[dependencies]
+dante-crypto.workspace = true
+dante-proto.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

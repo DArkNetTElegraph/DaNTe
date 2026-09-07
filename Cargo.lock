@@ -349,6 +349,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dante-group"
+version = "0.0.1"
+dependencies = [
+ "dante-crypto",
+ "dante-proto",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "dante-identity"
 version = "0.0.1"
 dependencies = [

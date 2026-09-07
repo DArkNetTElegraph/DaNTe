@@ -13,6 +13,34 @@ those into a phased build, with a concrete MVP slice: an anonymous identity on a
 verifiable log, peer discovery over a DHT, and fully E2E 1:1 direct messages —
 achievable with no project-run infrastructure.
 
+## Current status
+
+**MVP reached.** Working today (all tested; `cargo test` ~158, CI green):
+
+- **Identity** (`dante-crypto`, `dante-identity`): Ed25519 + X25519, Argon2id
+  keystore + recovery backup, Crockford-base32 / BIP39 fingerprints, safety
+  numbers, `argon2id` PoW, `IdentityAnnounce` / `LivenessProof` / `KeyRotation`.
+- **Ledger** (`dante-proto`, `dante-ledger`): explicit binary codec, signed
+  `Record` envelope, RFC 6962 Merkle (inclusion + consistency proofs),
+  acceptance rules, identity/key-rotation chains, server registry, deterministic
+  90-day evaporation GC.
+- **Network** (`dante-net`, `dante-relay`): framed-TCP client↔relay protocol,
+  sealed-sender `Envelope`, mailbox store-and-forward, prekey directory, file
+  blob store, per-IP rate limiting; `dante-relay` binary.
+- **E2E DMs** (`dante-dm`): X3DH + Double Ratchet (FS + PCS), chunked encrypted
+  file transfer.
+- **Groups** (`dante-group`): sender-keys channel ratchet (FS within a chain,
+  removed-member lockout, insider-forgery resistance; **no PCS** — MLS migration
+  planned).
+- **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
+  `serve`). `dante serve` is a localhost browser UI.
+
+**Not built yet:** libp2p/DHT + multi-relay gossip (Phase 3 deferred); channels
+wired end-to-end into `Engine`/clients (Phase 6 plumbing — the crypto exists);
+voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
+soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client;
+encrypted local message/session persistence (the CLI re-announces each run).
+
 ## Decisions (locked)
 
 | Area | Decision |

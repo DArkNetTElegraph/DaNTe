@@ -9,6 +9,7 @@
 //!   proofs
 //! - [`head`]   — [`SignedTreeHead`](head::SignedTreeHead) for split-view
 //!   detection (§2.4)
+//! - [`pow`]    — wire codec for `dante_crypto::pow::PowProof`
 //!
 //! Body semantics live with the crate that owns them (`dante-identity` for
 //! identity records, `dante-ledger` for the server registry and tombstones);
@@ -17,6 +18,7 @@
 pub mod enc;
 pub mod head;
 pub mod merkle;
+pub mod pow;
 pub mod record;
 
 pub use enc::{Reader, WireError, Writer};

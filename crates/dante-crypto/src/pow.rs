@@ -39,7 +39,6 @@ pub const LIVENESS: Difficulty = Difficulty {
 
 /// The tunable cost of a puzzle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Difficulty {
     /// Argon2 memory cost in KiB.
     pub m_cost_kib: u32,
@@ -49,9 +48,9 @@ pub struct Difficulty {
     pub bits: u8,
 }
 
-/// A completed proof of work. Serialized into the ledger record it authorises.
+/// A completed proof of work. Serialized into the ledger record it authorises
+/// via `dante_proto::pow`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PowProof {
     /// Argon2 memory cost in KiB the solver used.
     pub m_cost_kib: u32,

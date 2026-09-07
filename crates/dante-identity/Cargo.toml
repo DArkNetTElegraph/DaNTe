@@ -9,11 +9,11 @@ authors.workspace = true
 description = "Identity keypair lifecycle, fingerprints, encrypted keystore, liveness proofs, key backup."
 
 [dependencies]
-dante-crypto = { workspace = true, features = ["serde"] }
+dante-crypto.workspace = true
+dante-proto.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 serde = { workspace = true }
-serde-big-array = "0.5"
 ciborium = "0.2"
 bip39 = "2"
 

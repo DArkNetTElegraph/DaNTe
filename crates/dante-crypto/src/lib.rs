@@ -14,9 +14,6 @@
 //! - [`pwhash`] — Argon2id KDF for low-entropy secrets (keystore, key backup)
 //! - [`pow`]    — the `argon2id-pow` memory-hard puzzle (`docs/PROTOCOL.md` §3)
 //!
-//! With the `serde` feature, [`pow::PowProof`] and [`pow::Difficulty`] derive
-//! `Serialize`/`Deserialize` so higher layers can embed them in wire records.
-//!
 //! Still to come: Double Ratchet wrapper (Phase 4) and MLS wrapper over
 //! `OpenMLS` (Phase 6).
 

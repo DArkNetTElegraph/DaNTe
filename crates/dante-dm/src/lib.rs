@@ -21,6 +21,9 @@ pub mod ratchet;
 pub mod session;
 pub mod x3dh;
 
+#[cfg(test)]
+mod proptests;
+
 pub use content::Content;
 pub use error::DmError;
 pub use file::{FileManifest, CHUNK_SIZE};

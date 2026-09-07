@@ -258,6 +258,13 @@ infrastructure. Reached. ---**
 
 ## Verification (MVP)
 - Per-crate unit tests; crypto vectors vs Signal / MLS RFC references.
+- Property tests (`proptest`) over the wire boundary: every public decoder
+  (`dante-proto` `Record`/`Envelope`/codec, `dante-dm` `Content`/`Packet`/
+  state snapshots, `dante-group` `GroupMessage`/`SenderKeyBundle`/`GroupState`,
+  `dante-net` `Request`/`Response`) is total on arbitrary bytes and canonical
+  (decode∘encode is identity); the Double Ratchet and the sender-keys ratchet
+  each decrypt an arbitrarily reordered batch exactly once and reject replays.
+  `cargo-fuzz` targets on the same decoders are a later add (needs nightly).
 - Integration harness: 2–3 `dante-cli` nodes + 1 `dante-relay` locally. Assert the
   full path: identity announce → DHT lookup → X3DH → ratchet exchange →
   offline delivery via relay mailbox → file transfer → key rotation →

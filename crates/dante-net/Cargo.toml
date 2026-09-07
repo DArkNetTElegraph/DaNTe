@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "time", 
 async-trait = "0.1"
 
 [dev-dependencies]
+proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 
 [lints.rust]

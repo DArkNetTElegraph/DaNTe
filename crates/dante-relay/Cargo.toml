@@ -13,13 +13,19 @@ name = "dante-relay"
 path = "src/main.rs"
 
 [dependencies]
-dante-net.workspace = true
-dante-ledger.workspace = true
+dante-crypto.workspace = true
 dante-proto.workspace = true
+dante-identity.workspace = true
+dante-ledger.workspace = true
+dante-net.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"

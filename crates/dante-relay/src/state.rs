@@ -1,0 +1,305 @@
+//! Relay state and request handling.
+
+use std::net::IpAddr;
+
+use async_trait::async_trait;
+use dante_ledger::{Ledger, LedgerParams, MemoryStore};
+use dante_net::{
+    mailbox::Mailbox,
+    ratelimit::KeyedRateLimiter,
+    transport::RequestHandler,
+    wire::{Request, Response},
+};
+use dante_proto::{record::RecordKind, Envelope, Record};
+use tokio::sync::Mutex;
+
+/// Wall-clock Unix milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Per-IP rate limits (token buckets: capacity, refill/sec).
+pub struct Limits {
+    /// `IdentityAnnounce` submissions.
+    pub announce: (f64, f64),
+    /// Other record submissions.
+    pub record: (f64, f64),
+    /// Envelope deposits.
+    pub deposit: (f64, f64),
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            // 10 / hour (docs/PROTOCOL.md §3), with a small burst.
+            announce: (5.0, 10.0 / 3600.0),
+            // 30 / minute.
+            record: (30.0, 0.5),
+            // 60 / minute.
+            deposit: (120.0, 1.0),
+        }
+    }
+}
+
+/// Everything a relay mutates.
+pub struct RelayState {
+    ledger: Ledger<MemoryStore>,
+    mailbox: Mailbox,
+    announce_rl: KeyedRateLimiter<IpAddr>,
+    record_rl: KeyedRateLimiter<IpAddr>,
+    deposit_rl: KeyedRateLimiter<IpAddr>,
+    max_get_records: u64,
+}
+
+impl RelayState {
+    /// Fresh relay state.
+    pub fn new(params: LedgerParams, limits: Limits) -> Self {
+        Self {
+            ledger: Ledger::new(MemoryStore::default(), params),
+            mailbox: Mailbox::new(),
+            announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
+            record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
+            deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
+            max_get_records: 512,
+        }
+    }
+
+    /// Periodic housekeeping: expire mailbox entries, evaporate stale
+    /// identities, shrink the rate-limit tables. Returns
+    /// `(envelopes_dropped, identities_evaporated)`.
+    pub fn maintain(&mut self, now: u64) -> (usize, usize) {
+        let dropped = self.mailbox.gc(now);
+        let evaporated = self.ledger.evaporate(now).len();
+        for rl in [
+            &mut self.announce_rl,
+            &mut self.record_rl,
+            &mut self.deposit_rl,
+        ] {
+            rl.sweep(now, 3_600_000);
+        }
+        (dropped, evaporated)
+    }
+
+    fn handle(&mut self, req: Request, ip: IpAddr, now: u64) -> Response {
+        match req {
+            Request::Ping => Response::Pong,
+
+            Request::GetTreeHead => {
+                let h = self.ledger.head();
+                Response::TreeHead {
+                    size: h.size,
+                    root: h.root,
+                }
+            }
+
+            Request::GetRecords { from, to } => {
+                let len = self.ledger.len() as u64;
+                let from = from.min(len);
+                let to = to.min(len).min(from + self.max_get_records);
+                let mut out = Vec::new();
+                for i in from..to {
+                    if let Some(rec) = self.ledger.record(i as usize) {
+                        out.push(rec.encode());
+                    }
+                }
+                Response::Records(out)
+            }
+
+            Request::SubmitRecord(blob) => {
+                let Ok(rec) = Record::decode(&blob) else {
+                    return Response::Error("undecodable record".into());
+                };
+                let rl = if rec.kind == RecordKind::IdentityAnnounce {
+                    &mut self.announce_rl
+                } else {
+                    &mut self.record_rl
+                };
+                if !rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                match self.ledger.append(rec, now) {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(format!("rejected: {e}")),
+                }
+            }
+
+            Request::Deposit(blob) => {
+                let Ok(env) = Envelope::decode(&blob) else {
+                    return Response::Error("undecodable envelope".into());
+                };
+                if !self.deposit_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                match self.mailbox.deposit(env, now) {
+                    Ok(()) => Response::Ok,
+                    Err(e) => Response::Error(format!("rejected: {e}")),
+                }
+            }
+
+            Request::Fetch { hints, since_ms } => {
+                let hints: Vec<[u8; 8]> = hints.into_iter().take(32).collect();
+                let envs = self
+                    .mailbox
+                    .fetch(&hints, since_ms, now)
+                    .iter()
+                    .map(Envelope::encode)
+                    .collect();
+                Response::Envelopes(envs)
+            }
+        }
+    }
+}
+
+/// The `RequestHandler` the TCP server calls; wraps [`RelayState`] in a mutex.
+pub struct RelayHandler {
+    state: Mutex<RelayState>,
+}
+
+impl RelayHandler {
+    /// Wrap `state`.
+    pub fn new(state: RelayState) -> Self {
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+
+    /// Access the inner state (for the maintenance task).
+    pub fn state(&self) -> &Mutex<RelayState> {
+        &self.state
+    }
+}
+
+#[async_trait]
+impl RequestHandler for RelayHandler {
+    async fn handle(&self, req: Request, peer_ip: IpAddr) -> Response {
+        let now = now_ms();
+        self.state.lock().await.handle(req, peer_ip, now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use dante_crypto::pow::Difficulty;
+    use dante_identity::{
+        records::{IdentityAnnounce, LivenessProof},
+        Identity,
+    };
+
+    use super::*;
+
+    const IP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    const D: Difficulty = Difficulty {
+        m_cost_kib: 32,
+        t_cost: 1,
+        bits: 8,
+    };
+
+    fn state() -> RelayState {
+        RelayState::new(
+            LedgerParams {
+                min_announce_pow_bits: 8,
+                min_liveness_pow_bits: 8,
+                ..Default::default()
+            },
+            Limits::default(),
+        )
+    }
+
+    #[test]
+    fn submit_record_then_serve_it_back() {
+        let mut s = state();
+        let id = Identity::generate(1_000);
+        let rec = IdentityAnnounce::build(&id, "", D).to_record(&id, 1_000);
+
+        assert_eq!(
+            s.handle(Request::SubmitRecord(rec.encode()), IP, 1_000),
+            Response::Ok
+        );
+        match s.handle(Request::GetTreeHead, IP, 1_000) {
+            Response::TreeHead { size, .. } => assert_eq!(size, 1),
+            other => panic!("{other:?}"),
+        }
+        match s.handle(Request::GetRecords { from: 0, to: 1 }, IP, 1_000) {
+            Response::Records(v) => assert_eq!(v, vec![rec.encode()]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejected_record_returns_error() {
+        let mut s = state();
+        let id = Identity::generate(0);
+        // liveness before announce -> ledger rejects
+        let rec = LivenessProof::build(&id, 2_000, D).to_record(&id, 2_000);
+        assert!(matches!(
+            s.handle(Request::SubmitRecord(rec.encode()), IP, 2_000),
+            Response::Error(_)
+        ));
+    }
+
+    #[test]
+    fn announce_rate_limit_kicks_in() {
+        let mut s = state();
+        // capacity 5; the 6th distinct announce from one IP is throttled
+        for i in 0..5 {
+            let id = Identity::generate(i);
+            let rec = IdentityAnnounce::build(&id, "", D).to_record(&id, 1_000);
+            assert_eq!(
+                s.handle(Request::SubmitRecord(rec.encode()), IP, 1_000),
+                Response::Ok
+            );
+        }
+        let id = Identity::generate(99);
+        let rec = IdentityAnnounce::build(&id, "", D).to_record(&id, 1_000);
+        assert!(matches!(
+            s.handle(Request::SubmitRecord(rec.encode()), IP, 1_000),
+            Response::Error(m) if m.contains("rate")
+        ));
+    }
+
+    #[test]
+    fn deposit_and_fetch_envelope() {
+        use dante_crypto::{agree::AgreeSecret, hash::sha256, sign::SignSecret};
+
+        let mut s = state();
+        let sender = SignSecret::generate();
+        let rid = sha256(b"bob");
+        let rik = AgreeSecret::generate().public().to_bytes();
+        let env = Envelope::seal(&rid, &rik, &sender, b"hello", 1_000, 60_000).unwrap();
+        let hint = env.recipient_hint;
+
+        assert_eq!(
+            s.handle(Request::Deposit(env.encode()), IP, 1_000),
+            Response::Ok
+        );
+        match s.handle(
+            Request::Fetch {
+                hints: vec![hint],
+                since_ms: 0,
+            },
+            IP,
+            1_500,
+        ) {
+            Response::Envelopes(v) => assert_eq!(v.len(), 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn maintain_evaporates_and_gcs() {
+        let mut s = state();
+        let id = Identity::generate(0);
+        let rec = IdentityAnnounce::build(&id, "", D).to_record(&id, 0);
+        s.handle(Request::SubmitRecord(rec.encode()), IP, 0);
+
+        let far = dante_ledger::IDENTITY_TTL_MS + 10;
+        let (_dropped, evaporated) = s.maintain(far);
+        assert_eq!(evaporated, 1);
+        assert!(!s.ledger.is_live(&id.sign_public().to_bytes()));
+    }
+}

@@ -97,7 +97,7 @@ visual design. Do not invest in its look.
 | Ledger | **Verifiable append-only log, not a mined blockchain.** Holds identity→pubkey records, liveness proofs, key rotations, and the public server registry (for discovery). Each identity signs its own records (single-writer-per-record — no global consensus). A gossiped Merkle root makes tampering evident. Replicated across relay nodes. |
 | Crypto | Primitives: **X25519 + Ed25519** (libsodium). **1:1 DMs:** X3DH + Double Ratchet (forward secrecy + post-compromise security). **Groups (channels + group voice):** **MLS / RFC 9420** via `OpenMLS`. All payload/file encryption is hybrid (random XChaCha20-Poly1305 data key, wrapped). |
 | Foundation | **From scratch in Rust.** Reuse crates aggressively (`OpenMLS`, `rust-libp2p`, `webrtc-rs`, `rnnoise`). Element is a UX reference only. Not a Matrix fork — homeservers conflict with "no infra" and server-bound identity. |
-| Stack | **Rust core (Cargo workspace) + Tauri client.** Frontend: SvelteKit (recommended for bundle size/simplicity; reversible). |
+| Stack | **Rust core (Cargo workspace) + Tauri desktop shell.** Frontend: the vanilla-JS single-file SPA from `crates/dante-cli/web` (no build step), served by `dante_cli::serve` and loaded by the shell over localhost. |
 | Identity | Unique ID = public-key fingerprint, rendered as Crockford base32 **and** a BIP39-style word phrase. Display names = free text, **non-unique**. Petnames for locally-verified contacts (safety-number / QR). Global human-readable aliases deferred to an optional PoW-gated layer. |
 | Anti-flood | **PoW to mint an identity + PoW on each liveness proof.** Difficulty tunable by network parameter. Relay per-IP/per-identity rate-limiting on announces as an extra layer. No invite graph (preserves anonymity). |
 | Identity liveness (global) | Identity carries a signed + PoW'd **liveness proof** republished ≤ every 90 days (automatic on login). Nodes tombstone + GC the stale **ledger record** — NOT the account; the local keypair survives and re-announces (re-runs PoW) on next login. Bounds ledger growth; core to anti-flood. |
@@ -122,7 +122,8 @@ DaNTe/
     dante-dm/                # 1:1 sessions: prekey bundles, X3DH, Double Ratchet, chunked file transfer, encrypted SQLite store
     dante-core/              # orchestration engine consumed by the UI (identity + net + ledger + dm)
     dante-cli/               # BINARY: headless client for tests/dev
-  client/                    # Tauri app (src-tauri/ Rust commands, src/ SvelteKit frontend)
+  crates/dante-cli/          # [lib] serve (engine + HTTP/JSON API + embedded SPA) + [bin] dante (gen/fp/chat/serve/revoke)
+  apps/dante-desktop/        # Tauri 2 shell — spawns dante_cli::serve, opens a WebviewWindow at it (detached from the workspace)
   docs/
     ARCHITECTURE.md
     THREAT_MODEL.md          # first-class deliverable
@@ -251,10 +252,22 @@ DaNTe/
   save, and connects the engine; *unlock* opens the existing keystore file
   with a passphrase; *import* accepts a pasted keystore **or** recovery blob.
   `DANTE_PASSPHRASE` still short-circuits to a direct load when set.
-- **Deferred:** the Tauri + SvelteKit desktop client from the plan — its Linux
-  build needs `webkit2gtk4.1-devel` / `libsoup3-devel` (not installable in the
-  build environment used so far). Contact add + safety-number verification and
-  a settings screen are still to build in whichever shell.
+- **Desktop shell *(scaffolded)*:** `apps/dante-desktop` — a Tauri 2 crate that
+  is a **thin wrapper**, not a rewrite. `crates/dante-cli` now has a `[lib]`
+  target exposing `serve::run` / `serve::run_on(existing, listener, boot)` plus
+  `now_ms` / `parse_fingerprint`; the desktop `main.rs` binds an ephemeral
+  `127.0.0.1` port, spawns `serve::run_on`, and points a native `WebviewWindow`
+  at it. So the whole existing web UI + JSON API + onboarding is reused
+  verbatim; the desktop build only adds the native layer (window/menus, OS
+  notifications, tray, auto-update — TODO). Config via env (`DANTE_HOME`,
+  `DANTE_RELAY`, `DANTE_PASSPHRASE`, `DANTE_POW_BITS`), matching `dante serve`.
+  The crate is **detached from the workspace** (own `[workspace]`, not a
+  member) because Tauri needs `webkit2gtk-4.1` / `libsoup-3` (Linux) /
+  WebView2 / WKWebView that the CI container lacks — `cargo build --workspace`
+  skips it; build it with `cd apps/dante-desktop && cargo tauri dev` (see its
+  README). SvelteKit is no longer planned — the vanilla-JS SPA is the frontend.
+- **Still to build in whichever shell:** a settings screen (typing-broadcast
+  toggle, relay list editing, identity backup re-download).
 
 **--- MVP boundary: anonymous identity on a verifiable log, key directory via
 relay, fully E2E DMs with FS/PCS + file transfer, a usable client, zero project

@@ -15,23 +15,15 @@
 //! In `chat`, lines starting with `/` are commands:
 //! `/to <fingerprint>`, `/file <path>`, `/whoami`, `/peer`, `/quit`.
 
-mod serve;
-
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, Result};
+use dante_cli::{now_ms, parse_fingerprint, serve};
 use dante_core::Engine;
 use dante_crypto::{pow::Difficulty, sign::SignPublic};
 use dante_identity::{id::IdentityId, keystore, Identity};
 use dante_ledger::LedgerParams;
 use tokio::io::{AsyncBufReadExt, BufReader};
-
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 fn passphrase() -> Result<String> {
     std::env::var("DANTE_PASSPHRASE").context("set DANTE_PASSPHRASE to the keystore passphrase")
@@ -67,17 +59,6 @@ fn short_fp(idk: &[u8; 32]) -> String {
             .to_string(),
         Err(_) => "????".to_string(),
     }
-}
-
-pub(crate) fn parse_fingerprint(s: &str) -> Result<[u8; 32]> {
-    let s = s.trim();
-    let id = if s.contains(' ') {
-        IdentityId::from_words(s)
-    } else {
-        IdentityId::from_base32(s)
-    }
-    .map_err(|_| anyhow::anyhow!("not a valid base32 or word-phrase fingerprint"))?;
-    Ok(*id.as_bytes())
 }
 
 #[tokio::main]

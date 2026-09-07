@@ -304,6 +304,30 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 #onboard .tabs button.on { background: var(--bg-active); color: #fff; }
 #onboard .err { color: var(--accent); font-size: 13px; min-height: 1.2em; margin-top: 8px; }
 #onboard .blob { background: var(--bg-input); border: 1px solid var(--divider); border-radius: 6px; padding: 10px; font: 11px/1.4 ui-monospace, monospace; word-break: break-all; color: var(--text-muted); max-height: 140px; overflow: auto; }
+
+/* ---- in-app modal dialogs (replace window.alert / prompt / confirm) ----- */
+#modal-layer { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+  background: rgba(10, 8, 20, 0.55); backdrop-filter: blur(2px); padding: 24px; }
+#modal-layer.closing { animation: modal-out .12s ease forwards; }
+.modal { width: 420px; max-width: 100%; background: var(--bg-pane); color: var(--text);
+  border: 1px solid var(--divider); border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.5);
+  padding: 22px; animation: modal-in .14s cubic-bezier(.2,.9,.3,1); }
+.modal h2 { margin: 0 0 10px; font-size: 16px; font-weight: 700; }
+.modal .msg { white-space: pre-wrap; color: var(--text-muted); font-size: 13.5px; line-height: 1.5; margin-bottom: 14px; }
+.modal .msg code { background: var(--bg-input); padding: 1px 5px; border-radius: 4px; font-size: 12px; word-break: break-all; }
+.modal input, .modal textarea { width: 100%; background: var(--bg-input); border: 1px solid var(--divider);
+  border-radius: 6px; color: var(--text); padding: 9px 10px; font: inherit; margin-bottom: 4px; }
+.modal textarea { min-height: 90px; resize: vertical; font: 12px/1.4 ui-monospace, monospace; }
+.modal input:focus, .modal textarea:focus { outline: 2px solid var(--cornflower-blue); outline-offset: -1px; border-color: transparent; }
+.modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.modal button { border: 0; border-radius: 6px; padding: 8px 16px; font-weight: 700; font-size: 13px; cursor: pointer;
+  background: var(--accent); color: #fff; }
+.modal button:hover { background: var(--accent-warm); color: #1b1832; }
+.modal button.ghost { background: var(--bg-input); color: var(--text); border: 1px solid var(--divider); }
+.modal button.ghost:hover { background: var(--bg-hover); color: var(--text); }
+.modal button.danger { background: var(--blazing-flame); }
+@keyframes modal-in  { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes modal-out { to { opacity: 0; } }
 </style>
 </head>
 <body>
@@ -467,11 +491,133 @@ const api = {
   sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
 };
 
-/* ---------- tiny ui affordances (swap for real modals later) ---------- */
+/* ---------- in-app modal dialogs -------------------------------------- */
+/* Renders `msg` with pre-wrap; a fragment wrapped in <code>…</code> is kept
+   as an element (so long fingerprints/links wrap nicely). */
+function modalMsg(msg) {
+  const box = el("div", "msg");
+  const parts = String(msg).split(/(<code>[\s\S]*?<\/code>)/);
+  for (const p of parts) {
+    const m = p.match(/^<code>([\s\S]*)<\/code>$/);
+    if (m) box.appendChild(Object.assign(el("code"), { textContent: m[1] }));
+    else if (p) box.appendChild(document.createTextNode(p));
+  }
+  return box;
+}
+
+let modalDepth = 0;
+function openModal({ title, msg, fields, buttons }) {
+  return new Promise(resolve => {
+    const layer = el("div"); layer.id = "modal-layer";
+    const card = el("div", "modal");
+    if (title) card.appendChild(Object.assign(el("h2"), { textContent: title }));
+    if (msg != null) card.appendChild(modalMsg(msg));
+
+    const inputs = {};
+    for (const f of (fields || [])) {
+      if (f.type === "check") {
+        const wrap = el("label"); wrap.style.cssText = "display:flex;align-items:center;gap:8px;margin:8px 0;font-size:13px;color:var(--text);text-transform:none;letter-spacing:0";
+        const cb = el("input"); cb.type = "checkbox"; cb.checked = !!f.value;
+        cb.style.cssText = "width:auto;margin:0";
+        wrap.appendChild(cb);
+        wrap.appendChild(document.createTextNode(f.label));
+        card.appendChild(wrap);
+        inputs[f.name] = cb;
+        continue;
+      }
+      if (f.label) card.appendChild(Object.assign(el("label"), { textContent: f.label, style: "display:block;font-size:11px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:10px 0 4px" }));
+      const inp = el(f.multiline ? "textarea" : "input");
+      if (!f.multiline) inp.type = f.password ? "password" : "text";
+      if (f.placeholder) inp.placeholder = f.placeholder;
+      if (f.value != null) inp.value = f.value;
+      card.appendChild(inp);
+      inputs[f.name] = inp;
+    }
+
+    const row = el("div", "row");
+    const done = val => {
+      layer.classList.add("closing");
+      setTimeout(() => layer.remove(), 120);
+      modalDepth--;
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    };
+    const cancelVal = () => buttons.find(b => b.cancel)?.value ?? null;
+    let primaryBtn = null;
+    for (const b of buttons) {
+      const btn = Object.assign(el("button", b.class || ""), { textContent: b.label });
+      btn.onclick = () => done(typeof b.value === "function" ? b.value(inputs) : b.value);
+      if (b.primary) primaryBtn = btn;
+      row.appendChild(btn);
+    }
+    card.appendChild(row);
+    layer.appendChild(card);
+    layer.onclick = e => { if (e.target === layer) done(cancelVal()); };
+    const onKey = e => {
+      if (e.key === "Escape") { e.preventDefault(); done(cancelVal()); }
+      else if (e.key === "Enter" && !e.shiftKey && primaryBtn && document.activeElement.tagName !== "TEXTAREA") {
+        e.preventDefault();
+        primaryBtn.click();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(layer);
+    modalDepth++;
+    const first = card.querySelector("input, textarea, button");
+    if (first) first.focus();
+  });
+}
+
 const ui = {
-  ask: (msg, def) => { const v = window.prompt(msg, def || ""); return v == null ? null : v.trim(); },
-  say: msg => window.alert(msg),
-  confirm: msg => window.confirm(msg),
+  /* Prompt for one line of text. Returns the trimmed value, or null if cancelled. */
+  async ask(msg, def, opts = {}) {
+    const v = await openModal({
+      title: opts.title || "",
+      msg,
+      fields: [{ name: "v", value: def || "", password: !!opts.password, multiline: !!opts.multiline, placeholder: opts.placeholder || "" }],
+      buttons: [
+        { label: "Cancel", class: "ghost", value: null, cancel: true },
+        { label: opts.ok || "OK", primary: true, value: i => i.v.value },
+      ],
+    });
+    return v == null ? null : v.trim();
+  },
+  /* Show a message with an OK button. */
+  say(msg, opts = {}) {
+    return openModal({
+      title: opts.title || "",
+      msg,
+      buttons: [{ label: opts.ok || "OK", primary: true, value: true, cancel: true, class: opts.danger ? "danger" : "" }],
+    });
+  },
+  /* Ask a yes/no question. Resolves true / false. */
+  async confirm(msg, opts = {}) {
+    return !!(await openModal({
+      title: opts.title || "",
+      msg,
+      buttons: [
+        { label: opts.cancelLabel || "Cancel", class: "ghost", value: false, cancel: true },
+        { label: opts.ok || "OK", primary: true, value: true, class: opts.danger ? "danger" : "" },
+      ],
+    }));
+  },
+  /* Collect several fields at once. `fields`: [{name,label,value,password,multiline,placeholder}].
+     Resolves an object of trimmed values, or null if cancelled. */
+  async form(title, fields, opts = {}) {
+    const r = await openModal({
+      title, msg: opts.msg,
+      fields,
+      buttons: [
+        { label: "Cancel", class: "ghost", value: null, cancel: true },
+        { label: opts.ok || "Save", primary: true, value: i => {
+          const out = {};
+          for (const f of fields) out[f.name] = f.type === "check" ? i[f.name].checked : i[f.name].value.trim();
+          return out;
+        } },
+      ],
+    });
+    return r;
+  },
   sys(text) {
     const log = $("#log");
     if (log.querySelector(".empty")) log.innerHTML = "";
@@ -536,10 +682,10 @@ async function discoverFlow() {
   const menu = list.map((s, i) =>
     `${i + 1}. ${s.name}${s.summary ? " — " + s.summary : ""}${s.tags && s.tags.length ? "  [" + s.tags.join(", ") + "]" : ""}`
   ).join("\n");
-  const pick = parseInt(ui.ask("Public servers:\n\n" + menu + "\n\nJoin which number?"), 10);
+  const pick = parseInt(await ui.ask("Public servers:\n\n" + menu + "\n\nJoin which number?"), 10);
   const chosen = list[pick - 1];
   if (!chosen) return;
-  const password = ui.ask("Server password? (blank if none)") || "";
+  const password = await ui.ask("Server password? (blank if none)") || "";
   try {
     await api.post("/api/discover/join", { server: chosen.root, password });
     ui.sys(`Joining "${chosen.name}" — you'll appear once the host is online.`);
@@ -550,18 +696,21 @@ async function discoverFlow() {
 async function publishFlow(server) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root.");
-  if (!confirm("List \"" + server + "\" on the public discovery directory? Anyone will be able to join (subject to a join password if set).")) {
-    // offer to unlist instead
-    if (confirm("Remove it from discovery instead?")) {
+  if (!await ui.confirm('List "' + server + '" on the public discovery directory? Anyone will be able to join (subject to a join password if set).', { ok: "List it" })) {
+    if (await ui.confirm("Remove it from discovery instead?", { ok: "Unlist" })) {
       try { await api.post("/api/discover", { server: root, on: false }); ui.sys("Unlisted."); }
       catch (e) { ui.say("Failed: " + e.message); }
     }
     return;
   }
-  const summary = ui.ask("Short description (optional):") || "";
-  const tags = (ui.ask("Tags, comma-separated (optional):") || "").split(",").map(t => t.trim()).filter(Boolean);
+  const f = await ui.form("Public listing", [
+    { name: "summary", label: "Short description (optional)" },
+    { name: "tags", label: "Tags, comma-separated (optional)" },
+  ], { ok: "Publish" });
+  if (!f) return;
+  const tags = (f.tags || "").split(",").map(t => t.trim()).filter(Boolean);
   try {
-    await api.post("/api/discover", { server: root, on: true, summary, tags });
+    await api.post("/api/discover", { server: root, on: true, summary: f.summary || "", tags });
     ui.sys("Server is now public.");
   } catch (e) { ui.say("Could not publish (host only): " + e.message); }
 }
@@ -616,7 +765,7 @@ function renderPane() {
   const srvRoot = store.rootOf(server);
   if (srvRoot && store.policies[srvRoot] && store.policies[srvRoot].owner === store.me.fingerprint) {
     actions.appendChild(mk("🗑", "Delete this server", async () => {
-      if (!ui.confirm('Delete the server "' + server + '" and all its channels for everyone? This cannot be undone.')) return;
+      if (!await ui.confirm('Delete the server "' + server + '" and all its channels for everyone? This cannot be undone.')) return;
       try { await api.post("/api/server/delete", { server: srvRoot }); await refreshChannels(); selectTarget("@dm", null); }
       catch (e) { ui.sys("delete failed: " + e.message); }
     }));
@@ -680,14 +829,14 @@ function renderChat() {
     if (iOwn) {
       delChanBtn.hidden = false;
       delChanBtn.onclick = async () => {
-        if (!ui.confirm("Delete #" + store.channelName(target.slice(1)) + " for everyone? This cannot be undone.")) return;
+        if (!await ui.confirm("Delete #" + store.channelName(target.slice(1)) + " for everyone? This cannot be undone.")) return;
         try { await api.post("/api/channel/delete", { channel: target }); await refreshChannels(); selectTarget("@dm", null); }
         catch (e) { ui.sys("delete failed: " + e.message); }
       };
     } else {
       leaveBtn.hidden = false;
       leaveBtn.onclick = async () => {
-        if (!ui.confirm("Leave " + store.channelName(target.slice(1)) + "? You'll need a new invite to rejoin.")) return;
+        if (!await ui.confirm("Leave " + store.channelName(target.slice(1)) + "? You'll need a new invite to rejoin.")) return;
         try { await api.post("/api/leave", { channel: target }); await refreshChannels(); selectTarget("@dm", null); }
         catch (e) { ui.sys("leave failed: " + e.message); }
       };
@@ -775,19 +924,19 @@ function renderReactions(body, channelTarget, refSeq) {
   }
   const add = el("button", "react-chip add", "＋");
   add.title = "Add a reaction";
-  add.onclick = () => {
+  add.onclick = async () => {
     const custom = Object.keys(emojiMap()).map(n => ":" + n + ":").join(" ");
-    const e = ui.ask("React with which emoji?\n(" + QUICK_EMOJI.join(" ") + (custom ? "  " + custom : "") + ")", "👍");
+    const e = await ui.ask("React with which emoji?\n(" + QUICK_EMOJI.join(" ") + (custom ? "  " + custom : "") + ")", "👍");
     if (e) toggleReact(channelTarget, refSeq, e, false);
   };
   row.appendChild(add);
   body.appendChild(row);
 }
 
-function emojiFlow(root) {
+async function emojiFlow(root) {
   if (!root) { ui.say("Open one of your own server's channels to manage its emoji."); return; }
   const listed = Object.keys(store.emojis[root] || {});
-  const name = ui.ask(
+  const name = await ui.ask(
     "Custom emoji shortcode — letters, digits, underscore.\n" +
     "Prefix with '-' to remove one instead.\n\n" +
     (listed.length ? "current: " + listed.map(n => ":" + n + ":").join("  ") : "none yet"),
@@ -853,7 +1002,7 @@ async function verifyFlow(fp) {
     "(in person, a call, …). It matches on both sides only if no one is in the middle." +
     "\n\nCurrently: " + (s.verified ? "VERIFIED" : "not verified") +
     "\n\nOK = " + (s.verified ? "clear verification" : "mark as verified") + ".";
-  if (!ui.confirm(msg)) return;
+  if (!await ui.confirm(msg)) return;
   try {
     await api.post("/api/verify", { peer: fp, verified: !s.verified });
     await loadSafety(fp);
@@ -936,15 +1085,20 @@ async function rolesFlow(server) {
         (r.allow & PERM_KICK ? "  (can kick)" : "") +
         (r.allow & PERM_MANAGE_ROLES ? "  (manage)" : "")).join("\n")
     : "  (none yet)";
-  const name = ui.ask("Server roles:\n" + list + "\n\nNew role name? (blank to cancel)");
-  if (!name) return;
+  const f = await ui.form("New role", [
+    { name: "name", label: "Role name", placeholder: "Moderator" },
+    { name: "kick", type: "check", label: "Can kick members" },
+    { name: "manage", type: "check", label: "Can manage roles & channels" },
+    { name: "mute", type: "check", label: "Muted (cannot send messages)" },
+  ], { ok: "Create role", msg: "Existing roles:\n" + list });
+  if (!f || !f.name) return;
   let allow = 0, deny = 0;
-  if (confirm("Give this role the KICK permission?")) allow |= PERM_KICK;
-  if (confirm("Give this role the MANAGE-ROLES permission?")) allow |= PERM_MANAGE_ROLES;
-  if (confirm("Is this a MUTE role (cannot send messages)?")) deny |= PERM_SEND;
+  if (f.kick) allow |= PERM_KICK;
+  if (f.manage) allow |= PERM_MANAGE_ROLES | PERM_MANAGE_CHANNELS;
+  if (f.mute) deny |= PERM_SEND;
   try {
-    const r = await api.post("/api/role", { server: root, name, allow, deny, rank: 10 });
-    ui.sys(`Role "${name}" created (id ${r.ok}).`);
+    const r = await api.post("/api/role", { server: root, name: f.name, allow, deny, rank: 10 });
+    ui.sys(`Role "${f.name}" created (id ${r.ok}).`);
     refreshPolicies();
   } catch (e) { ui.say("Could not create role (host only): " + e.message); }
 }
@@ -953,7 +1107,7 @@ async function assignRoleFlow(server, memberFp) {
   const root = store.rootOf(server);
   const p = store.policies[root];
   if (!p || !p.roles.length) return ui.say("No roles defined yet — use the 🛡 in the server header.");
-  const idStr = ui.ask("Toggle which role id on " + short(memberFp) + "?\n" +
+  const idStr = await ui.ask("Toggle which role id on " + short(memberFp) + "?\n" +
     p.roles.map(r => `  [${r.id}] ${r.name}`).join("\n"));
   const role_id = parseInt(idStr, 10);
   if (!Number.isFinite(role_id)) return;
@@ -969,7 +1123,7 @@ async function autoKickFlow(server) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root.");
   const cur = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
-  const ans = ui.ask("Auto-remove members inactive for how many days? (0 = off)", String(cur));
+  const ans = await ui.ask("Auto-remove members inactive for how many days? (0 = off)", String(cur));
   if (ans == null) return;
   const days = parseFloat(ans) || 0;
   try {
@@ -980,7 +1134,7 @@ async function autoKickFlow(server) {
 }
 
 async function removeMemberFlow(channelTarget, memberFp) {
-  if (!confirm("Remove " + short(memberFp) + " from this channel?")) return;
+  if (!await ui.confirm("Remove " + short(memberFp) + " from this channel?", { ok: "Remove", danger: true })) return;
   try {
     await api.post("/api/remove", { channel: channelTarget, member: memberFp });
     ui.sys("Removed " + short(memberFp) + ".");
@@ -1008,21 +1162,23 @@ function richText(s) {
 
 /* ---------- flows -------------------------------------------------- */
 async function createServerFlow() {
-  const name = ui.ask("Server name?");
-  if (!name) return;
+  const f = await ui.form("Create a server", [
+    { name: "name", label: "Server name", placeholder: "The Lodge" },
+    { name: "chan", label: "First channel", value: "general" },
+  ], { ok: "Create" });
+  if (!f || !f.name) return;
   try {
-    const { ok: root } = await api.createServer(name);
-    const chan = ui.ask("First channel name?", "general") || "general";
-    await api.createChannel(root, chan);
+    const { ok: root } = await api.createServer(f.name);
+    await api.createChannel(root, f.chan || "general");
     await refreshChannels();
-    const c = store.channelsOf(name)[0];
-    selectTarget(name, c ? "#" + c.id : null);
+    const c = store.channelsOf(f.name)[0];
+    selectTarget(f.name, c ? "#" + c.id : null);
   } catch (e) { ui.say("Could not create server: " + e.message); }
 }
 async function createChannelFlow(server) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root — open a channel in this server first.");
-  const name = ui.ask("New channel name?");
+  const name = await ui.ask("New channel name?");
   if (!name) return;
   try {
     await api.createChannel(root, name);
@@ -1030,29 +1186,38 @@ async function createChannelFlow(server) {
   } catch (e) { ui.say("Could not create channel (are you the host?): " + e.message); }
 }
 async function inviteFlow(channelTarget) {
-  const peer = ui.ask("Invite whom? (fingerprint)");
+  const peer = await ui.ask("Invite whom? (fingerprint)");
   if (!peer) return;
   try { await api.invite(channelTarget, peer); ui.sys("Invite sent to " + short(peer)); }
   catch (e) { ui.say("Invite failed: " + e.message); }
 }
 async function inviteLinkFlow(channelTarget) {
-  const days = parseFloat(ui.ask("Link valid for how many days?", "7") || "7");
-  const uses = parseInt(ui.ask("Max uses? (0 = unlimited)", "0") || "0", 10);
+  const f = await ui.form("Create an invite link", [
+    { name: "days", label: "Valid for (days)", value: "7" },
+    { name: "uses", label: "Max uses (0 = unlimited)", value: "0" },
+  ], { ok: "Create link" });
+  if (!f) return;
+  const days = parseFloat(f.days || "7");
+  const uses = parseInt(f.uses || "0", 10);
   try {
     const r = await api.post("/api/invite-link", {
       channel: channelTarget,
-      ttl_secs: Math.max(1, Math.round(days * 86400)),
+      ttl_secs: Math.max(1, Math.round((Number.isFinite(days) ? days : 7) * 86400)),
       max_uses: Number.isFinite(uses) ? uses : 0,
     });
     const link = r.ok;
-    if (navigator.clipboard) navigator.clipboard.writeText(link).catch(() => {});
-    ui.say("Invite link (copied to clipboard):\n\n" + link);
+    let copied = false;
+    if (navigator.clipboard) { try { await navigator.clipboard.writeText(link); copied = true; } catch (_) {} }
+    ui.say((copied ? "Copied to clipboard.\n\n" : "") + "<code>" + link + "</code>", { title: "Invite link" });
   } catch (e) { ui.say("Could not create link (are you the host?): " + e.message); }
 }
 async function redeemFlow() {
-  const link = ui.ask("Paste an invite link:");
-  if (!link) return;
-  const password = ui.ask("Server password? (leave blank if none)") || "";
+  const f = await ui.form("Redeem an invite link", [
+    { name: "link", label: "Invite link", placeholder: "dante-invite:…" },
+    { name: "password", label: "Server password (if any)", password: true },
+  ], { ok: "Redeem" });
+  if (!f || !f.link) return;
+  const { link, password } = f;
   try {
     await api.post("/api/redeem", { link, password });
     ui.sys("Redeemed — you'll join once the host is online.");
@@ -1062,18 +1227,18 @@ async function redeemFlow() {
 async function joinPwFlow(server) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root.");
-  const pw = ui.ask("Set a join password for this server (blank = disable):") ?? null;
+  const pw = await ui.ask("Set a join password for this server (blank = disable):") ?? null;
   if (pw === null) return;
   try {
     await api.post("/api/joinpw", { server: root, password: pw });
     ui.sys(pw ? "Join password set." : "Join password disabled.");
   } catch (e) { ui.say("Could not set (host only): " + e.message); }
 }
-function addDmFlow() {
-  const fp = ui.ask("Their fingerprint (base32) or 24 words:");
+async function addDmFlow() {
+  const fp = await ui.ask("Their fingerprint (base32) or 24 words:");
   if (!fp) return;
   if (!store.dms.some(d => d.fp === fp)) { store.dms.push({ fp }); LS.set("dms", store.dms); }
-  const nn = ui.ask("Save as a contact? Enter a petname (or leave blank to skip):", "");
+  const nn = await ui.ask("Save as a contact? Enter a petname (or leave blank to skip):", "");
   if (nn) api.post("/api/contact", { peer: fp, petname: nn }).then(refreshContacts).catch(() => {});
   selectTarget("@dm", fp);
 }
@@ -1081,14 +1246,14 @@ function addDmFlow() {
 async function contactFlow(fp) {
   const c = store.contacts.find(c => c.fp === fp);
   if (c) {
-    const nn = ui.ask("Petname (blank keeps it, '-' removes the contact):", c.petname);
+    const nn = await ui.ask("Petname (blank keeps it, '-' removes the contact):", c.petname);
     if (nn === null) return;
     try {
       if (nn === "-") await api.post("/api/contact/remove", { peer: fp });
       else await api.post("/api/contact", { peer: fp, petname: nn });
     } catch (e) { ui.sys("contact update failed: " + e.message); return; }
   } else {
-    const nn = ui.ask("Save contact — petname (optional):", "");
+    const nn = await ui.ask("Save contact — petname (optional):", "");
     if (nn === null) return;
     try { await api.post("/api/contact", { peer: fp, petname: nn }); }
     catch (e) { ui.sys("save failed: " + e.message); return; }

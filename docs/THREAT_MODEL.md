@@ -138,8 +138,15 @@ provide.
   witness-cosigning scheme (multiple independent signers attest the root) would
   narrow this.
 - **First-contact authenticity.** Before fingerprint verification, adding a
-  contact is TOFU and A2/A6 can substitute a key. The UI must make verification
-  status unmistakable and unverified contacts visibly provisional.
+  contact is TOFU and A2/A6 can substitute a key. The engine derives a
+  Signal-style **safety number** per DM pair —
+  `SHA-512("dante/safety-number/v1" ‖ min(idk) ‖ max(idk))` rendered as 60
+  decimal digits — which both ends compute identically and compare out of band
+  (`Engine::safety_number` / `set_verified` / `is_verified`, persisted; `chat`
+  `/safety` and `/verify`). A confirmed pairing is pinned to the peer's current
+  `idk`, so a later key rotation reverts the peer to unverified. The UI must
+  make verification status unmistakable and unverified contacts visibly
+  provisional; the `dante serve` surface for this is still to build.
 - **Bootstrap trust and blocking.** The bootstrap set is a censorship chokepoint
   and a partition risk. Mitigate with many diverse addresses, DNS + in-repo
   distribution, and user-added peers.

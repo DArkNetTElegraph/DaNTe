@@ -465,6 +465,46 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 },
                 None => println!("usage: /to <fingerprint>   or   /to #<channel-id>"),
             },
+            "safety" => {
+                let who = a.map(str::to_string).or_else(|| match target {
+                    Some(Target::Peer(p)) => Some(IdentityId::from_bytes(*p).to_base32()),
+                    _ => None,
+                });
+                match who.as_deref() {
+                    Some(w) => match parse_fingerprint(w) {
+                        Ok(id) => match engine.safety_number(&id) {
+                            Some(num) => {
+                                let mark = if engine.is_verified(&id) {
+                                    "verified"
+                                } else {
+                                    "NOT verified — compare out of band, then /verify"
+                                };
+                                println!("safety number with {w}:\n  {num}\n  [{mark}]");
+                            }
+                            None => println!("unknown or revoked identity"),
+                        },
+                        Err(e) => println!("bad fingerprint: {e}"),
+                    },
+                    None => println!("usage: /safety <fingerprint>   (or set a peer with /to)"),
+                }
+            }
+            "verify" => match a {
+                Some(fp) => match parse_fingerprint(fp) {
+                    Ok(id) => {
+                        let on = !matches!(b, Some(s) if s.eq_ignore_ascii_case("off"));
+                        match engine.set_verified(&id, on) {
+                            Ok(()) => println!(
+                                "{} marked {}",
+                                IdentityId::from_bytes(id).to_base32(),
+                                if on { "verified" } else { "unverified" }
+                            ),
+                            Err(e) => println!("failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad fingerprint: {e}"),
+                },
+                None => println!("usage: /verify <fingerprint> [off]"),
+            },
             "server" => match a {
                 Some(name) => match engine.create_server(name, now_ms()).await {
                     Ok(root) => println!(

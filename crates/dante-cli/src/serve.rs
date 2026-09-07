@@ -7,7 +7,9 @@
 //! `POST /api/server {name}`, `POST /api/channel {server,name}`,
 //! `POST /api/invite {channel,peer}`, `POST /api/invite-link
 //! {channel,ttl_secs,max_uses}`, `POST /api/redeem {link}`, `POST /api/remove
-//! {channel,member}`, `POST /api/autokick {server,days}`, `GET /api/typing`,
+//! {channel,member}`, `POST /api/autokick {server,days}`, `GET
+//! /api/policy?server=`, `POST /api/role {server,id,name,allow,deny,rank}`,
+//! `POST /api/roleassign {server,member,role_id,add}`, `GET /api/typing`,
 //! `POST /api/typing {to}`.
 
 use std::{
@@ -77,6 +79,27 @@ enum Cmd {
         server: String,
         days: f64,
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    SetRole {
+        server: String,
+        id: Option<u16>,
+        name: String,
+        allow: u32,
+        deny: u32,
+        rank: u16,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    AssignRole {
+        server: String,
+        member: String,
+        role_id: u16,
+        add: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Return the server's role policy as a ready JSON string.
+    GetPolicy {
+        server: [u8; 32],
+        reply: oneshot::Sender<String>,
     },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
@@ -493,13 +516,81 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let channel = channel.strip_prefix('#').unwrap_or(&channel);
             let r = match (parse_fingerprint(channel), parse_fingerprint(&member)) {
                 (Ok(cid), Ok(mid)) => engine
-                    .remove_from_channel(&cid, &mid, now_ms())
+                    .request_kick(&cid, &mid, now_ms())
                     .await
                     .map(|_| "ok".into())
                     .map_err(|e| e.to_string()),
                 _ => Err("bad channel id or fingerprint".into()),
             };
             let _ = reply.send(r);
+        }
+        Cmd::SetRole {
+            server,
+            id,
+            name,
+            allow,
+            deny,
+            rank,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(root) => engine
+                    .set_role(&root, id, &name, allow, deny, rank, now_ms())
+                    .await
+                    .map(|rid| rid.to_string())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::AssignRole {
+            server,
+            member,
+            role_id,
+            add,
+            reply,
+        } => {
+            let r = match (parse_fingerprint(&server), parse_fingerprint(&member)) {
+                (Ok(root), Ok(mid)) => engine
+                    .assign_role(&root, &mid, role_id, add, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                _ => Err("bad server root or fingerprint".into()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::GetPolicy { server, reply } => {
+            let json = match engine.server_policy(&server) {
+                Some(p) => {
+                    let roles: Vec<_> = p
+                        .roles
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "id": r.id, "name": r.name,
+                                "allow": r.allow, "deny": r.deny, "rank": r.rank,
+                            })
+                        })
+                        .collect();
+                    let assignments: Vec<_> = p
+                        .assignments
+                        .iter()
+                        .map(|(m, ids)| serde_json::json!({ "member": id_b32(m), "roles": ids }))
+                        .collect();
+                    let me = *engine.identity().id().as_bytes();
+                    serde_json::json!({
+                        "version": p.version,
+                        "owner": id_b32(&p.owner_id),
+                        "roles": roles,
+                        "assignments": assignments,
+                        "me_perms": engine.member_perms(&server, &me),
+                    })
+                    .to_string()
+                }
+                None => "{}".to_string(),
+            };
+            let _ = reply.send(json);
         }
         Cmd::AutoKick {
             server,
@@ -786,6 +877,83 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::AutoKick {
                 server: r.server,
                 days: r.days,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/policy") => {
+            let root = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("server="))
+                .unwrap_or("");
+            let body = match parse_fingerprint(root) {
+                Ok(sr) => {
+                    let (tx, rx) = oneshot::channel();
+                    if shared
+                        .cmd
+                        .send(Cmd::GetPolicy {
+                            server: sr,
+                            reply: tx,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+                    }
+                    rx.await.unwrap_or_else(|_| "{}".into())
+                }
+                Err(_) => "{}".into(),
+            };
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/role") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                #[serde(default)]
+                id: u16,
+                name: String,
+                #[serde(default)]
+                allow: u32,
+                #[serde(default)]
+                deny: u32,
+                #[serde(default)]
+                rank: u16,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::SetRole {
+                server: r.server,
+                id: (r.id != 0).then_some(r.id),
+                name: r.name,
+                allow: r.allow,
+                deny: r.deny,
+                rank: r.rank,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/roleassign") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                member: String,
+                role_id: u16,
+                #[serde(default)]
+                add: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::AssignRole {
+                server: r.server,
+                member: r.member,
+                role_id: r.role_id,
+                add: r.add,
                 reply,
             })
             .await

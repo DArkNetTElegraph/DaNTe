@@ -205,7 +205,21 @@ infrastructure. Reached. ---**
 
 ### Phase 6 — Servers & channels  (post-MVP)
 - Server = one or more **MLS groups**; creator's client runs the server's relay role.
-- Roles/permissions: bitflag capabilities + role hierarchy. Private channel = its own MLS group scoped to a role/user set.
+- **Roles/permissions** *(v1 done)*: `roles::ServerPolicy` — server-root-signed
+  `{ owner_id, version, roles: [{id, name, allow, deny, rank}], assignments }`,
+  broadcast to members as `ChannelControl::Policy` and verified against the root
+  key; members keep the highest `version`. Permissions are allow/deny masks over
+  the `@everyone` default (`PERM_SEND` default-on; deny wins, so a full-deny
+  role is a mute). Enforcement in this host-centric model: `PERM_SEND` is
+  checked by *receivers* in `poll_channels` (a member without it has their
+  channel messages dropped); `PERM_KICK` lets a member send
+  `ChannelControl::KickRequest`, which the host validates against the policy
+  before running the removal. Other bits are advisory (the host performs every
+  privileged mutation because only it holds the root key). Host API:
+  `set_role` / `delete_role` / `assign_role`; `serve` `POST /api/role` /
+  `/api/roleassign` / `GET /api/policy`; CLI `/roles` `/role` `/assignrole`.
+  Full role hierarchy and private-channel-per-role-set come with the MLS
+  migration.
 - Public text channels: still MLS-encrypted to *members* (passive non-member relays never see plaintext; the member-host does — matches the trust model). History replication via the server relay + hybrid logical clock ordering.
 - Discovery: `ServerRegister` record; private servers simply omit it.
 - **Invite links** *(done)*: `InviteToken { server_root, host_id, channel_id, relay_hint, expires_ms, max_uses, nonce, sig }`, signed by the server root key, rendered `dante-invite:<hex>`. `Engine::create_invite_link` mints one; `redeem_invite` verifies it locally then DMs the host a `ChannelControl::Redeem`; the host checks the signature/expiry/use-count (`invite_uses` map, persisted) and runs the normal channel-invite. The relay is never involved. `serve`: `POST /api/invite-link` / `POST /api/redeem`; CLI: `/invitelink` / `/redeem`.

@@ -255,7 +255,8 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     println!(
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
          /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
-         /autokick <root> <days|off>  \
+         /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
+         /assignrole <root> <fp> <id> [remove]  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -469,14 +470,84 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 },
                 _ => println!("usage: /autokick <server-root> <days|off>"),
             },
+            "roles" => match a {
+                Some(root) => match parse_fingerprint(root) {
+                    Ok(sr) => match engine.server_policy(&sr) {
+                        Some(p) => {
+                            println!("roles for server (v{}):", p.version);
+                            for r in &p.roles {
+                                println!(
+                                    "  [{}] {}  allow={:#x} deny={:#x} rank={}",
+                                    r.id, r.name, r.allow, r.deny, r.rank
+                                );
+                            }
+                        }
+                        None => println!("no policy known for that server"),
+                    },
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                None => println!("usage: /roles <server-root>"),
+            },
+            "role" => match (a, b) {
+                (Some(root), Some(rest)) => match parse_fingerprint(root) {
+                    Ok(sr) => {
+                        let mut it = rest.split_whitespace();
+                        let name = it.next().unwrap_or("role");
+                        let mut allow = 0u32;
+                        let mut deny = 0u32;
+                        for flag in it {
+                            match flag {
+                                "kick" => allow |= dante_core::roles::PERM_KICK,
+                                "mute" | "nosend" => deny |= dante_core::roles::PERM_SEND,
+                                "manage" => {
+                                    allow |= dante_core::roles::PERM_MANAGE_CHANNELS
+                                        | dante_core::roles::PERM_MANAGE_ROLES
+                                }
+                                _ => {}
+                            }
+                        }
+                        match engine
+                            .set_role(&sr, None, name, allow, deny, 10, now_ms())
+                            .await
+                        {
+                            Ok(id) => println!("role \"{name}\" -> id {id}"),
+                            Err(e) => println!("failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /role <server-root> <name> [kick] [mute] [manage]"),
+            },
+            "assignrole" => match (a, b) {
+                (Some(root), Some(rest)) => {
+                    let mut it = rest.split_whitespace();
+                    match (
+                        parse_fingerprint(root),
+                        it.next().map(parse_fingerprint),
+                        it.next().and_then(|s| s.parse::<u16>().ok()),
+                    ) {
+                        (Ok(sr), Some(Ok(mid)), Some(rid)) => {
+                            let add = it.next() != Some("remove");
+                            match engine.assign_role(&sr, &mid, rid, add, now_ms()).await {
+                                Ok(()) => {
+                                    println!("{}", if add { "assigned" } else { "unassigned" })
+                                }
+                                Err(e) => println!("failed: {e}"),
+                            }
+                        }
+                        _ => println!("usage: /assignrole <server-root> <fp> <role-id> [remove]"),
+                    }
+                }
+                _ => println!("usage: /assignrole <server-root> <fp> <role-id> [remove]"),
+            },
             "kick" => match (a, b) {
                 (Some(chan), Some(fp)) => {
                     let chan = chan.strip_prefix('#').unwrap_or(chan);
                     match (parse_fingerprint(chan), parse_fingerprint(fp)) {
                         (Ok(cid), Ok(mid)) => {
-                            match engine.remove_from_channel(&cid, &mid, now_ms()).await {
-                                Ok(()) => println!("removed"),
-                                Err(e) => println!("remove failed: {e}"),
+                            match engine.request_kick(&cid, &mid, now_ms()).await {
+                                Ok(()) => println!("kick requested"),
+                                Err(e) => println!("kick failed: {e}"),
                             }
                         }
                         _ => println!("bad channel id or fingerprint"),

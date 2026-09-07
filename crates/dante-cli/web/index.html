@@ -138,6 +138,8 @@ button, input, textarea { font: inherit; color: inherit; }
 #btn-verify.verified { color: var(--cornflower-blue); }
 img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .react-chip img.emoji { height: 1.15em; vertical-align: -0.2em; }
+.chan-row .tag { margin-left: auto; font-size: 11px; color: var(--cornflower-blue); }
+#btn-contact.on { color: var(--orange); }
 
 .pane-scroll { flex: 1; overflow-y: auto; padding: 10px 8px; }
 .group-label {
@@ -336,6 +338,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <span class="title" id="chat-title"><span class="hash">#</span> …</span>
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
+      <button class="icon-btn" id="btn-contact" title="Save as contact" hidden>☆</button>
       <button class="icon-btn" id="btn-verify" title="Safety number" hidden>🛡️</button>
       <button class="icon-btn" id="btn-emoji" title="Custom emoji" hidden>😀</button>
       <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
@@ -381,7 +384,8 @@ const short = s => (s && s.includes("-")) ? s.split("-").slice(0, 2).join("-") :
    so it never comes back and doubles. */
 const isSelf  = fp => !!fp && store.me.fingerprint &&
   (fp === store.me.fingerprint || short(fp) === short(store.me.fingerprint));
-const dmLabel = fp => isSelf(fp) ? "Private Note" : short(fp);
+const petname = fp => { const c = store.contacts.find(c => c.fp === fp); return c && c.petname ? c.petname : null; };
+const dmLabel = fp => isSelf(fp) ? "Private Note" : (petname(fp) || short(fp));
 
 const LS = {
   get(k, d) { try { const v = localStorage.getItem("dante." + k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
@@ -402,6 +406,7 @@ const store = {
   reactions: {},                      // ref_seq -> [{emoji,count,by}]
   safety: {},                         // dm fp -> {number,verified,available}
   emojis: {},                         // server root -> { shortcode: hexhash }
+  contacts: [],                       // [{fp,petname,verified,added_ms}]
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -572,13 +577,16 @@ function renderPane() {
     noteRow.onclick = () => selectTarget("@dm", meFp);
     list.appendChild(noteRow);
 
-    for (const d of store.dms) {
-      if (isSelf(d.fp)) continue;
-      const row = el("button", "chan-row" + (curTarget() === d.fp ? " active" : ""));
-      row.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(d.fp) }));
-      row.appendChild(el("span", "name", dmLabel(d.fp)));
-      if (store.unread.has(d.fp)) row.appendChild(el("span", "dot"));
-      row.onclick = () => selectTarget("@dm", d.fp);
+    const fps = [];
+    for (const c of store.contacts) if (!isSelf(c.fp)) fps.push(c.fp);
+    for (const d of store.dms) if (!isSelf(d.fp) && !fps.includes(d.fp)) fps.push(d.fp);
+    for (const fp of fps) {
+      const row = el("button", "chan-row" + (curTarget() === fp ? " active" : ""));
+      row.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(dmLabel(fp)) }));
+      row.appendChild(el("span", "name", dmLabel(fp)));
+      if (store.contacts.find(c => c.fp === fp && c.verified)) row.appendChild(Object.assign(el("span", "tag"), { textContent: "✓" }));
+      if (store.unread.has(fp)) row.appendChild(el("span", "dot"));
+      row.onclick = () => selectTarget("@dm", fp);
       list.appendChild(row);
     }
     return;
@@ -622,6 +630,8 @@ function renderChat() {
   verifyBtn.hidden = true;
   const emojiBtn = $("#btn-emoji");
   emojiBtn.hidden = true;
+  const contactBtn = $("#btn-contact");
+  contactBtn.hidden = true;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
@@ -645,9 +655,16 @@ function renderChat() {
     $("#chat-topic").textContent = "only you can see this";
     inviteBtn.hidden = true; linkBtn.hidden = true;
   } else {
-    titleEl.innerHTML = '<span class="hash">@</span> ' + esc(short(target));
+    titleEl.innerHTML = '<span class="hash">@</span> ' + esc(dmLabel(target));
     $("#chat-topic").textContent = "direct message · " + target;
     inviteBtn.hidden = true; linkBtn.hidden = true;
+
+    const known = store.contacts.some(c => c.fp === target);
+    contactBtn.hidden = false;
+    contactBtn.textContent = known ? "★" : "☆";
+    contactBtn.classList.toggle("on", known);
+    contactBtn.title = known ? "Edit contact" : "Save as contact";
+    contactBtn.onclick = () => contactFlow(target);
 
     const s = store.safety[target];
     if (s === undefined) { loadSafety(target); }
@@ -998,7 +1015,34 @@ function addDmFlow() {
   const fp = ui.ask("Their fingerprint (base32) or 24 words:");
   if (!fp) return;
   if (!store.dms.some(d => d.fp === fp)) { store.dms.push({ fp }); LS.set("dms", store.dms); }
+  const nn = ui.ask("Save as a contact? Enter a petname (or leave blank to skip):", "");
+  if (nn) api.post("/api/contact", { peer: fp, petname: nn }).then(refreshContacts).catch(() => {});
   selectTarget("@dm", fp);
+}
+
+async function contactFlow(fp) {
+  const c = store.contacts.find(c => c.fp === fp);
+  if (c) {
+    const nn = ui.ask("Petname (blank keeps it, '-' removes the contact):", c.petname);
+    if (nn === null) return;
+    try {
+      if (nn === "-") await api.post("/api/contact/remove", { peer: fp });
+      else await api.post("/api/contact", { peer: fp, petname: nn });
+    } catch (e) { ui.sys("contact update failed: " + e.message); return; }
+  } else {
+    const nn = ui.ask("Save contact — petname (optional):", "");
+    if (nn === null) return;
+    try { await api.post("/api/contact", { peer: fp, petname: nn }); }
+    catch (e) { ui.sys("save failed: " + e.message); return; }
+  }
+  await refreshContacts();
+}
+
+async function refreshContacts() {
+  try {
+    const c = await api.get("/api/contacts");
+    if (JSON.stringify(c) !== JSON.stringify(store.contacts)) { store.contacts = c; render(); }
+  } catch (_) {}
 }
 
 /* ---------- polling ---------------------------------------------- */
@@ -1208,11 +1252,13 @@ async function init() {
 
   poll();
   refreshPolicies();
+  refreshContacts();
   setInterval(poll, 700);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
   setInterval(refreshReactions, 1500);
   setInterval(refreshPolicies, 6000);
+  setInterval(refreshContacts, 8000);
 }
 init();
 </script>

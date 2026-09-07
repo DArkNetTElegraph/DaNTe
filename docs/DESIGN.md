@@ -194,14 +194,22 @@ DaNTe/
   persist on a 15 s timer and on exit, restore on start, replay history, and
   skip the announce PoW when it was done within the day. Not `rusqlite` — a
   single sealed blob; SQLite is a later scale optimisation.
-- **Safety-number verification** *(engine + CLI done)*: `Engine::safety_number`
-  derives a 60-digit pair fingerprint from
+- **Safety-number verification** *(done)*: `Engine::safety_number` derives a
+  60-digit pair fingerprint from
   `SHA-512("dante/safety-number/v1" ‖ min(idk) ‖ max(idk))` (order-independent,
   both ends match). `set_verified` / `is_verified` persist the confirmation,
   pinned to the peer `idk` so a key rotation drops it back to unverified.
-  `dante chat`: `/safety <fp>`, `/verify <fp> [off]`. The `dante serve` UI
-  affordance (a per-DM shield + compare dialog) is still to build.
-- **Deferred:** petname assignment UI.
+  `dante chat`: `/safety <fp>`, `/verify <fp> [off]`. `dante serve`:
+  `GET /api/safety?peer=` / `POST /api/verify`, with a per-DM shield (🛡️/⚠️)
+  and a compare dialog in the SPA.
+- **Contacts / petnames** *(done)*: `Engine` keeps a private
+  `contacts: {IdentityId -> {petname, added_ms}}` map (persisted, never leaves
+  the device). `add_contact` / `remove_contact` / `contacts` (sorted by
+  petname) / `petname` / `is_contact`. `dante chat`: `/contact <fp> [petname]`,
+  `/contact <fp> remove`, `/contacts`. `dante serve`: `GET /api/contacts`,
+  `POST /api/contact {peer,petname}`, `POST /api/contact/remove`; the SPA DM
+  list is the union of contacts and message partners, shows petnames and a ✓
+  for verified, with a ☆/★ header button to save/edit.
 
 ### Phase 5 — Client shell  — **MVP**
 - **Done (interim):** `dante serve` — the engine behind a tiny localhost

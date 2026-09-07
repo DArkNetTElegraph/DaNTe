@@ -55,6 +55,19 @@ type ReactionMap = HashMap<[u8; 32], HashMap<u64, HashMap<String, HashSet<[u8; 3
 /// A reaction pending a fold-in: `(channel_id, target_seq, emoji, member, removed)`.
 type PendingReaction = ([u8; 32], u64, String, [u8; 32], bool);
 
+/// Max bytes of a contact petname.
+const PETNAME_MAX: usize = 64;
+
+/// A saved contact: a local, private label for another identity. Never leaves
+/// the device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Contact {
+    /// The user's private nickname for this identity (may be empty).
+    pub petname: String,
+    /// When the contact was first added (Unix ms).
+    pub added_ms: u64,
+}
+
 /// TTL on a typing signal's carrier envelope. Deliberately short: a stale
 /// "is typing" is worse than a missing one.
 const TYPING_TTL_MS: u32 = 10_000;
@@ -201,6 +214,8 @@ pub struct Engine {
     /// stable `IdentityId` bytes and pinned to the peer `idk` that was verified
     /// (so a later key rotation drops back to unverified). Persisted.
     verified_peers: HashMap<[u8; 32], [u8; 32]>,
+    /// The user's saved contacts, keyed by stable `IdentityId` bytes. Persisted.
+    contacts: HashMap<[u8; 32], Contact>,
     /// Relay endpoints this engine may use, preference order. The first is the
     /// one embedded in invite links and server-discovery records; the whole
     /// list is the client's failover set.
@@ -257,6 +272,7 @@ impl Engine {
             new_reactions: Vec::new(),
             channel_reactions: HashMap::new(),
             verified_peers: HashMap::new(),
+            contacts: HashMap::new(),
             relay_addrs,
             pow,
             last_fetch_since_ms: 0,
@@ -316,6 +332,11 @@ impl Engine {
                     .insert(member);
             }
             engine.verified_peers = s.verified_peers.into_iter().collect();
+            engine.contacts = s
+                .contacts
+                .into_iter()
+                .map(|(id, petname, added_ms)| (id, Contact { petname, added_ms }))
+                .collect();
             let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
             let joinpw: HashMap<[u8; 32], [u8; 32]> = s.server_join_pw.into_iter().collect();
             for h in s.hosted {
@@ -440,6 +461,11 @@ impl Engine {
                 .iter()
                 .map(|(id, idk)| (*id, *idk))
                 .collect(),
+            contacts: self
+                .contacts
+                .iter()
+                .map(|(id, c)| (*id, c.petname.clone(), c.added_ms))
+                .collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -551,6 +577,62 @@ impl Engine {
         }
         self.dirty = true;
         Ok(())
+    }
+
+    /// Add a contact (or update its petname if it already exists). `petname` is
+    /// trimmed and capped at [`PETNAME_MAX`] bytes; it may be empty.
+    pub fn add_contact(&mut self, peer_id: &[u8; 32], petname: &str, now_ms: u64) {
+        let petname = petname.trim();
+        let petname: String = petname.chars().take(PETNAME_MAX).collect();
+        match self.contacts.get_mut(peer_id) {
+            Some(c) => c.petname = petname,
+            None => {
+                self.contacts.insert(
+                    *peer_id,
+                    Contact {
+                        petname,
+                        added_ms: now_ms,
+                    },
+                );
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Forget a contact. The petname is dropped; conversation history is not.
+    pub fn remove_contact(&mut self, peer_id: &[u8; 32]) {
+        if self.contacts.remove(peer_id).is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// The saved contacts, sorted by petname (then fingerprint bytes).
+    pub fn contacts(&self) -> Vec<([u8; 32], Contact)> {
+        let mut out: Vec<_> = self
+            .contacts
+            .iter()
+            .map(|(id, c)| (*id, c.clone()))
+            .collect();
+        out.sort_by(|a, b| {
+            a.1.petname
+                .to_lowercase()
+                .cmp(&b.1.petname.to_lowercase())
+                .then(a.0.cmp(&b.0))
+        });
+        out
+    }
+
+    /// This identity's private label for `peer_id`, if saved and non-empty.
+    pub fn petname(&self, peer_id: &[u8; 32]) -> Option<&str> {
+        self.contacts
+            .get(peer_id)
+            .map(|c| c.petname.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Whether `peer_id` is a saved contact.
+    pub fn is_contact(&self, peer_id: &[u8; 32]) -> bool {
+        self.contacts.contains_key(peer_id)
     }
 
     /// Whether `peer_id` is verified **and** still on the key that was verified.

@@ -54,6 +54,20 @@ pub enum Request {
         /// Return entries with sequence number greater than this.
         since_seq: u64,
     },
+    /// Post an ephemeral, unlogged signal (e.g. a typing indicator) under a
+    /// shared `topic`. The relay holds each for a few seconds only and never
+    /// persists it. Fire-and-forget: the reply is [`Response::Ok`].
+    PostSignal {
+        /// A shared 32-byte capability (a `channel_id`, or a DM signal tag).
+        topic: [u8; 32],
+        /// The opaque, E2E-encrypted payload.
+        blob: Vec<u8>,
+    },
+    /// Drain the currently-buffered signals for `topic`.
+    FetchSignals {
+        /// The shared topic to read.
+        topic: [u8; 32],
+    },
 }
 
 /// A relay -> client response.
@@ -82,6 +96,8 @@ pub enum Response {
     Blob(Option<Vec<u8>>),
     /// Reply to [`Request::FetchChannel`]: `(seq, blob)` pairs in order.
     ChannelLog(Vec<(u64, Vec<u8>)>),
+    /// Reply to [`Request::FetchSignals`]: opaque payloads, oldest first.
+    Signals(Vec<Vec<u8>>),
 }
 
 const REQ_PING: u8 = 0;
@@ -96,6 +112,8 @@ const REQ_PUT_BLOB: u8 = 8;
 const REQ_GET_BLOB: u8 = 9;
 const REQ_POST_CHANNEL: u8 = 10;
 const REQ_FETCH_CHANNEL: u8 = 11;
+const REQ_POST_SIGNAL: u8 = 12;
+const REQ_FETCH_SIGNALS: u8 = 13;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -106,6 +124,7 @@ const RES_ENVELOPES: u8 = 5;
 const RES_PREKEYS: u8 = 6;
 const RES_BLOB: u8 = 7;
 const RES_CHANNEL_LOG: u8 = 8;
+const RES_SIGNALS: u8 = 9;
 
 fn write_blob_list(w: &mut Writer, blobs: &[Vec<u8>]) {
     w.u32(blobs.len() as u32);
@@ -174,6 +193,12 @@ impl Request {
             } => {
                 w.u8(REQ_FETCH_CHANNEL).fixed(channel_id).u64(*since_seq);
             }
+            Request::PostSignal { topic, blob } => {
+                w.u8(REQ_POST_SIGNAL).fixed(topic).bytes(blob);
+            }
+            Request::FetchSignals { topic } => {
+                w.u8(REQ_FETCH_SIGNALS).fixed(topic);
+            }
         }
         w.into_vec()
     }
@@ -202,6 +227,13 @@ impl Request {
             REQ_FETCH_CHANNEL => Request::FetchChannel {
                 channel_id: r.fixed::<32>()?,
                 since_seq: r.u64()?,
+            },
+            REQ_POST_SIGNAL => Request::PostSignal {
+                topic: r.fixed::<32>()?,
+                blob: r.bytes()?.to_vec(),
+            },
+            REQ_FETCH_SIGNALS => Request::FetchSignals {
+                topic: r.fixed::<32>()?,
             },
             REQ_FETCH => {
                 let n = r.u32()? as usize;
@@ -243,6 +275,8 @@ impl Request {
             Request::GetBlob(_) => "GetBlob",
             Request::PostToChannel { .. } => "PostToChannel",
             Request::FetchChannel { .. } => "FetchChannel",
+            Request::PostSignal { .. } => "PostSignal",
+            Request::FetchSignals { .. } => "FetchSignals",
         }
     }
 }
@@ -300,6 +334,10 @@ impl Response {
                     w.u64(*seq).bytes(blob);
                 }
             }
+            Response::Signals(blobs) => {
+                w.u8(RES_SIGNALS);
+                write_blob_list(&mut w, blobs);
+            }
         }
         w.into_vec()
     }
@@ -339,6 +377,7 @@ impl Response {
                 }
                 Response::ChannelLog(out)
             }
+            RES_SIGNALS => Response::Signals(read_blob_list(&mut r)?),
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -385,6 +424,11 @@ mod tests {
             channel_id: [4u8; 32],
             since_seq: 7,
         });
+        rt_req(Request::PostSignal {
+            topic: [5u8; 32],
+            blob: vec![7, 7, 7],
+        });
+        rt_req(Request::FetchSignals { topic: [6u8; 32] });
     }
 
     #[test]
@@ -403,6 +447,7 @@ mod tests {
         rt_res(Response::Blob(Some(vec![1, 1])));
         rt_res(Response::Blob(None));
         rt_res(Response::ChannelLog(vec![(1, vec![9]), (2, vec![])]));
+        rt_res(Response::Signals(vec![vec![1, 2], vec![]]));
     }
 
     #[test]

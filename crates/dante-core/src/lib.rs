@@ -14,7 +14,7 @@ pub mod error;
 pub mod store;
 
 pub use channel::{ChannelInfo, ChannelMessage};
-pub use engine::{Engine, Inbound, ReceivedDm, DM_TTL_MS};
+pub use engine::{Engine, Inbound, ReceivedDm, TypingEvent, TypingScope, DM_TTL_MS};
 pub use error::CoreError;
 pub use store::{ChannelHistoryEntry, HistoryEntry, HistoryKind};
 

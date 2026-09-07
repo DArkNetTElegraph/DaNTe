@@ -331,6 +331,60 @@ async fn channel_history_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn dm_typing_signals_reach_the_peer_only() {
+    use crate::{TypingEvent, TypingScope};
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_idk = alice.identity().sign_public().to_bytes();
+    let bob_idk = bob.identity().sign_public().to_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    alice.sync(now).await.unwrap();
+    bob.sync(now).await.unwrap();
+
+    // A first message each way so both hold a session for the other.
+    alice.send_dm(&bob_id, "hi", now).await.unwrap();
+    bob.receive(now).await.unwrap();
+    bob.send_dm(&alice_id, "hey", now).await.unwrap();
+    alice.receive(now).await.unwrap();
+
+    // Nothing typed yet.
+    assert!(bob.poll_typing(now).await.unwrap().is_empty());
+
+    alice.send_typing_dm(&bob_id, now).await.unwrap();
+
+    // Bob sees exactly Alice typing; Alice never sees her own signal.
+    assert_eq!(
+        bob.poll_typing(now).await.unwrap(),
+        vec![TypingEvent {
+            scope: TypingScope::Dm(alice_idk),
+            who: alice_idk,
+            at_ms: now,
+        }]
+    );
+    assert!(alice.poll_typing(now).await.unwrap().is_empty());
+
+    // The other direction works too.
+    bob.send_typing_dm(&alice_id, now).await.unwrap();
+    assert_eq!(
+        alice.poll_typing(now).await.unwrap(),
+        vec![TypingEvent {
+            scope: TypingScope::Dm(bob_idk),
+            who: bob_idk,
+            at_ms: now,
+        }]
+    );
+}
+
+#[tokio::test]
 async fn send_dm_to_unknown_peer_fails_until_synced() {
     let now = now_ms();
     let relay = spawn_relay().await;

@@ -148,6 +148,39 @@ pub async fn fetch_channel(
     }
 }
 
+/// Post an ephemeral signal (e.g. a typing indicator) under `topic`. The relay
+/// keeps it for only a few seconds and never persists it. Fire-and-forget.
+pub async fn post_signal(
+    client: &mut Client,
+    topic: &[u8; 32],
+    blob: &[u8],
+) -> Result<(), NetError> {
+    match client
+        .request(&Request::PostSignal {
+            topic: *topic,
+            blob: blob.to_vec(),
+        })
+        .await?
+    {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("PostSignal: {other:?}"))),
+    }
+}
+
+/// Drain the currently-buffered signals for `topic`, oldest first.
+pub async fn fetch_signals(
+    client: &mut Client,
+    topic: &[u8; 32],
+) -> Result<Vec<Vec<u8>>, NetError> {
+    match client
+        .request(&Request::FetchSignals { topic: *topic })
+        .await?
+    {
+        Response::Signals(blobs) => Ok(blobs),
+        _ => Err(NetError::UnexpectedResponse("FetchSignals")),
+    }
+}
+
 /// Fetch and decode mailbox envelopes for `hints` since `since_ms`.
 pub async fn fetch(
     client: &mut Client,

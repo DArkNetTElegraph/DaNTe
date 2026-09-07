@@ -254,6 +254,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     }
     println!(
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
+         /invitelink #<chan> [days] [uses]  /redeem <link>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -411,6 +412,35 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     }
                 }
                 _ => println!("usage: /invite #<channel-id> <fingerprint>"),
+            },
+            "invitelink" => match a {
+                Some(chan) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    let mut rest = b.unwrap_or("").split_whitespace();
+                    let days: f64 = rest.next().and_then(|s| s.parse().ok()).unwrap_or(7.0);
+                    let uses: u32 = rest.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    match parse_fingerprint(chan) {
+                        Ok(cid) => {
+                            let ttl = (days * 86_400_000.0) as u64;
+                            match engine.create_invite_link(&cid, ttl, uses, now_ms()) {
+                                Ok(link) => println!("{link}"),
+                                Err(e) => println!("could not create link: {e}"),
+                            }
+                        }
+                        Err(e) => println!("bad channel id: {e}"),
+                    }
+                }
+                None => println!("usage: /invitelink #<channel-id> [days] [max-uses]"),
+            },
+            "redeem" => match a {
+                Some(link) => {
+                    let full = b.map_or_else(|| link.to_string(), |b| format!("{link} {b}"));
+                    match engine.redeem_invite(full.trim(), now_ms()).await {
+                        Ok(()) => println!("redeemed — you'll join once the host is online"),
+                        Err(e) => println!("redeem failed: {e}"),
+                    }
+                }
+                None => println!("usage: /redeem <invite-link>"),
             },
             "channels" => {
                 for c in engine.channels() {

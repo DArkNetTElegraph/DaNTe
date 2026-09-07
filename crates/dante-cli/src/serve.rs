@@ -5,7 +5,8 @@
 //! `GET /api/me`, `GET /api/messages?since=N`, `GET /api/channels`,
 //! `POST /api/send {to,text}` (`to` may be a fingerprint or `#<channel-id>`),
 //! `POST /api/server {name}`, `POST /api/channel {server,name}`,
-//! `POST /api/invite {channel,peer}`, `GET /api/typing`,
+//! `POST /api/invite {channel,peer}`, `POST /api/invite-link
+//! {channel,ttl_secs,max_uses}`, `POST /api/redeem {link}`, `GET /api/typing`,
 //! `POST /api/typing {to}`.
 
 use std::{
@@ -54,6 +55,16 @@ enum Cmd {
     Invite {
         channel: String,
         peer: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    InviteLink {
+        channel: String,
+        ttl_secs: u64,
+        max_uses: u32,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    Redeem {
+        link: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
@@ -424,6 +435,29 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::InviteLink {
+            channel,
+            ttl_secs,
+            max_uses,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match parse_fingerprint(channel) {
+                Ok(cid) => engine
+                    .create_invite_link(&cid, ttl_secs.saturating_mul(1000), max_uses, now_ms())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::Redeem { link, reply } => {
+            let r = engine
+                .redeem_invite(&link, now_ms())
+                .await
+                .map(|_| "ok".into())
+                .map_err(|e| e.to_string());
+            let _ = reply.send(r);
+        }
         Cmd::Typing { to } => match parse_target(&to) {
             Ok((true, id)) => {
                 let _ = engine.send_typing_channel(&id, now_ms()).await;
@@ -618,6 +652,45 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Invite {
                 channel: r.channel,
                 peer: r.peer,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/invite-link") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                #[serde(default = "default_ttl")]
+                ttl_secs: u64,
+                #[serde(default)]
+                max_uses: u32,
+            }
+            fn default_ttl() -> u64 {
+                7 * 24 * 3600
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::InviteLink {
+                channel: r.channel,
+                ttl_secs: r.ttl_secs,
+                max_uses: r.max_uses,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/redeem") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                link: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Redeem {
+                link: r.link,
                 reply,
             })
             .await

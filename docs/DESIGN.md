@@ -208,7 +208,7 @@ infrastructure. Reached. ---**
 - Roles/permissions: bitflag capabilities + role hierarchy. Private channel = its own MLS group scoped to a role/user set.
 - Public text channels: still MLS-encrypted to *members* (passive non-member relays never see plaintext; the member-host does — matches the trust model). History replication via the server relay + hybrid logical clock ordering.
 - Discovery: `ServerRegister` record; private servers simply omit it.
-- **Invite links:** server-signed capability tokens (expiry + max-uses), resolve to entry relays + group ID.
+- **Invite links** *(done)*: `InviteToken { server_root, host_id, channel_id, relay_hint, expires_ms, max_uses, nonce, sig }`, signed by the server root key, rendered `dante-invite:<hex>`. `Engine::create_invite_link` mints one; `redeem_invite` verifies it locally then DMs the host a `ChannelControl::Redeem`; the host checks the signature/expiry/use-count (`invite_uses` map, persisted) and runs the normal channel-invite. The relay is never involved. `serve`: `POST /api/invite-link` / `POST /api/redeem`; CLI: `/invitelink` / `/redeem`.
 - **Optional join password:** relay-side check on join + `Argon2id(password)` as an MLS PSK in the group key schedule (content protection, not just gatekeeping).
 - **Optional per-server auto-kick:** admin-set inactivity window (default off); prunes the local membership list only.
 

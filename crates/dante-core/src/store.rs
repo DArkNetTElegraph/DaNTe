@@ -103,6 +103,8 @@ pub struct PersistedState {
     pub history: Vec<HistoryEntry>,
     /// Channel history, oldest first.
     pub channel_history: Vec<ChannelHistoryEntry>,
+    /// Redemption counts for invite tokens we minted (`nonce -> uses`).
+    pub invite_uses: Vec<([u8; 8], u32)>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -229,8 +231,8 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
         w.fixed(tag);
     }
 
-    // Trailing optional section: absent in stores written before channel
-    // history existed, so `decode_state` only reads it when bytes remain.
+    // Trailing optional sections, in order of introduction. `decode_state`
+    // reads each only while bytes remain, so older stores still load.
     w.u32(s.channel_history.len() as u32);
     for e in &s.channel_history {
         w.fixed(&e.channel_id)
@@ -238,6 +240,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
             .bool(e.outgoing)
             .u64(e.ts_ms)
             .string(&e.text);
+    }
+
+    w.u32(s.invite_uses.len() as u32);
+    for (nonce, uses) in &s.invite_uses {
+        w.fixed(nonce).u32(*uses);
     }
     w.into_vec()
 }
@@ -343,6 +350,15 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut invite_uses = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        invite_uses.reserve(n);
+        for _ in 0..n {
+            invite_uses.push((r.fixed::<8>()?, r.u32()?));
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -351,6 +367,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         hosted,
         history,
         channel_history,
+        invite_uses,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -405,6 +422,7 @@ mod tests {
                 ts_ms: 77,
                 text: "channel hello".into(),
             }],
+            invite_uses: vec![([1u8; 8], 3), ([2u8; 8], 0)],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -416,6 +434,7 @@ mod tests {
         assert_eq!(back.sessions[0].0, peer);
         assert_eq!(back.history, state.history);
         assert_eq!(back.channel_history, state.channel_history);
+        assert_eq!(back.invite_uses, state.invite_uses);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -437,6 +456,7 @@ mod tests {
             hosted: vec![],
             history: vec![],
             channel_history: vec![],
+            invite_uses: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

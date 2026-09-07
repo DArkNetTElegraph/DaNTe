@@ -64,4 +64,8 @@ pub enum CoreError {
     /// The encrypted local store could not be read or written.
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+
+    /// An invite link was malformed, forged, expired, or used up.
+    #[error("invalid invite link: {0}")]
+    Invite(&'static str),
 }

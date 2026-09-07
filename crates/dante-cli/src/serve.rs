@@ -17,7 +17,9 @@
 //! `POST /api/react {channel,seq,emoji,remove}`,
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
-//! `POST /api/emoji/remove {server,name}`.
+//! `POST /api/emoji/remove {server,name}`,
+//! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
+//! `POST /api/contact/remove {peer}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -165,6 +167,19 @@ enum Cmd {
     GetEmoji {
         hash: [u8; 32],
         reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
+    /// The saved contacts as a ready JSON array.
+    Contacts { reply: oneshot::Sender<String> },
+    /// Add a contact / set its petname (`petname` may be empty).
+    AddContact {
+        peer: String,
+        petname: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Forget a contact.
+    RemoveContact {
+        peer: String,
+        reply: oneshot::Sender<Result<String, String>>,
     },
 }
 
@@ -924,6 +939,45 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let blob = engine.fetch_blob(&hash).await.ok().flatten();
             let _ = reply.send(blob);
         }
+        Cmd::Contacts { reply } => {
+            let rows: Vec<_> = engine
+                .contacts()
+                .into_iter()
+                .map(|(id, c)| {
+                    serde_json::json!({
+                        "fp": id_b32(&id),
+                        "petname": c.petname,
+                        "added_ms": c.added_ms,
+                        "verified": engine.is_verified(&id),
+                    })
+                })
+                .collect();
+            let _ = reply.send(serde_json::Value::Array(rows).to_string());
+        }
+        Cmd::AddContact {
+            peer,
+            petname,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&peer) {
+                Ok(id) => {
+                    engine.add_contact(&id, &petname, now_ms());
+                    Ok("ok".into())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::RemoveContact { peer, reply } => {
+            let r = match parse_fingerprint(&peer) {
+                Ok(id) => {
+                    engine.remove_contact(&id);
+                    Ok("ok".into())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::AutoKick {
             server,
             days,
@@ -1445,6 +1499,48 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Verify {
                 peer: r.peer,
                 on: r.verified,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/contacts") => {
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::Contacts { reply: tx }).await.is_err() {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/contact") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+                #[serde(default)]
+                petname: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::AddContact {
+                peer: r.peer,
+                petname: r.petname,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/contact/remove") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::RemoveContact {
+                peer: r.peer,
                 reply,
             })
             .await

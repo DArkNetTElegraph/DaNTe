@@ -507,6 +507,38 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 },
                 None => println!("usage: /verify <fingerprint> [off]"),
             },
+            "contacts" => {
+                let list = engine.contacts();
+                if list.is_empty() {
+                    println!("(no contacts)");
+                }
+                for (id, c) in list {
+                    let fp = IdentityId::from_bytes(id).to_base32();
+                    let v = if engine.is_verified(&id) { " ✓" } else { "" };
+                    if c.petname.is_empty() {
+                        println!("  {fp}{v}");
+                    } else {
+                        println!("  {} — {fp}{v}", c.petname);
+                    }
+                }
+            }
+            "contact" => match a {
+                Some(fp) => match parse_fingerprint(fp) {
+                    Ok(id) => {
+                        if matches!(b, Some(s) if s.eq_ignore_ascii_case("remove")) {
+                            engine.remove_contact(&id);
+                            println!("removed");
+                        } else {
+                            engine.add_contact(&id, b.unwrap_or(""), now_ms());
+                            println!("saved");
+                        }
+                    }
+                    Err(e) => println!("bad fingerprint: {e}"),
+                },
+                None => {
+                    println!("usage: /contact <fingerprint> [petname]   |   /contact <fp> remove")
+                }
+            },
             "server" => match a {
                 Some(name) => match engine.create_server(name, now_ms()).await {
                     Ok(root) => println!(

@@ -856,6 +856,62 @@ async fn inactivity_auto_kick() {
 }
 
 #[tokio::test]
+async fn contacts_persist_and_sort_by_petname() {
+    use dante_identity::keystore;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-contacts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("me.state");
+    let ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+
+    let carol = [3u8; 32];
+    let bob = [1u8; 32];
+    {
+        let mut e = Engine::connect(
+            keystore::open(&ks, b"pw").unwrap(),
+            &relay,
+            test_params(),
+            D,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap();
+        e.add_contact(&carol, "Carol", now);
+        e.add_contact(&bob, "  bob  ", now); // trimmed
+        e.add_contact(&bob, "Bobby", now); // rename, not a dup
+        assert!(e.is_contact(&bob));
+        assert_eq!(e.petname(&bob), Some("Bobby"));
+        assert_eq!(e.contacts().len(), 2);
+        e.persist().unwrap();
+    }
+
+    let mut e = Engine::connect(
+        keystore::open(&ks, b"pw").unwrap(),
+        &relay,
+        test_params(),
+        D,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    let list = e.contacts();
+    assert_eq!(
+        list.iter()
+            .map(|(_, c)| c.petname.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Bobby", "Carol"],
+        "restored and sorted by petname"
+    );
+    e.remove_contact(&bob);
+    assert!(!e.is_contact(&bob));
+    assert_eq!(e.petname(&carol), Some("Carol"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn engine_connects_past_a_dead_relay_in_the_list() {
     let now = now_ms();
     let live = spawn_relay().await;

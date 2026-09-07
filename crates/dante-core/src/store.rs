@@ -118,6 +118,8 @@ pub struct PersistedState {
     pub channel_reactions: Vec<([u8; 32], u64, String, [u8; 32])>,
     /// Safety-number-verified DM peers: `(peer IdentityId, pinned idk)`.
     pub verified_peers: Vec<([u8; 32], [u8; 32])>,
+    /// Saved contacts: `(peer IdentityId, petname, added_ms)`.
+    pub contacts: Vec<([u8; 32], String, u64)>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -289,6 +291,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for (id, idk) in &s.verified_peers {
         w.fixed(id).fixed(idk);
     }
+
+    w.u32(s.contacts.len() as u32);
+    for (id, petname, added_ms) in &s.contacts {
+        w.fixed(id).string(petname).u64(*added_ms);
+    }
     w.into_vec()
 }
 
@@ -456,6 +463,15 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut contacts = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        contacts.reserve(n);
+        for _ in 0..n {
+            contacts.push((r.fixed::<32>()?, r.string()?, r.u64()?));
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -471,6 +487,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         server_policies,
         channel_reactions,
         verified_peers,
+        contacts,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -535,6 +552,7 @@ mod tests {
                 ([7u8; 32], 12, "🔥".into(), [5u8; 32]),
             ],
             verified_peers: vec![([3u8; 32], [4u8; 32])],
+            contacts: vec![([5u8; 32], "alice".into(), 1_700_000_000_000)],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -553,6 +571,7 @@ mod tests {
         assert_eq!(back.server_join_pw, state.server_join_pw);
         assert_eq!(back.channel_reactions, state.channel_reactions);
         assert_eq!(back.verified_peers, state.verified_peers);
+        assert_eq!(back.contacts, state.contacts);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -581,6 +600,7 @@ mod tests {
             server_join_pw: vec![],
             channel_reactions: vec![],
             verified_peers: vec![],
+            contacts: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

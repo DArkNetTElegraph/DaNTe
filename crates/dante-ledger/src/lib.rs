@@ -1,15 +1,28 @@
-//! `dante-ledger` — the verifiable log ("ledger") for DaNTe.
+//! `dante-ledger` — the verifiable append-only log ("the ledger").
 //!
-//! Not a blockchain: no mining, no global consensus. A record is valid if its
-//! signature verifies; global integrity comes from an RFC 6962-style Merkle tree
-//! and consistency proofs between tree heads.
+//! Not a blockchain: no mining, no global consensus. A single record is valid
+//! if its signature verifies and it satisfies the acceptance rules
+//! ([`Ledger::append`], `docs/PROTOCOL.md` §2.1); global integrity comes from an
+//! RFC 6962 Merkle tree over the record encodings and from consistency proofs
+//! between tree heads.
 //!
-//! Scope:
-//! - Record acceptance rules (`../../docs/PROTOCOL.md` §2.1–2.2)
-//! - Append-only Merkle tree; inclusion + consistency proofs
-//! - Deterministic evaporation GC and tombstoning (§2.3)
-//! - Replication / split-view detection state machine (§2.4)
+//! - [`Ledger`] — record acceptance, identity/key-rotation chains, the server
+//!   directory index, Merkle [`Ledger::head`] / [`Ledger::inclusion_proof`] /
+//!   [`Ledger::consistency_proof`], and deterministic [`Ledger::evaporate`] GC.
+//! - [`RecordStore`] / [`MemoryStore`] — pluggable storage of accepted records.
+//! - [`server`] — `ServerRegister` / `ServerDelist` bodies (§2.2 kinds 4–5).
+//! - [`tombstone`] — the node-generated `Tombstone` body (§2.3).
 //!
-//! Storage-backend agnostic — the backend is injected by the caller.
+//! Replication (gossip of new records + range sync + tree-head comparison) is
+//! Phase 3.
 
-// Phase 2 begins implementation here.
+mod error;
+mod ledger;
+
+pub mod server;
+pub mod tombstone;
+
+pub use error::LedgerError;
+pub use ledger::{Ledger, LedgerParams, MemoryStore, RecordStore, IDENTITY_TTL_MS};
+pub use server::{ServerDelist, ServerId, ServerRegister};
+pub use tombstone::Tombstone;

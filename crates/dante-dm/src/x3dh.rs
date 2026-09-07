@@ -140,6 +140,19 @@ impl PreKeySecrets {
         self.otps.len()
     }
 
+    /// Top the one-time-prekey pool back up to `target` (capped at [`MAX_OTPS`]).
+    /// Returns the number minted. Call before re-publishing so the relay, which
+    /// hands out one OTP per fetch, keeps a fresh supply.
+    pub fn replenish(&mut self, target: usize) -> usize {
+        let want = target.min(MAX_OTPS);
+        let mut minted = 0;
+        while self.otps.len() < want {
+            self.otps.push(AgreeSecret::generate());
+            minted += 1;
+        }
+        minted
+    }
+
     /// Snapshot the secret halves for the encrypted local store. **Secret.**
     pub fn export(&self) -> PreKeySecretsState {
         PreKeySecretsState {
@@ -316,6 +329,16 @@ pub fn responder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replenish_tops_up_and_respects_the_cap() {
+        let mut pks = PreKeySecrets::generate(3);
+        assert_eq!(pks.replenish(10), 7);
+        assert_eq!(pks.otps_remaining(), 10);
+        assert_eq!(pks.replenish(10), 0, "already at target");
+        assert_eq!(pks.replenish(MAX_OTPS + 50), MAX_OTPS - 10);
+        assert_eq!(pks.otps_remaining(), MAX_OTPS);
+    }
 
     #[test]
     fn bundle_roundtrip_and_signature() {

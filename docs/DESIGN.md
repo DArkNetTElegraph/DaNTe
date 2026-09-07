@@ -73,11 +73,14 @@ achievable with no project-run infrastructure.
 links, member removal in the client, private-channel access control beyond the
 secret `channel_id`. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
 voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
-soundboards, bots, discovery UI, embeds (Phase 8); one-time-prekey
-replenishment (the relay hands out one OTP per fetch and clients re-publish
-their remaining set, but nothing mints fresh OTPs once a client's pool drains
-— first contact then falls back to OTP-less X3DH); the Tauri desktop client;
+soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client;
 MLS migration for channels.
+
+One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
+stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
+each publish and `receive_all` re-publishes after accepting a first-contact,
+so the relay stays stocked. If a client is offline while its published pool
+drains, first contact falls back to OTP-less X3DH until it next publishes.
 
 **`dante serve` is a throwaway.** It is a hand-rolled HTTP server + a
 single-file vanilla-JS page, built only so the engine has a clickable client

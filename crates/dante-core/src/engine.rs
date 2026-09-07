@@ -36,6 +36,9 @@ const SEEN_CAP: usize = 5000;
 /// Cap on persisted channel-history lines (oldest dropped first).
 const CHANNEL_HISTORY_CAP: usize = 2000;
 
+/// One-time-prekey pool is refilled to this before each publish.
+const PREKEY_POOL_TARGET: usize = 50;
+
 /// TTL on a typing signal's carrier envelope. Deliberately short: a stale
 /// "is typing" is worse than a missing one.
 const TYPING_TTL_MS: u32 = 10_000;
@@ -327,6 +330,12 @@ impl Engine {
 
     /// Publish this identity's prekey bundle to the relay.
     pub async fn publish_prekeys(&mut self) -> Result<(), CoreError> {
+        // Refill the one-time-prekey pool before every publish. The relay hands
+        // out one OTP per fetch, so without this a client that accepted a few
+        // first-contacts would eventually publish an OTP-less bundle.
+        if self.prekeys.replenish(PREKEY_POOL_TARGET) > 0 {
+            self.dirty = true;
+        }
         let bundle = self.prekeys.bundle(&self.identity).encode();
         sync::publish_prekeys(&mut self.client, &bundle).await?;
         Ok(())

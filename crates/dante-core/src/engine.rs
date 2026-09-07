@@ -1071,6 +1071,53 @@ impl Engine {
         Ok(())
     }
 
+    /// Leave a channel this client joined. Notifies every other member with a
+    /// [`ChannelControl::Leave`] (the host turns it into a rekey so post-leave
+    /// messages stay private) and drops all local state for the channel. The
+    /// host cannot "leave" its own server this way.
+    pub async fn leave_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (server_root, others) = {
+            let ch = self
+                .channels
+                .get(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            let me = self.my_member_id();
+            let others: Vec<[u8; 32]> = ch.roster.iter().copied().filter(|m| *m != me).collect();
+            (ch.info.server_root, others)
+        };
+        if self.hosted.contains_key(&server_root) {
+            return Err(CoreError::Channel(
+                "you host this server — delete the channel instead",
+            ));
+        }
+
+        let msg = Content::Channel(
+            ChannelControl::Leave {
+                channel_id: *channel_id,
+            }
+            .encode(),
+        );
+        for other in others {
+            let _ = self.send_content(&other, msg.clone(), now_ms).await;
+        }
+
+        self.channels.remove(channel_id);
+        // Drop the server's policy if we no longer share any of its channels.
+        let still_in = self
+            .channels
+            .values()
+            .any(|c| c.info.server_root == server_root);
+        if !still_in {
+            self.server_policies.remove(&server_root);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Set (or clear, with `None`) the inactivity auto-kick window for a server
     /// this client hosts. When set, [`Engine::sweep_inactive_members`] removes
     /// channel members whose identity has had no ledger activity for `window_ms`.
@@ -1890,6 +1937,28 @@ impl Engine {
                     self.remove_from_channel(&channel_id, &member, now_ms)
                         .await?;
                 }
+            }
+            ChannelControl::Leave { channel_id } => {
+                let Some(server_root) = self.channels.get(&channel_id).map(|c| c.info.server_root)
+                else {
+                    return Ok(());
+                };
+                let Ok(pk) = SignPublic::from_bytes(from) else {
+                    return Ok(());
+                };
+                let leaver = *IdentityId::of(&pk).as_bytes();
+                if self.hosted.contains_key(&server_root)
+                    && leaver != self.my_member_id()
+                    && self
+                        .channels
+                        .get(&channel_id)
+                        .is_some_and(|c| c.roster.contains(&leaver))
+                {
+                    // Anyone may remove themselves — no permission check.
+                    self.remove_from_channel(&channel_id, &leaver, now_ms)
+                        .await?;
+                }
+                // Non-hosts ignore it; the host's `Remove` broadcast follows.
             }
         }
         Ok(())

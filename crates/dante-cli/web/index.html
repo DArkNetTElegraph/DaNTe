@@ -341,6 +341,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
       <button class="icon-btn" id="btn-contact" title="Save as contact" hidden>☆</button>
+      <button class="icon-btn" id="btn-leave" title="Leave channel" hidden>🚪</button>
       <button class="icon-btn" id="btn-block" title="Block" hidden>🚫</button>
       <button class="icon-btn" id="btn-verify" title="Safety number" hidden>🛡️</button>
       <button class="icon-btn" id="btn-emoji" title="Custom emoji" hidden>😀</button>
@@ -639,6 +640,8 @@ function renderChat() {
   contactBtn.hidden = true;
   const blockBtn = $("#btn-block");
   blockBtn.hidden = true;
+  const leaveBtn = $("#btn-leave");
+  leaveBtn.hidden = true;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
@@ -657,6 +660,16 @@ function renderChat() {
     linkBtn.onclick = () => inviteLinkFlow(target);
     emojiBtn.hidden = false;
     emojiBtn.onclick = () => emojiFlow(store.rootOf(store.view.server));
+    const root = store.rootOf(store.view.server);
+    const iOwn = root && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
+    if (!iOwn) {
+      leaveBtn.hidden = false;
+      leaveBtn.onclick = async () => {
+        if (!ui.confirm("Leave " + store.channelName(target.slice(1)) + "? You'll need a new invite to rejoin.")) return;
+        try { await api.post("/api/leave", { channel: target }); await refreshChannels(); selectTarget("@dm", null); }
+        catch (e) { ui.sys("leave failed: " + e.message); }
+      };
+    }
   } else if (isSelf(target)) {
     titleEl.innerHTML = '<span class="hash">📝</span> Private Note';
     $("#chat-topic").textContent = "only you can see this";

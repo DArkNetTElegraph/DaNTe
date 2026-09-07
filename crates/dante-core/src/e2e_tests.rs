@@ -856,6 +856,65 @@ async fn inactivity_auto_kick() {
 }
 
 #[tokio::test]
+async fn blocking_hides_dms_and_channel_messages() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let host_id = *host.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    // A shared channel.
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &bob_id, now).await.unwrap();
+    for _ in 0..6 {
+        host.receive_all(now).await.unwrap();
+        bob.receive_all(now).await.unwrap();
+    }
+
+    // Baseline: messages get through both ways.
+    bob.send_dm(&host_id, "hi", now).await.unwrap();
+    assert_eq!(host.receive(now).await.unwrap().len(), 1);
+    bob.send_channel(&chan, "in channel", now).await.unwrap();
+    assert_eq!(host.poll_channels(now).await.unwrap().len(), 1);
+
+    // Host blocks Bob.
+    assert!(!host.is_blocked(&bob_id));
+    host.block(&bob_id);
+    assert!(host.is_blocked(&bob_id));
+
+    bob.send_dm(&host_id, "still there?", now).await.unwrap();
+    bob.send_channel(&chan, "hello?", now).await.unwrap();
+    assert!(
+        host.receive_all(now).await.unwrap().is_empty(),
+        "blocked DM dropped"
+    );
+    assert!(
+        host.poll_channels(now).await.unwrap().is_empty(),
+        "blocked member's channel message dropped"
+    );
+    // Host cannot DM a blocked peer.
+    assert!(matches!(
+        host.send_dm(&bob_id, "x", now).await,
+        Err(crate::CoreError::Blocked)
+    ));
+
+    // Unblock restores delivery of *future* messages.
+    host.unblock(&bob_id);
+    bob.send_dm(&host_id, "back", now).await.unwrap();
+    assert_eq!(host.receive(now).await.unwrap()[0].text, "back");
+}
+
+#[tokio::test]
 async fn contacts_persist_and_sort_by_petname() {
     use dante_identity::keystore;
 

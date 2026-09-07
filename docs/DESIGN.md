@@ -202,6 +202,15 @@ DaNTe/
   `dante chat`: `/safety <fp>`, `/verify <fp> [off]`. `dante serve`:
   `GET /api/safety?peer=` / `POST /api/verify`, with a per-DM shield (🛡️/⚠️)
   and a compare dialog in the SPA.
+- **Block list** *(done)*: `Engine.blocked` (set of `IdentityId` bytes,
+  persisted, local-only). `block` / `unblock` / `is_blocked` / `blocked`.
+  Receive-side enforcement: `receive_all` drops the whole envelope from a
+  blocked sender, `poll_channels` drops a blocked member's messages,
+  `poll_typing` drops their DM + channel typing, and `send_dm` to a blocked
+  peer returns `CoreError::Blocked`. `dante chat`: `/block` / `/unblock` /
+  `/blocked`. `dante serve`: `GET /api/blocked`, `POST /api/block|unblock`;
+  the SPA has a 🚫 header toggle, strikes through blocked DM rows, and hides
+  the conversation while blocked.
 - **Contacts / petnames** *(done)*: `Engine` keeps a private
   `contacts: {IdentityId -> {petname, added_ms}}` map (persisted, never leaves
   the device). `add_contact` / `remove_contact` / `contacts` (sorted by

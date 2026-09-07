@@ -19,7 +19,8 @@
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
 //! `POST /api/emoji/remove {server,name}`,
 //! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
-//! `POST /api/contact/remove {peer}`.
+//! `POST /api/contact/remove {peer}`, `GET /api/blocked`,
+//! `POST /api/block {peer}`, `POST /api/unblock {peer}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -179,6 +180,14 @@ enum Cmd {
     /// Forget a contact.
     RemoveContact {
         peer: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The blocked identities as a ready JSON array of fingerprints.
+    Blocked { reply: oneshot::Sender<String> },
+    /// Block (`on = true`) or unblock a peer.
+    Block {
+        peer: String,
+        on: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
 }
@@ -1009,6 +1018,24 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::Blocked { reply } => {
+            let rows: Vec<_> = engine.blocked().into_iter().map(|id| id_b32(&id)).collect();
+            let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
+        }
+        Cmd::Block { peer, on, reply } => {
+            let r = match parse_fingerprint(&peer) {
+                Ok(id) => {
+                    if on {
+                        engine.block(&id);
+                    } else {
+                        engine.unblock(&id);
+                    }
+                    Ok("ok".into())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::AutoKick {
             server,
             days,
@@ -1572,6 +1599,32 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             };
             dispatch(&mut stream, &shared, |reply| Cmd::RemoveContact {
                 peer: r.peer,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/blocked") => {
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::Blocked { reply: tx }).await.is_err() {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/block") | ("POST", "/api/unblock") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let on = path == "/api/block";
+            dispatch(&mut stream, &shared, |reply| Cmd::Block {
+                peer: r.peer,
+                on,
                 reply,
             })
             .await

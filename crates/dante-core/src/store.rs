@@ -120,6 +120,8 @@ pub struct PersistedState {
     pub verified_peers: Vec<([u8; 32], [u8; 32])>,
     /// Saved contacts: `(peer IdentityId, petname, added_ms)`.
     pub contacts: Vec<([u8; 32], String, u64)>,
+    /// Blocked identities (by `IdentityId` bytes).
+    pub blocked: Vec<[u8; 32]>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -295,6 +297,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     w.u32(s.contacts.len() as u32);
     for (id, petname, added_ms) in &s.contacts {
         w.fixed(id).string(petname).u64(*added_ms);
+    }
+
+    w.u32(s.blocked.len() as u32);
+    for id in &s.blocked {
+        w.fixed(id);
     }
     w.into_vec()
 }
@@ -472,6 +479,15 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut blocked = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        blocked.reserve(n);
+        for _ in 0..n {
+            blocked.push(r.fixed::<32>()?);
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -488,6 +504,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         channel_reactions,
         verified_peers,
         contacts,
+        blocked,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -553,6 +570,7 @@ mod tests {
             ],
             verified_peers: vec![([3u8; 32], [4u8; 32])],
             contacts: vec![([5u8; 32], "alice".into(), 1_700_000_000_000)],
+            blocked: vec![[2u8; 32], [9u8; 32]],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -572,6 +590,7 @@ mod tests {
         assert_eq!(back.channel_reactions, state.channel_reactions);
         assert_eq!(back.verified_peers, state.verified_peers);
         assert_eq!(back.contacts, state.contacts);
+        assert_eq!(back.blocked, state.blocked);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -601,6 +620,7 @@ mod tests {
             channel_reactions: vec![],
             verified_peers: vec![],
             contacts: vec![],
+            blocked: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

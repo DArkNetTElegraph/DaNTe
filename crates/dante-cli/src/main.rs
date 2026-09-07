@@ -539,6 +539,30 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     println!("usage: /contact <fingerprint> [petname]   |   /contact <fp> remove")
                 }
             },
+            "blocked" => {
+                let list = engine.blocked();
+                if list.is_empty() {
+                    println!("(nobody blocked)");
+                }
+                for id in list {
+                    println!("  {}", IdentityId::from_bytes(id).to_base32());
+                }
+            }
+            "block" | "unblock" => match a {
+                Some(fp) => match parse_fingerprint(fp) {
+                    Ok(id) => {
+                        if cmd == "block" {
+                            engine.block(&id);
+                            println!("blocked");
+                        } else {
+                            engine.unblock(&id);
+                            println!("unblocked");
+                        }
+                    }
+                    Err(e) => println!("bad fingerprint: {e}"),
+                },
+                None => println!("usage: /{cmd} <fingerprint>"),
+            },
             "server" => match a {
                 Some(name) => match engine.create_server(name, now_ms()).await {
                     Ok(root) => println!(

@@ -257,6 +257,80 @@ async fn host_and_member_exchange_channel_messages() {
 }
 
 #[tokio::test]
+async fn channel_history_survives_a_restart() {
+    use dante_identity::keystore;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-chan-persist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("alice.state");
+
+    let mut host = engine(&relay).await;
+    let host_id = *host.identity().id().as_bytes();
+
+    let alice_ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+    let alice_id = *keystore::open(&alice_ks, b"pw").unwrap().id().as_bytes();
+
+    let chan;
+    {
+        let alice_identity = keystore::open(&alice_ks, b"pw").unwrap();
+        let mut alice = Engine::connect(
+            alice_identity,
+            &relay,
+            test_params(),
+            D,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap();
+        for e in [&mut host, &mut alice] {
+            e.announce("", now).await.unwrap();
+            e.publish_prekeys().await.unwrap();
+        }
+        host.sync(now).await.unwrap();
+        alice.sync(now).await.unwrap();
+
+        let server = host.create_server("the lodge", now).await.unwrap();
+        chan = host.create_channel(&server, "general", true).unwrap();
+        host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+        alice.receive_all(now).await.unwrap();
+        host.receive_all(now).await.unwrap();
+
+        host.send_channel(&chan, "welcome", now).await.unwrap();
+        assert_eq!(alice.poll_channels(now).await.unwrap().len(), 1);
+        alice
+            .send_channel(&chan, "hi from alice", now)
+            .await
+            .unwrap();
+
+        assert_eq!(alice.channel_history().len(), 2);
+        alice.persist().unwrap();
+    } // alice's process exits
+
+    let alice_identity = keystore::open(&alice_ks, b"pw").unwrap();
+    let alice = Engine::connect(
+        alice_identity,
+        &relay,
+        test_params(),
+        D,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    let hist = alice.channel_history();
+    assert_eq!(hist.len(), 2, "channel history restored");
+    assert_eq!(hist[0].channel_id, chan);
+    assert!(!hist[0].outgoing);
+    assert_eq!(hist[0].sender, host_id);
+    assert_eq!(hist[0].text, "welcome");
+    assert!(hist[1].outgoing);
+    assert_eq!(hist[1].text, "hi from alice");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn send_dm_to_unknown_peer_fails_until_synced() {
     let now = now_ms();
     let relay = spawn_relay().await;

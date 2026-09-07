@@ -224,6 +224,34 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
             );
         }
     }
+    if !engine.channel_history().is_empty() {
+        println!(
+            "-- {} earlier channel message(s) in this store --",
+            engine.channel_history().len()
+        );
+        for e in engine.channel_history() {
+            let who = if e.outgoing {
+                "you".to_string()
+            } else {
+                IdentityId::from_bytes(e.sender)
+                    .to_base32()
+                    .split('-')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            };
+            println!(
+                "[#{}] <{}> {}",
+                IdentityId::from_bytes(e.channel_id)
+                    .to_base32()
+                    .split('-')
+                    .next()
+                    .unwrap_or(""),
+                who,
+                e.text
+            );
+        }
+    }
     println!(
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"

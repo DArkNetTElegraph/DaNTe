@@ -381,9 +381,17 @@ mod tests {
         let proof = LivenessProof::build(&id, t, TEST_POW);
         proof.verify(&id.sign_public(), t, 8).unwrap();
         proof.verify(&id.sign_public(), t + 1000, 8).unwrap(); // same 7-day bucket
-        assert!(proof
-            .verify(&id.sign_public(), t + LIVENESS_BUCKET_MS, 8)
-            .is_err());
+
+        // The proof is bound to its 7-day bucket and must not verify in a later
+        // one. A random PoW solution clears the 8-bit target for an unrelated
+        // challenge with probability 1/256, so probe several future buckets:
+        // binding is broken only if *none* of them reject.
+        assert!(
+            (1..=8u64).any(|k| proof
+                .verify(&id.sign_public(), t + k * LIVENESS_BUCKET_MS, 8)
+                .is_err()),
+            "liveness proof verified in every probed future bucket"
+        );
 
         let back = LivenessProof::decode(&proof.encode()).unwrap();
         assert_eq!(proof, back);

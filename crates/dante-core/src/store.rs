@@ -50,6 +50,21 @@ pub struct HistoryEntry {
     pub kind: HistoryKind,
 }
 
+/// One line of channel history, oldest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelHistoryEntry {
+    /// Which channel it belongs to.
+    pub channel_id: [u8; 32],
+    /// The sender's group member id (`my_member_id` for our own messages).
+    pub sender: [u8; 32],
+    /// True if we sent it.
+    pub outgoing: bool,
+    /// Wall-clock time (Unix ms).
+    pub ts_ms: u64,
+    /// The message text.
+    pub text: String,
+}
+
 /// A persisted channel membership.
 pub struct StoredChannel {
     /// Channel description.
@@ -86,6 +101,8 @@ pub struct PersistedState {
     pub hosted: Vec<StoredHostedServer>,
     /// Conversation history, oldest first.
     pub history: Vec<HistoryEntry>,
+    /// Channel history, oldest first.
+    pub channel_history: Vec<ChannelHistoryEntry>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -211,6 +228,17 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for tag in &s.seen_envelopes {
         w.fixed(tag);
     }
+
+    // Trailing optional section: absent in stores written before channel
+    // history existed, so `decode_state` only reads it when bytes remain.
+    w.u32(s.channel_history.len() as u32);
+    for e in &s.channel_history {
+        w.fixed(&e.channel_id)
+            .fixed(&e.sender)
+            .bool(e.outgoing)
+            .u64(e.ts_ms)
+            .string(&e.text);
+    }
     w.into_vec()
 }
 
@@ -299,6 +327,22 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
     for _ in 0..n {
         seen_envelopes.push(r.fixed::<32>()?);
     }
+
+    let mut channel_history = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        channel_history.reserve(n);
+        for _ in 0..n {
+            channel_history.push(ChannelHistoryEntry {
+                channel_id: r.fixed::<32>()?,
+                sender: r.fixed::<32>()?,
+                outgoing: r.bool()?,
+                ts_ms: r.u64()?,
+                text: r.string()?,
+            });
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -306,6 +350,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         channels,
         hosted,
         history,
+        channel_history,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -353,6 +398,13 @@ mod tests {
                 ts_ms: 42,
                 kind: HistoryKind::Text("hello".into()),
             }],
+            channel_history: vec![ChannelHistoryEntry {
+                channel_id: [7u8; 32],
+                sender: [6u8; 32],
+                outgoing: false,
+                ts_ms: 77,
+                text: "channel hello".into(),
+            }],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -363,6 +415,7 @@ mod tests {
         assert_eq!(back.sessions.len(), 1);
         assert_eq!(back.sessions[0].0, peer);
         assert_eq!(back.history, state.history);
+        assert_eq!(back.channel_history, state.channel_history);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -383,6 +436,7 @@ mod tests {
             channels: vec![],
             hosted: vec![],
             history: vec![],
+            channel_history: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

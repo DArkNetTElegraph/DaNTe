@@ -36,8 +36,10 @@ achievable with no project-run infrastructure.
   `serve`). `dante serve` is a localhost browser UI.
 
 - **Persistence** (`dante-core`): encrypted local store — sessions, prekey
-  secrets, channel groups, hosted-server root keys, message history, cursors
-  survive a restart; `chat` / `serve` skip the announce PoW when recently done.
+  secrets, channel groups, hosted-server root keys, DM history, channel history
+  (last 2000 lines), cursors survive a restart; `chat` / `serve` skip the
+  announce PoW when recently done. The channel-history section is appended at
+  the tail of the store so stores written before it existed still load.
 - **Channels** wired end-to-end: `Engine::create_server` / `create_channel` /
   `invite_to_channel` / `send_channel` / `poll_channels`. Invites + sender-key
   exchange ride authenticated DMs (`Content::Channel`); channel messages go to a
@@ -47,11 +49,12 @@ achievable with no project-run infrastructure.
   create-server / create-channel / invite controls, and routes the composer to
   a channel or a DM peer (`GET /api/channels`, `POST /api/server` / `/channel` /
   `/invite`, `POST /api/send {to:"#<id>"|fingerprint}`). Verified across a relay
-  + host + member, both `chat` and `serve`.
+  + host + member, both `chat` and `serve`. Both clients replay stored channel
+  history on start.
 
 **Not built yet:** roles/permissions, per-server passwords (MLS PSK), invite
 links, member removal in the client, private-channel access control beyond the
-secret `channel_id`; channel message history persistence. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
+secret `channel_id`. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
 voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
 soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client;
 MLS migration for channels.

@@ -260,9 +260,9 @@ button, input, textarea { font: inherit; color: inherit; }
   color: var(--text-muted); font-size: 14px;
 }
 .member-row .avatar { width: 26px; height: 26px; font-size: 10px; }
-.member-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .member-row.you .name { color: var(--accent-warm); }
-.member-row .kick { margin-left: auto; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; font-size: 16px; line-height: 1; visibility: hidden; }
+.member-row .kick { margin-left: 2px; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; font-size: 14px; line-height: 1; visibility: hidden; }
 .member-row:hover .kick { visibility: visible; }
 .member-row .kick:hover { color: var(--accent); }
 
@@ -328,6 +328,9 @@ button, input, textarea { font: inherit; color: inherit; }
    No framework, no build step (served via include_str! by `dante serve`).
    ========================================================================== */
 
+/* ---------- constants -------------------------------------------------- */
+const PERM_SEND = 1, PERM_KICK = 2, PERM_MANAGE_CHANNELS = 4, PERM_MANAGE_ROLES = 8;
+
 /* ---------- dom helpers -------------------------------------------------- */
 const $  = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
@@ -355,6 +358,18 @@ const store = {
   unread: new Set(),                  // targets with unseen messages
   view: LS.get("view", { server: "@dm", target: null }),
   typingText: "",
+  policies: {},                       // server root -> policy JSON
+
+  roleName(root, memberFp) {
+    const p = this.policies[root];
+    if (!p) return null;
+    if (memberFp === p.owner) return "Owner";
+    const a = (p.assignments || []).find(x => x.member === memberFp);
+    if (!a) return null;
+    const rs = p.roles.filter(r => a.roles.includes(r.id)).sort((x, y) => y.rank - x.rank);
+    return rs[0] ? rs[0].name : null;
+  },
+  myPerms(root) { return (this.policies[root] || {}).me_perms || PERM_SEND; },
 
   servers() {
     const names = [];
@@ -389,6 +404,7 @@ const api = {
   createServer(name)      { return this.post("/api/server", { name }); },
   createChannel(server, name) { return this.post("/api/channel", { server, name }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
+  policy(root)            { return this.get("/api/policy?server=" + encodeURIComponent(root)); },
   sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
 };
 
@@ -486,6 +502,7 @@ function renderPane() {
 
   const mk = (glyph, title, fn) => { const b = el("button", "icon-btn", glyph); b.title = title; b.onclick = fn; return b; };
   actions.appendChild(mk("#＋", "Create channel", () => createChannelFlow(server)));
+  actions.appendChild(mk("🛡", "Roles", () => rolesFlow(server)));
   const akDays = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
   actions.appendChild(mk("⏲", akDays ? `Auto-kick after ${akDays}d — click to change` : "Auto-kick inactive members", () => autoKickFlow(server)));
 
@@ -582,23 +599,86 @@ function renderMembers() {
   const wrap = $("#members-list");
   wrap.innerHTML = "";
   const names = target ? store.membersFor(target) : [];
-  const all = ["you", ...names];
+  const all = [store.me.fingerprint, ...names];
   $("#members-count").textContent = `Members — ${all.length}`;
 
-  wrap.appendChild(el("div", "role-label", "Members"));   // roles: TODO
   const inChannel = target && target.startsWith("#");
-  for (const n of all) {
-    const row = el("div", "member-row" + (n === "you" ? " you" : ""));
-    row.appendChild(el("div", "avatar", initials(n === "you" ? store.me.fingerprint : n)));
-    row.appendChild(el("span", "name", n === "you" ? "you" : short(n)));
-    if (inChannel && n !== "you") {
-      const kick = el("button", "kick", "×");
-      kick.title = "Remove from channel (host only)";
-      kick.onclick = () => removeMemberFlow(target, n);
-      row.appendChild(kick);
-    }
-    wrap.appendChild(row);
+  const root = inChannel ? store.rootOf(store.view.server) : null;
+  const canKick = root && (store.myPerms(root) & PERM_KICK) !== 0;
+  const canRoles = root && (store.myPerms(root) & (PERM_MANAGE_ROLES | PERM_KICK)) !== 0
+    && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
+
+  // group by role
+  const groups = new Map();
+  for (const fp of all) {
+    const rn = (root && store.roleName(root, fp)) || "Members";
+    if (!groups.has(rn)) groups.set(rn, []);
+    groups.get(rn).push(fp);
   }
+  const order = ["Owner", ...[...groups.keys()].filter(k => k !== "Owner" && k !== "Members").sort(), "Members"];
+  for (const g of order) {
+    const members = groups.get(g);
+    if (!members) continue;
+    wrap.appendChild(el("div", "role-label", g + " — " + members.length));
+    for (const fp of members) {
+      const isMe = fp === store.me.fingerprint;
+      const row = el("div", "member-row" + (isMe ? " you" : ""));
+      row.appendChild(el("div", "avatar", initials(fp)));
+      row.appendChild(el("span", "name", isMe ? "you" : short(fp)));
+      if (inChannel && !isMe && canRoles) {
+        const rb = el("button", "kick", "🛡");
+        rb.title = "Assign / remove a role";
+        rb.onclick = () => assignRoleFlow(store.view.server, fp);
+        row.appendChild(rb);
+      }
+      if (inChannel && !isMe && canKick) {
+        const kick = el("button", "kick", "×");
+        kick.title = "Remove from channel";
+        kick.onclick = () => removeMemberFlow(target, fp);
+        row.appendChild(kick);
+      }
+      wrap.appendChild(row);
+    }
+  }
+}
+
+async function rolesFlow(server) {
+  const root = store.rootOf(server);
+  if (!root) return ui.say("Unknown server root.");
+  const p = store.policies[root];
+  const list = p && p.roles.length
+    ? p.roles.map(r => `  [${r.id}] ${r.name}` +
+        (r.deny & PERM_SEND ? "  (muted)" : "") +
+        (r.allow & PERM_KICK ? "  (can kick)" : "") +
+        (r.allow & PERM_MANAGE_ROLES ? "  (manage)" : "")).join("\n")
+    : "  (none yet)";
+  const name = ui.ask("Server roles:\n" + list + "\n\nNew role name? (blank to cancel)");
+  if (!name) return;
+  let allow = 0, deny = 0;
+  if (confirm("Give this role the KICK permission?")) allow |= PERM_KICK;
+  if (confirm("Give this role the MANAGE-ROLES permission?")) allow |= PERM_MANAGE_ROLES;
+  if (confirm("Is this a MUTE role (cannot send messages)?")) deny |= PERM_SEND;
+  try {
+    const r = await api.post("/api/role", { server: root, name, allow, deny, rank: 10 });
+    ui.sys(`Role "${name}" created (id ${r.ok}).`);
+    refreshPolicies();
+  } catch (e) { ui.say("Could not create role (host only): " + e.message); }
+}
+
+async function assignRoleFlow(server, memberFp) {
+  const root = store.rootOf(server);
+  const p = store.policies[root];
+  if (!p || !p.roles.length) return ui.say("No roles defined yet — use the 🛡 in the server header.");
+  const idStr = ui.ask("Toggle which role id on " + short(memberFp) + "?\n" +
+    p.roles.map(r => `  [${r.id}] ${r.name}`).join("\n"));
+  const role_id = parseInt(idStr, 10);
+  if (!Number.isFinite(role_id)) return;
+  const has = (p.assignments.find(a => a.member === memberFp) || { roles: [] }).roles.includes(role_id);
+  try {
+    await api.post("/api/roleassign", { server: root, member: memberFp, role_id, add: !has });
+    ui.sys((has ? "Removed" : "Assigned") + " role " + role_id + " " + (has ? "from " : "to ") + short(memberFp));
+    refreshPolicies();
+  } catch (e) { ui.say("Failed: " + e.message); }
 }
 
 async function autoKickFlow(server) {
@@ -729,6 +809,19 @@ async function refreshChannels() {
     if (changed) render();
   } catch (_) {}
 }
+async function refreshPolicies() {
+  const roots = [...new Set(store.channels.map(c => c.root))];
+  for (const root of roots) {
+    try {
+      const p = await api.policy(root);
+      if (p && p.version != null) {
+        const changed = JSON.stringify(p) !== JSON.stringify(store.policies[root]);
+        store.policies[root] = p;
+        if (changed) render();
+      }
+    } catch (_) {}
+  }
+}
 
 /* ---------- wiring ----------------------------------------------- */
 let lastTyping = 0;
@@ -800,9 +893,11 @@ async function init() {
   selectTarget(store.view.server, store.view.target);
 
   poll();
+  refreshPolicies();
   setInterval(poll, 700);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
+  setInterval(refreshPolicies, 6000);
 }
 init();
 </script>

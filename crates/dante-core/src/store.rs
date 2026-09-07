@@ -109,6 +109,8 @@ pub struct PersistedState {
     pub channel_removed: Vec<([u8; 32], [u8; 32], u64)>,
     /// Per-hosted-server auto-kick window: `(server_root, window_ms)`.
     pub server_autokick: Vec<([u8; 32], u64)>,
+    /// Encoded `roles::ServerPolicy` for each known server (hosted or joined).
+    pub server_policies: Vec<Vec<u8>>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -260,6 +262,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for (root, ms) in &s.server_autokick {
         w.fixed(root).u64(*ms);
     }
+
+    w.u32(s.server_policies.len() as u32);
+    for p in &s.server_policies {
+        w.bytes(p);
+    }
     w.into_vec()
 }
 
@@ -391,6 +398,15 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut server_policies = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        server_policies.reserve(n);
+        for _ in 0..n {
+            server_policies.push(r.bytes()?.to_vec());
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -402,6 +418,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         invite_uses,
         channel_removed,
         server_autokick,
+        server_policies,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -459,6 +476,7 @@ mod tests {
             invite_uses: vec![([1u8; 8], 3), ([2u8; 8], 0)],
             channel_removed: vec![([7u8; 32], [6u8; 32], 55)],
             server_autokick: vec![([4u8; 32], 86_400_000)],
+            server_policies: vec![vec![1, 2, 3], vec![]],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -473,6 +491,7 @@ mod tests {
         assert_eq!(back.invite_uses, state.invite_uses);
         assert_eq!(back.channel_removed, state.channel_removed);
         assert_eq!(back.server_autokick, state.server_autokick);
+        assert_eq!(back.server_policies, state.server_policies);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -497,6 +516,7 @@ mod tests {
             invite_uses: vec![],
             channel_removed: vec![],
             server_autokick: vec![],
+            server_policies: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

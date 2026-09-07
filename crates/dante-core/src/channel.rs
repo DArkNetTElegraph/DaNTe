@@ -169,6 +169,18 @@ pub enum ChannelControl {
         /// Encoded [`RemoveOrder`].
         order: Vec<u8>,
     },
+    /// The host broadcasts the current server role configuration.
+    Policy {
+        /// Encoded [`crate::roles::ServerPolicy`].
+        policy: Vec<u8>,
+    },
+    /// A member with `PERM_KICK` asks the host to remove someone.
+    KickRequest {
+        /// The channel.
+        channel_id: [u8; 32],
+        /// The member to remove.
+        member: [u8; 32],
+    },
 }
 
 impl ChannelControl {
@@ -201,6 +213,12 @@ impl ChannelControl {
             ChannelControl::Remove { order } => {
                 w.u8(4).bytes(order);
             }
+            ChannelControl::Policy { policy } => {
+                w.u8(5).bytes(policy);
+            }
+            ChannelControl::KickRequest { channel_id, member } => {
+                w.u8(6).fixed(channel_id).fixed(member);
+            }
         }
         w.into_vec()
     }
@@ -228,6 +246,13 @@ impl ChannelControl {
             },
             4 => ChannelControl::Remove {
                 order: r.bytes()?.to_vec(),
+            },
+            5 => ChannelControl::Policy {
+                policy: r.bytes()?.to_vec(),
+            },
+            6 => ChannelControl::KickRequest {
+                channel_id: r.fixed::<32>()?,
+                member: r.fixed::<32>()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {

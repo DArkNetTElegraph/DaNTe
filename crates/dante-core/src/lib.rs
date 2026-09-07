@@ -12,12 +12,14 @@ pub mod channel;
 pub mod engine;
 pub mod error;
 pub mod invite;
+pub mod roles;
 pub mod store;
 
 pub use channel::{ChannelInfo, ChannelMessage, RemoveOrder};
 pub use engine::{Engine, Inbound, ReceivedDm, TypingEvent, TypingScope, DM_TTL_MS};
 pub use error::CoreError;
 pub use invite::InviteToken;
+pub use roles::{Role, ServerPolicy};
 pub use store::{ChannelHistoryEntry, HistoryEntry, HistoryKind};
 
 #[cfg(test)]

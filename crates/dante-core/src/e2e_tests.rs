@@ -750,3 +750,99 @@ async fn inactivity_auto_kick() {
     host.set_auto_kick(&server, None).unwrap();
     assert_eq!(host.auto_kick_window(&server), None);
 }
+
+#[tokio::test]
+async fn roles_muting_and_delegated_kick() {
+    use crate::roles::PERM_KICK;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    host.invite_to_channel(&chan, &bob_id, now).await.unwrap();
+    macro_rules! settle {
+        () => {
+            for _ in 0..6 {
+                for e in [&mut host, &mut alice, &mut bob] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+
+    // Mute Bob (a role with no permissions).
+    let muted = host
+        .set_role(&server, None, "Muted", 0, crate::roles::PERM_ALL, 1, now)
+        .await
+        .unwrap();
+    host.assign_role(&server, &bob_id, muted, true, now)
+        .await
+        .unwrap();
+    settle!();
+
+    bob.send_channel(&chan, "can anyone hear me", now)
+        .await
+        .unwrap();
+    assert!(
+        alice.poll_channels(now).await.unwrap().is_empty(),
+        "muted member is dropped"
+    );
+    assert!(host.poll_channels(now).await.unwrap().is_empty());
+
+    // Alice without a mod role cannot kick.
+    assert!(matches!(
+        alice.request_kick(&chan, &bob_id, now).await,
+        Err(crate::CoreError::Channel(_))
+    ));
+
+    // Give Alice a Mod role; now her kick request is honoured by the host.
+    let mods = host
+        .set_role(&server, None, "Mod", PERM_KICK, 0, 10, now)
+        .await
+        .unwrap();
+    host.assign_role(&server, &alice_id, mods, true, now)
+        .await
+        .unwrap();
+    settle!();
+
+    alice.request_kick(&chan, &bob_id, now).await.unwrap();
+    settle!();
+
+    host.send_channel(&chan, "bob is gone", now).await.unwrap();
+    assert_eq!(
+        alice
+            .poll_channels(now)
+            .await
+            .unwrap()
+            .first()
+            .map(|m| m.text.clone()),
+        Some("bob is gone".to_string())
+    );
+    assert!(
+        bob.poll_channels(now).await.unwrap().is_empty(),
+        "kicked member locked out"
+    );
+
+    assert_eq!(
+        host.server_policy(&server)
+            .unwrap()
+            .top_role_name(&alice_id),
+        Some("Mod")
+    );
+}

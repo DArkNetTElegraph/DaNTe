@@ -27,6 +27,7 @@ use dante_proto::{envelope::recipient_hint, Envelope, Record};
 use crate::{
     channel::{ChannelControl, ChannelInfo, ChannelMessage},
     error::CoreError,
+    roles::{self, ServerPolicy},
     store::{self, ChannelHistoryEntry, HistoryEntry, HistoryKind, PersistedState},
 };
 
@@ -140,6 +141,9 @@ pub struct Engine {
     channel_history: Vec<ChannelHistoryEntry>,
     /// Redemption counts for invite tokens we minted, keyed by token nonce.
     invite_uses: HashMap<[u8; 8], u32>,
+    /// Role configuration per server_root: the one we sign for servers we host,
+    /// the latest verified broadcast for servers we have joined.
+    server_policies: HashMap<[u8; 32], ServerPolicy>,
     /// The relay address this engine connected to (embedded in invite links).
     relay_addr: String,
     pow: Difficulty,
@@ -180,6 +184,7 @@ impl Engine {
             history: Vec::new(),
             channel_history: Vec::new(),
             invite_uses: HashMap::new(),
+            server_policies: HashMap::new(),
             relay_addr: relay_addr.to_owned(),
             pow,
             last_fetch_since_ms: 0,
@@ -219,6 +224,13 @@ impl Engine {
                         removed,
                     },
                 );
+            }
+            for blob in s.server_policies {
+                if let Ok(p) = ServerPolicy::decode(&blob) {
+                    if p.verify().is_ok() {
+                        engine.server_policies.insert(p.server_root, p);
+                    }
+                }
             }
             let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
             for h in s.hosted {
@@ -309,6 +321,7 @@ impl Engine {
                 .iter()
                 .filter_map(|(root, h)| h.auto_kick_ms.map(|ms| (*root, ms)))
                 .collect(),
+            server_policies: self.server_policies.values().map(|p| p.encode()).collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -406,6 +419,10 @@ impl Engine {
         };
         let rec = reg.to_record(now_ms, |m| root.sign(m));
         sync::submit_record(&mut self.client, &rec).await?;
+        self.server_policies.insert(
+            server_root,
+            ServerPolicy::genesis(&root, self.my_member_id(), now_ms),
+        );
         self.hosted.insert(
             server_root,
             HostedServer {
@@ -477,6 +494,7 @@ impl Engine {
         if !self.hosted.contains_key(&ch.info.server_root) {
             return Err(CoreError::NotServerHost);
         }
+        let server_root = ch.info.server_root;
         let info = ch.info.clone();
         let roster: Vec<[u8; 32]> = ch.roster.iter().copied().collect();
         // Hand the joiner our bundle plus a reconstructed bundle for every other
@@ -493,6 +511,16 @@ impl Engine {
         };
         self.send_content(peer_id, Content::Channel(invite.encode()), now_ms)
             .await?;
+
+        // Hand the joiner the current role configuration too.
+        if let Some(policy) = self.server_policies.get(&server_root).cloned() {
+            let pol = ChannelControl::Policy {
+                policy: policy.encode(),
+            };
+            let _ = self
+                .send_content(peer_id, Content::Channel(pol.encode()), now_ms)
+                .await;
+        }
 
         if let Some(ch) = self.channels.get_mut(channel_id) {
             ch.roster.insert(*peer_id);
@@ -689,6 +717,250 @@ impl Engine {
         Ok(removed)
     }
 
+    // ---- roles / permissions ---------------------------------------------
+
+    /// The role configuration for a server we host or have joined.
+    pub fn server_policy(&self, server_root: &[u8; 32]) -> Option<&ServerPolicy> {
+        self.server_policies.get(server_root)
+    }
+
+    /// Effective permission mask for `member` on a server (0 if unknown).
+    pub fn member_perms(&self, server_root: &[u8; 32], member: &[u8; 32]) -> u32 {
+        self.server_policies
+            .get(server_root)
+            .map_or(roles::PERM_DEFAULT, |p| p.effective_perms(member))
+    }
+
+    /// Create (id `None`) or update a role on a server we host, then broadcast
+    /// the new policy. Returns the role id.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_role(
+        &mut self,
+        server_root: &[u8; 32],
+        id: Option<u16>,
+        name: &str,
+        allow: u32,
+        deny: u32,
+        rank: u16,
+        now_ms: u64,
+    ) -> Result<u16, CoreError> {
+        let (mut roles_vec, assignments, owner, version, root) = self.policy_draft(server_root)?;
+        let id = id.unwrap_or_else(|| roles_vec.iter().map(|r| r.id).max().unwrap_or(0) + 1);
+        match roles_vec.iter_mut().find(|r| r.id == id) {
+            Some(r) => {
+                r.name = name.to_owned();
+                r.allow = allow;
+                r.deny = deny;
+                r.rank = rank;
+            }
+            None => roles_vec.push(crate::roles::Role {
+                id,
+                name: name.to_owned(),
+                allow,
+                deny,
+                rank,
+            }),
+        }
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            now_ms,
+        )
+        .await?;
+        Ok(id)
+    }
+
+    /// Delete a role (and strip it from every assignment) on a hosted server.
+    pub async fn delete_role(
+        &mut self,
+        server_root: &[u8; 32],
+        role_id: u16,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (mut roles_vec, mut assignments, owner, version, root) =
+            self.policy_draft(server_root)?;
+        roles_vec.retain(|r| r.id != role_id);
+        for (_, ids) in &mut assignments {
+            ids.retain(|i| *i != role_id);
+        }
+        assignments.retain(|(_, ids)| !ids.is_empty());
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            now_ms,
+        )
+        .await
+    }
+
+    /// Give (`add`) or take (`!add`) a role from a member on a hosted server.
+    pub async fn assign_role(
+        &mut self,
+        server_root: &[u8; 32],
+        member: &[u8; 32],
+        role_id: u16,
+        add: bool,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (roles_vec, mut assignments, owner, version, root) = self.policy_draft(server_root)?;
+        if add && !roles_vec.iter().any(|r| r.id == role_id) {
+            return Err(CoreError::Channel("no such role"));
+        }
+        match assignments.iter_mut().find(|(m, _)| m == member) {
+            Some((_, ids)) => {
+                if add {
+                    if !ids.contains(&role_id) {
+                        ids.push(role_id);
+                    }
+                } else {
+                    ids.retain(|i| *i != role_id);
+                }
+            }
+            None if add => assignments.push((*member, vec![role_id])),
+            None => {}
+        }
+        assignments.retain(|(_, ids)| !ids.is_empty());
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            now_ms,
+        )
+        .await
+    }
+
+    /// Ask for a member to be removed. If we host the server, do it directly;
+    /// otherwise (with `PERM_KICK`) DM the host a `KickRequest`.
+    pub async fn request_kick(
+        &mut self,
+        channel_id: &[u8; 32],
+        member: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let server_root = self
+            .channels
+            .get(channel_id)
+            .ok_or(CoreError::UnknownChannel)?
+            .info
+            .server_root;
+        if self.hosted.contains_key(&server_root) {
+            return self.remove_from_channel(channel_id, member, now_ms).await;
+        }
+        let owner = self
+            .server_policies
+            .get(&server_root)
+            .map(|p| p.owner_id)
+            .ok_or(CoreError::Channel(
+                "no server policy — cannot reach the host",
+            ))?;
+        if self.member_perms(&server_root, &self.my_member_id()) & roles::PERM_KICK == 0 {
+            return Err(CoreError::Channel("you lack the kick permission"));
+        }
+        let req = ChannelControl::KickRequest {
+            channel_id: *channel_id,
+            member: *member,
+        };
+        self.send_content(&owner, Content::Channel(req.encode()), now_ms)
+            .await
+    }
+
+    /// Pull the mutable parts of a hosted server's policy plus a fresh copy of
+    /// its signing key.
+    #[allow(clippy::type_complexity)]
+    fn policy_draft(
+        &self,
+        server_root: &[u8; 32],
+    ) -> Result<
+        (
+            Vec<crate::roles::Role>,
+            Vec<([u8; 32], Vec<u16>)>,
+            [u8; 32],
+            u64,
+            SignSecret,
+        ),
+        CoreError,
+    > {
+        let root_bytes = self
+            .hosted
+            .get(server_root)
+            .ok_or(CoreError::NotServerHost)?
+            .root
+            .to_bytes();
+        let p = self
+            .server_policies
+            .get(server_root)
+            .ok_or(CoreError::NotServerHost)?;
+        Ok((
+            p.roles.clone(),
+            p.assignments.clone(),
+            p.owner_id,
+            p.version,
+            SignSecret::from_bytes(&root_bytes),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_policy(
+        &mut self,
+        server_root: [u8; 32],
+        root: &SignSecret,
+        owner: [u8; 32],
+        prev_version: u64,
+        roles_vec: Vec<crate::roles::Role>,
+        assignments: Vec<([u8; 32], Vec<u16>)>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let np = ServerPolicy::signed(
+            root,
+            owner,
+            prev_version + 1,
+            roles_vec,
+            assignments,
+            now_ms,
+        );
+        self.server_policies.insert(server_root, np);
+        self.dirty = true;
+        self.broadcast_policy(&server_root, now_ms).await
+    }
+
+    /// DM the current policy to every member of every channel of `server_root`.
+    async fn broadcast_policy(
+        &mut self,
+        server_root: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let Some(policy) = self.server_policies.get(server_root).cloned() else {
+            return Ok(());
+        };
+        let blob = ChannelControl::Policy {
+            policy: policy.encode(),
+        }
+        .encode();
+        let me = self.my_member_id();
+        let mut targets: HashSet<[u8; 32]> = HashSet::new();
+        for ch in self.channels.values() {
+            if ch.info.server_root == *server_root {
+                targets.extend(ch.roster.iter().copied().filter(|m| *m != me));
+            }
+        }
+        for t in targets {
+            let _ = self
+                .send_content(&t, Content::Channel(blob.clone()), now_ms)
+                .await;
+        }
+        Ok(())
+    }
+
     /// Send a text message to a channel.
     pub async fn send_channel(
         &mut self,
@@ -738,6 +1010,15 @@ impl Engine {
                         continue;
                     };
                     if gm.sender == me || ch.removed.contains_key(&gm.sender) {
+                        continue;
+                    }
+                    // Roles: drop messages from a member without PERM_SEND
+                    // (muted role, announcement channel, …).
+                    if self
+                        .server_policies
+                        .get(&ch.info.server_root)
+                        .is_some_and(|p| p.effective_perms(&gm.sender) & roles::PERM_SEND == 0)
+                    {
                         continue;
                     }
                     match ch.group.decrypt(&gm) {
@@ -935,6 +1216,39 @@ impl Engine {
                     let _ = self
                         .send_content(&t, Content::Channel(kb.encode()), now_ms)
                         .await;
+                }
+            }
+            ChannelControl::Policy { policy } => {
+                let Ok(p) = ServerPolicy::decode(&policy) else {
+                    return Ok(());
+                };
+                if p.verify().is_err() {
+                    return Ok(());
+                }
+                let newer = self
+                    .server_policies
+                    .get(&p.server_root)
+                    .is_none_or(|cur| p.version > cur.version);
+                if newer {
+                    self.server_policies.insert(p.server_root, p);
+                    self.dirty = true;
+                }
+            }
+            ChannelControl::KickRequest { channel_id, member } => {
+                let Some(server_root) = self.channels.get(&channel_id).map(|c| c.info.server_root)
+                else {
+                    return Ok(());
+                };
+                if !self.hosted.contains_key(&server_root) {
+                    return Ok(());
+                }
+                let Ok(pk) = SignPublic::from_bytes(from) else {
+                    return Ok(());
+                };
+                let requester = *IdentityId::of(&pk).as_bytes();
+                if self.member_perms(&server_root, &requester) & roles::PERM_KICK != 0 {
+                    self.remove_from_channel(&channel_id, &member, now_ms)
+                        .await?;
                 }
             }
         }

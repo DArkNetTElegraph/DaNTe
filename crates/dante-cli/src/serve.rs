@@ -2,12 +2,23 @@
 //!
 //! Single user, localhost only. A minimal hand-rolled HTTP/1.1 handler serves
 //! the embedded SPA and a JSON API:
-//! `GET /api/me`, `GET /api/messages?since=N`, `POST /api/send {to,text}`.
+//! `GET /api/me`, `GET /api/messages?since=N`, `GET /api/channels`,
+//! `POST /api/send {to,text}` (`to` may be a fingerprint or `#<channel-id>`),
+//! `POST /api/server {name}`, `POST /api/channel {server,name}`,
+//! `POST /api/invite {channel,peer}`.
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use dante_core::{Engine, Inbound};
+use dante_identity::id::IdentityId;
 use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -20,11 +31,27 @@ use crate::{now_ms, parse_fingerprint};
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const INBOX_CAP: usize = 500;
 
+/// A request from the HTTP side to the single engine task. The reply carries a
+/// string (an id / root on success, or an error message).
 enum Cmd {
     Send {
         to: String,
         text: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    CreateServer {
+        name: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    CreateChannel {
+        server: String,
+        name: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    Invite {
+        channel: String,
+        peer: String,
+        reply: oneshot::Sender<Result<String, String>>,
     },
 }
 
@@ -43,29 +70,76 @@ enum Item {
         size: usize,
         saved: String,
     },
+    Channel {
+        seq: u64,
+        channel: String,
+        channel_name: String,
+        from: String,
+        text: String,
+    },
 }
 
 impl Item {
     fn seq(&self) -> u64 {
         match self {
-            Item::Message { seq, .. } | Item::File { seq, .. } => *seq,
+            Item::Message { seq, .. } | Item::File { seq, .. } | Item::Channel { seq, .. } => *seq,
         }
     }
 }
 
+#[derive(Clone, Serialize)]
+struct ChanView {
+    id: String,
+    name: String,
+    server: String,
+}
+
 struct Shared {
     inbox: Mutex<VecDeque<Item>>,
+    channels: Mutex<Vec<ChanView>>,
+    /// Monotonic id stamped on every inbox item, drawn by both the engine tick
+    /// loop and command handlers so the SPA's `since` cursor never regresses.
+    next_seq: AtomicU64,
     me_fingerprint: String,
     me_words: String,
     cmd: mpsc::Sender<Cmd>,
 }
 
+impl Shared {
+    fn next(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+/// Full base32 fingerprint from raw id bytes (channel ids, channel senders,
+/// which are already `IdentityId` bytes).
+fn id_b32(bytes: &[u8; 32]) -> String {
+    IdentityId::from_bytes(*bytes).to_base32()
+}
+
+/// Label for a channel sender (bytes are already an `IdentityId`).
+fn short_id(bytes: &[u8; 32]) -> String {
+    id_b32(bytes)
+}
+
+/// Label for a DM peer, whose stored bytes are an Ed25519 identity key that
+/// must be hashed into an `IdentityId` first.
 fn short_fp(idk: &[u8; 32]) -> String {
     use dante_crypto::sign::SignPublic;
-    use dante_identity::id::IdentityId;
     match SignPublic::from_bytes(idk) {
         Ok(pk) => IdentityId::of(&pk).to_base32(),
         Err(_) => "????".into(),
+    }
+}
+
+fn parse_target(to: &str) -> Result<(bool, [u8; 32]), String> {
+    match to.strip_prefix('#') {
+        Some(rest) => parse_fingerprint(rest)
+            .map(|id| (true, id))
+            .map_err(|e| e.to_string()),
+        None => parse_fingerprint(to)
+            .map(|id| (false, id))
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -74,13 +148,13 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Cmd>(32);
     let shared = Arc::new(Shared {
         inbox: Mutex::new(VecDeque::new()),
+        channels: Mutex::new(Vec::new()),
+        next_seq: AtomicU64::new(0),
         me_fingerprint: engine.identity().id().to_base32(),
         me_words: engine.identity().id().to_words(),
         cmd: cmd_tx,
     });
 
-    // Bind and start serving HTTP immediately so the UI is up while the engine
-    // does its (possibly slow) announce.
     let listener = TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("binding {http_addr}"))?;
@@ -89,17 +163,15 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
         shared.me_fingerprint
     );
 
-    // The engine lives in exactly one task.
     let engine_shared = Arc::clone(&shared);
     tokio::spawn(async move {
         let mut engine = engine;
-        let mut seq: u64 = 0;
 
-        // Replay stored history into the inbox so the SPA shows past messages.
+        // Replay stored history.
         {
             let mut inbox = engine_shared.inbox.lock().await;
             for h in engine.history() {
-                seq += 1;
+                let seq = engine_shared.next();
                 let from = if h.outgoing {
                     "you".to_string()
                 } else {
@@ -135,27 +207,41 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
         } else {
             eprintln!("ready");
         }
+        refresh_channels(&engine, &engine_shared).await;
 
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         let mut save_tick = tokio::time::interval(Duration::from_secs(15));
         loop {
             tokio::select! {
                 _ = save_tick.tick() => { let _ = engine.persist(); }
-                Some(cmd) = cmd_rx.recv() => match cmd {
-                    Cmd::Send { to, text, reply } => {
-                        let r = match parse_fingerprint(&to) {
-                            Ok(id) => engine.send_dm(&id, &text, now_ms()).await.map_err(|e| e.to_string()),
-                            Err(e) => Err(e.to_string()),
-                        };
-                        let _ = reply.send(r);
-                    }
-                },
+
+                Some(cmd) = cmd_rx.recv() => {
+                    handle_cmd(&mut engine, &engine_shared, cmd).await;
+                    refresh_channels(&engine, &engine_shared).await;
+                }
+
                 _ = tick.tick() => {
-                    let _ = engine.sync(now_ms()).await;
-                    if let Ok(items) = engine.receive_all(now_ms()).await {
+                    let now = now_ms();
+                    let _ = engine.sync(now).await;
+
+                    if let Ok(msgs) = engine.poll_channels(now).await {
+                        let mut inbox = engine_shared.inbox.lock().await;
+                        for m in msgs {
+                            inbox.push_back(Item::Channel {
+                                seq: engine_shared.next(),
+                                channel: id_b32(&m.channel_id),
+                                channel_name: m.channel_name,
+                                from: short_id(&m.sender),
+                                text: m.text,
+                            });
+                            while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                        }
+                    }
+
+                    if let Ok(items) = engine.receive_all(now).await {
                         let mut inbox = engine_shared.inbox.lock().await;
                         for it in items {
-                            seq += 1;
+                            let seq = engine_shared.next();
                             let entry = match it {
                                 Inbound::Message(m) => Item::Message {
                                     seq, from: short_fp(&m.from_idk), text: m.text,
@@ -175,6 +261,7 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                             while inbox.len() > INBOX_CAP { inbox.pop_front(); }
                         }
                     }
+                    refresh_channels(&engine, &engine_shared).await;
                 }
             }
         }
@@ -188,6 +275,91 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                 tracing::debug!(error = %e, "http connection ended");
             }
         });
+    }
+}
+
+async fn refresh_channels(engine: &Engine, shared: &Shared) {
+    let views: Vec<ChanView> = engine
+        .channels()
+        .into_iter()
+        .map(|c| ChanView {
+            id: id_b32(&c.channel_id),
+            name: c.channel_name,
+            server: c.server_name,
+        })
+        .collect();
+    *shared.channels.lock().await = views;
+}
+
+async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
+    match cmd {
+        Cmd::Send { to, text, reply } => {
+            let r = match parse_target(&to) {
+                Ok((true, id)) => engine
+                    .send_channel(&id, &text, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Ok((false, id)) => engine
+                    .send_dm(&id, &text, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            };
+            if let Ok("ok") = r.as_deref() {
+                if let Some(rest) = to.strip_prefix('#') {
+                    if let Ok(id) = parse_fingerprint(rest) {
+                        shared.inbox.lock().await.push_back(Item::Channel {
+                            seq: shared.next(),
+                            channel: id_b32(&id),
+                            channel_name: String::new(),
+                            from: "you".into(),
+                            text,
+                        });
+                    }
+                }
+            }
+            let _ = reply.send(r);
+        }
+        Cmd::CreateServer { name, reply } => {
+            let r = engine
+                .create_server(&name, now_ms())
+                .await
+                .map(|root| id_b32(&root))
+                .map_err(|e| e.to_string());
+            let _ = reply.send(r);
+        }
+        Cmd::CreateChannel {
+            server,
+            name,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(root) => engine
+                    .create_channel(&root, &name, true)
+                    .map(|id| id_b32(&id))
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::Invite {
+            channel,
+            peer,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match (parse_fingerprint(channel), parse_fingerprint(&peer)) {
+                (Ok(cid), Ok(pid)) => engine
+                    .invite_to_channel(&cid, &pid, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                _ => Err("bad channel id or fingerprint".into()),
+            };
+            let _ = reply.send(r);
+        }
     }
 }
 
@@ -255,6 +427,12 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 
+        ("GET", "/api/channels") => {
+            let chans = shared.channels.lock().await;
+            let body = serde_json::to_string(&*chans).unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
         ("GET", "/api/messages") => {
             let since: u64 = query
                 .split('&')
@@ -268,34 +446,95 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
 
         ("POST", "/api/send") => {
             #[derive(serde::Deserialize)]
-            struct SendReq {
+            struct Req {
                 to: String,
                 text: String,
             }
-            let Ok(req) = serde_json::from_slice::<SendReq>(&body) else {
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
             };
-            let (tx, rx) = oneshot::channel();
-            if shared
-                .cmd
-                .send(Cmd::Send {
-                    to: req.to,
-                    text: req.text,
-                    reply: tx,
-                })
-                .await
-                .is_err()
-            {
-                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            dispatch(&mut stream, &shared, |reply| Cmd::Send {
+                to: r.to,
+                text: r.text,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/server") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                name: String,
             }
-            match rx.await {
-                Ok(Ok(())) => respond(&mut stream, 200, "text/plain", b"ok").await,
-                Ok(Err(e)) => respond(&mut stream, 502, "text/plain", e.as_bytes()).await,
-                Err(_) => respond(&mut stream, 500, "text/plain", b"no reply").await,
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::CreateServer {
+                name: r.name,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/channel") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                name: String,
             }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::CreateChannel {
+                server: r.server,
+                name: r.name,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/invite") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                peer: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Invite {
+                channel: r.channel,
+                peer: r.peer,
+                reply,
+            })
+            .await
         }
 
         _ => respond(&mut stream, 404, "text/plain", b"not found").await,
+    }
+}
+
+async fn dispatch(
+    stream: &mut TcpStream,
+    shared: &Shared,
+    make: impl FnOnce(oneshot::Sender<Result<String, String>>) -> Cmd,
+) -> Result<()> {
+    let (tx, rx) = oneshot::channel();
+    if shared.cmd.send(make(tx)).await.is_err() {
+        return respond(stream, 500, "text/plain", b"engine gone").await;
+    }
+    match rx.await {
+        Ok(Ok(s)) => {
+            respond(
+                stream,
+                200,
+                "application/json",
+                format!("{{\"ok\":{s:?}}}").as_bytes(),
+            )
+            .await
+        }
+        Ok(Err(e)) => respond(stream, 502, "text/plain", e.as_bytes()).await,
+        Err(_) => respond(stream, 500, "text/plain", b"no reply").await,
     }
 }
 

@@ -43,12 +43,15 @@ achievable with no project-run infrastructure.
   exchange ride authenticated DMs (`Content::Channel`); channel messages go to a
   per-`channel_id` relay log (`PostToChannel` / `FetchChannel`, opaque to the
   relay). `dante chat`: `/server`, `/channel`, `/invite`, `/channels`,
-  `/to #<id>`. Verified across a relay + host + member.
+  `/to #<id>`. The `serve` web UI lists channels as clickable chips, has
+  create-server / create-channel / invite controls, and routes the composer to
+  a channel or a DM peer (`GET /api/channels`, `POST /api/server` / `/channel` /
+  `/invite`, `POST /api/send {to:"#<id>"|fingerprint}`). Verified across a relay
+  + host + member, both `chat` and `serve`.
 
 **Not built yet:** roles/permissions, per-server passwords (MLS PSK), invite
 links, member removal in the client, private-channel access control beyond the
-secret `channel_id`; channel message history persistence; the `serve` web UI
-does not yet show channels. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
+secret `channel_id`; channel message history persistence. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
 voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
 soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client;
 MLS migration for channels.

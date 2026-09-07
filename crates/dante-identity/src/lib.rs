@@ -22,4 +22,6 @@ pub mod records;
 pub use error::IdentityError;
 pub use id::IdentityId;
 pub use identity::Identity;
-pub use records::{IdentityAnnounce, IdentityRecord, KeyRotation, LivenessProof};
+pub use records::{
+    IdentityAnnounce, IdentityRecord, IdentityRevoke, KeyRotation, LivenessProof, RevokeReason,
+};

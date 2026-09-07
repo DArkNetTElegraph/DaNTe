@@ -17,7 +17,7 @@ use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Sessi
 use dante_group::{Group, GroupMessage, SenderKeyBundle};
 use dante_identity::{
     id::IdentityId,
-    records::{IdentityAnnounce, LivenessProof},
+    records::{IdentityAnnounce, IdentityRevoke, LivenessProof, RevokeReason},
     Identity,
 };
 use dante_ledger::{server::ServerRegister, Ledger, LedgerParams, MemoryStore};
@@ -445,6 +445,27 @@ impl Engine {
         self.last_announce_ms = now_ms;
         self.dirty = true;
         Ok(())
+    }
+
+    /// Permanently revoke this identity on the ledger. After the record is
+    /// accepted the chain takes no further records and resolves to no usable
+    /// key network-wide: peers can no longer start a session with it, and any
+    /// server it hosts is delisted. Irreversible — there is no un-revoke.
+    pub async fn revoke_identity(
+        &mut self,
+        reason: RevokeReason,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let rec = IdentityRevoke::build(&self.identity, reason).to_record(&self.identity, now_ms);
+        sync::submit_record(&mut self.client, &rec).await?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Whether the ledger has seen a revocation for `idk` (any key in its
+    /// chain). A client should refuse to encrypt to a revoked identity.
+    pub fn is_revoked(&self, idk: &[u8; 32]) -> bool {
+        self.ledger.is_revoked(idk)
     }
 
     /// Announce on first run, then only re-prove liveness once a day — a

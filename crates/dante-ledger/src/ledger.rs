@@ -85,6 +85,16 @@ struct Chain {
     last_activity_ms: u64,
     /// Set once the chain has been evaporated.
     tombstoned: bool,
+    /// Set once the chain's own key has published an `IdentityRevoke`.
+    revoked: bool,
+}
+
+impl Chain {
+    /// A chain resolves to a usable key only while it is neither evaporated nor
+    /// revoked.
+    fn usable(&self) -> bool {
+        !self.tombstoned && !self.revoked
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -173,9 +183,15 @@ impl<S: RecordStore> Ledger<S> {
         merkle::consistency_proof(old_size, &self.leaves)
     }
 
-    /// Is `idk` part of a currently non-evaporated chain?
+    /// Is `idk` part of a chain that is currently usable (neither evaporated
+    /// nor revoked)?
     pub fn is_live(&self, idk: &[u8; 32]) -> bool {
-        self.chain_of(idk).is_some_and(|c| !c.tombstoned)
+        self.chain_of(idk).is_some_and(Chain::usable)
+    }
+
+    /// Has `idk`'s chain been permanently revoked by its own key?
+    pub fn is_revoked(&self, idk: &[u8; 32]) -> bool {
+        self.chain_of(idk).is_some_and(|c| c.revoked)
     }
 
     /// Newest announce / liveness-proof / key-rotation time for the chain that
@@ -197,7 +213,7 @@ impl<S: RecordStore> Ledger<S> {
     /// in its chain.
     pub fn agreement_key(&self, idk: &[u8; 32]) -> Option<[u8; 32]> {
         let c = self.chain_of(idk)?;
-        (!c.tombstoned).then_some(c.tip_ik)
+        c.usable().then_some(c.tip_ik)
     }
 
     /// The current signing key (chain tip) for the identity whose stable
@@ -206,13 +222,13 @@ impl<S: RecordStore> Ledger<S> {
     pub fn idk_for_id(&self, identity_id: &[u8; 32]) -> Option<[u8; 32]> {
         let &chain_id = self.id_to_chain.get(identity_id)?;
         let c = &self.chains[chain_id];
-        (!c.tombstoned).then_some(c.tip_idk)
+        c.usable().then_some(c.tip_idk)
     }
 
     /// The current signing key (chain tip) for a live identity.
     pub fn tip_key(&self, idk: &[u8; 32]) -> Option<[u8; 32]> {
         let c = self.chain_of(idk)?;
-        (!c.tombstoned).then_some(c.tip_idk)
+        c.usable().then_some(c.tip_idk)
     }
 
     /// Discoverable servers, newest registration each.
@@ -274,6 +290,7 @@ impl<S: RecordStore> Ledger<S> {
             RecordKind::KeyRotation => self.apply_rotation(record),
             RecordKind::ServerRegister => self.apply_server_register(record),
             RecordKind::ServerDelist => self.apply_server_delist(record),
+            RecordKind::IdentityRevoke => self.apply_revoke(record),
             RecordKind::Tombstone => unreachable!("handled above"),
         }
     }
@@ -297,6 +314,7 @@ impl<S: RecordStore> Ledger<S> {
             tip_ik: body.ik_pub,
             last_activity_ms: record.created_ms,
             tombstoned: false,
+            revoked: false,
         });
         self.idk_to_chain.insert(record.author, chain_id);
         self.id_to_chain
@@ -315,6 +333,9 @@ impl<S: RecordStore> Ledger<S> {
         let chain = &self.chains[chain_id];
         if chain.tombstoned {
             return Err(LedgerError::IdentityEvaporated);
+        }
+        if chain.revoked {
+            return Err(LedgerError::IdentityRevoked);
         }
         if record.author != chain.tip_idk {
             return Err(LedgerError::NotChainTip);
@@ -349,6 +370,9 @@ impl<S: RecordStore> Ledger<S> {
         if chain.tombstoned {
             return Err(LedgerError::IdentityEvaporated);
         }
+        if chain.revoked {
+            return Err(LedgerError::IdentityRevoked);
+        }
         if body.prev_idk != chain.tip_idk {
             return Err(LedgerError::NotChainTip);
         }
@@ -364,6 +388,45 @@ impl<S: RecordStore> Ledger<S> {
         chain.tip_ik = body.new_ik;
         chain.last_activity_ms = record.created_ms;
         self.idk_to_chain.insert(body.new_idk, chain_id);
+        Ok(self.push_record(record))
+    }
+
+    fn apply_revoke(&mut self, record: Record) -> Result<RecordId, LedgerError> {
+        let IdentityRecord::Revoke(body) = IdentityRecord::from_record(&record)? else {
+            return Err(LedgerError::AuthorMismatch);
+        };
+        if record.author != body.revoked_idk {
+            return Err(LedgerError::AuthorMismatch);
+        }
+        body.verify()?;
+
+        let &chain_id = self
+            .idk_to_chain
+            .get(&record.author)
+            .ok_or(LedgerError::UnknownIdentity)?;
+        let chain = &self.chains[chain_id];
+        if chain.tombstoned {
+            return Err(LedgerError::IdentityEvaporated);
+        }
+        if chain.revoked {
+            return Err(LedgerError::IdentityRevoked);
+        }
+        // Only the live chain tip may revoke the chain.
+        if record.author != chain.tip_idk {
+            return Err(LedgerError::NotChainTip);
+        }
+        if record.created_ms <= chain.last_activity_ms {
+            return Err(LedgerError::NonMonotonic);
+        }
+
+        let chain = &mut self.chains[chain_id];
+        chain.revoked = true;
+        chain.last_activity_ms = record.created_ms;
+        for state in self.servers.values_mut() {
+            if state.owner_chain == Some(chain_id) {
+                state.delisted = true;
+            }
+        }
         Ok(self.push_record(record))
     }
 
@@ -633,6 +696,72 @@ mod tests {
             l.append(rot, 2_000),
             Err(LedgerError::UnknownIdentity)
         ));
+    }
+
+    fn revoke(id: &Identity, t: u64) -> Record {
+        dante_identity::records::IdentityRevoke::build(
+            id,
+            dante_identity::RevokeReason::Compromised,
+        )
+        .to_record(id, t)
+    }
+
+    #[test]
+    fn revocation_kills_the_chain() {
+        let mut l = ledger();
+        let id = Identity::generate(0);
+        let idk = id.sign_public().to_bytes();
+        l.append(announce(&id, 1_000), 1_000).unwrap();
+        l.append(server_reg(&id, true, 1_500), 1_500).unwrap();
+        assert!(l.is_live(&idk));
+
+        l.append(revoke(&id, 2_000), 2_000).unwrap();
+
+        assert!(l.is_revoked(&idk));
+        assert!(!l.is_live(&idk));
+        assert_eq!(l.agreement_key(&idk), None);
+        assert_eq!(l.idk_for_id(id.id().as_bytes()), None);
+        assert_eq!(l.tip_key(&idk), None);
+        // the server it hosted is gone from discovery
+        assert!(l.discoverable_servers().is_empty());
+
+        // no further records for the chain
+        assert!(matches!(
+            l.append(liveness(&id, 3_000), 3_000),
+            Err(LedgerError::IdentityRevoked)
+        ));
+        let new = Identity::generate(0);
+        assert!(matches!(
+            l.append(KeyRotation::build(&id, &new).to_record(&new, 3_000), 3_000),
+            Err(LedgerError::IdentityRevoked)
+        ));
+        assert!(matches!(
+            l.append(revoke(&id, 4_000), 4_000),
+            Err(LedgerError::IdentityRevoked)
+        ));
+    }
+
+    #[test]
+    fn revoke_requires_a_known_live_chain_tip() {
+        let mut l = ledger();
+        let stranger = Identity::generate(0);
+        assert!(matches!(
+            l.append(revoke(&stranger, 1_000), 1_000),
+            Err(LedgerError::UnknownIdentity)
+        ));
+
+        // after a rotation, only the new tip may revoke
+        let old = Identity::generate(0);
+        let new = Identity::generate(0);
+        l.append(announce(&old, 1_000), 1_000).unwrap();
+        l.append(KeyRotation::build(&old, &new).to_record(&new, 2_000), 2_000)
+            .unwrap();
+        assert!(matches!(
+            l.append(revoke(&old, 3_000), 3_000),
+            Err(LedgerError::NotChainTip)
+        ));
+        l.append(revoke(&new, 3_000), 3_000).unwrap();
+        assert!(l.is_revoked(&old.sign_public().to_bytes()));
     }
 
     #[test]

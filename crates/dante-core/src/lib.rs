@@ -16,6 +16,7 @@ pub mod roles;
 pub mod store;
 
 pub use channel::{ChannelInfo, ChannelMessage, ChannelReaction, RemoveOrder};
+pub use dante_identity::RevokeReason;
 pub use engine::{Engine, Inbound, ReceivedDm, TypingEvent, TypingScope, DM_TTL_MS};
 pub use error::CoreError;
 pub use invite::InviteToken;

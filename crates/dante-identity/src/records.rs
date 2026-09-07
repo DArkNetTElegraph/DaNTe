@@ -1,6 +1,6 @@
 //! The identity-related ledger record **bodies** (`docs/PROTOCOL.md` §2.2):
 //! [`IdentityAnnounce`] (kind 1), [`LivenessProof`] (kind 2), [`KeyRotation`]
-//! (kind 3).
+//! (kind 3), [`IdentityRevoke`] (kind 7).
 //!
 //! Each body has:
 //! - `encode` / `decode` over the [`dante_proto::enc`] codec,
@@ -281,6 +281,101 @@ impl KeyRotation {
     }
 }
 
+/// Why an identity was revoked. Informational only — a verifier accepts the
+/// revocation regardless of the reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevokeReason {
+    /// No reason given.
+    Unspecified,
+    /// The private key is believed compromised.
+    Compromised,
+    /// Replaced by a different identity (the user moved on).
+    Superseded,
+    /// The user is retiring the identity deliberately.
+    Retired,
+}
+
+impl RevokeReason {
+    /// Wire discriminant.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Compromised => 1,
+            Self::Superseded => 2,
+            Self::Retired => 3,
+        }
+    }
+
+    /// Parse a wire discriminant (unknown values map to [`Self::Unspecified`]).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Compromised,
+            2 => Self::Superseded,
+            3 => Self::Retired,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+/// Body of a `kind = 7` record: permanent revocation of an identity. The
+/// record's `author`/`sig` are the **current chain tip** `idk` — the only key
+/// allowed to revoke it. Once accepted, the chain takes no further records
+/// (no liveness, no rotation) and resolves to no usable key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityRevoke {
+    /// The chain-tip `idk` being revoked. Must equal the record `author`.
+    pub revoked_idk: [u8; 32],
+    /// Why (informational).
+    pub reason: RevokeReason,
+}
+
+impl IdentityRevoke {
+    /// Build a revocation for `identity` (which must be the current chain tip).
+    pub fn build(identity: &Identity, reason: RevokeReason) -> Self {
+        Self {
+            revoked_idk: identity.sign_public().to_bytes(),
+            reason,
+        }
+    }
+
+    /// Structural check: nothing beyond a well-formed key. Authorisation is the
+    /// envelope signature by `author == revoked_idk`, enforced by the ledger.
+    pub fn verify(&self) -> Result<(), IdentityError> {
+        SignPublic::from_bytes(&self.revoked_idk).map_err(|_| IdentityError::BadSignature)?;
+        Ok(())
+    }
+
+    /// Encode the body.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(33);
+        w.fixed(&self.revoked_idk).u8(self.reason.as_u8());
+        w.into_vec()
+    }
+
+    /// Decode the body.
+    pub fn decode(bytes: &[u8]) -> Result<Self, IdentityError> {
+        let mut r = Reader::new(bytes);
+        let revoked_idk = r.fixed::<32>()?;
+        let reason = RevokeReason::from_u8(r.u8()?);
+        r.finish()?;
+        Ok(Self {
+            revoked_idk,
+            reason,
+        })
+    }
+
+    /// Wrap in a signed record authored by `identity` at `created_ms`.
+    pub fn to_record(&self, identity: &Identity, created_ms: u64) -> Record {
+        debug_assert_eq!(self.revoked_idk, identity.sign_public().to_bytes());
+        seal(
+            identity,
+            RecordKind::IdentityRevoke,
+            self.encode(),
+            created_ms,
+        )
+    }
+}
+
 /// A decoded identity-related record body, tagged by kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IdentityRecord {
@@ -290,6 +385,8 @@ pub enum IdentityRecord {
     Liveness(LivenessProof),
     /// A `kind = 3` body.
     KeyRotation(KeyRotation),
+    /// A `kind = 7` body.
+    Revoke(IdentityRevoke),
 }
 
 impl IdentityRecord {
@@ -300,6 +397,7 @@ impl IdentityRecord {
             RecordKind::IdentityAnnounce => Self::Announce(IdentityAnnounce::decode(&record.body)?),
             RecordKind::LivenessProof => Self::Liveness(LivenessProof::decode(&record.body)?),
             RecordKind::KeyRotation => Self::KeyRotation(KeyRotation::decode(&record.body)?),
+            RecordKind::IdentityRevoke => Self::Revoke(IdentityRevoke::decode(&record.body)?),
             _ => return Err(IdentityError::WrongRecordKind),
         })
     }
@@ -457,6 +555,41 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn identity_revoke_roundtrips_and_is_self_authored() {
+        let id = Identity::generate(0);
+        let body = IdentityRevoke::build(&id, RevokeReason::Compromised);
+        assert_eq!(body.revoked_idk, id.sign_public().to_bytes());
+
+        let rec = body.to_record(&id, 99);
+        assert_eq!(rec.kind, RecordKind::IdentityRevoke);
+        assert_eq!(rec.author, id.sign_public().to_bytes());
+        rec.verify_signature().unwrap();
+
+        match IdentityRecord::from_record(&rec).unwrap() {
+            IdentityRecord::Revoke(b) => {
+                assert_eq!(b, body);
+                b.verify().unwrap();
+                assert_eq!(b.reason, RevokeReason::Compromised);
+            }
+            _ => panic!("wrong variant"),
+        }
+        assert_eq!(IdentityRevoke::decode(&body.encode()).unwrap(), body);
+    }
+
+    #[test]
+    fn revoke_reason_discriminants_are_total() {
+        for r in [
+            RevokeReason::Unspecified,
+            RevokeReason::Compromised,
+            RevokeReason::Superseded,
+            RevokeReason::Retired,
+        ] {
+            assert_eq!(RevokeReason::from_u8(r.as_u8()), r);
+        }
+        assert_eq!(RevokeReason::from_u8(200), RevokeReason::Unspecified);
     }
 
     #[test]

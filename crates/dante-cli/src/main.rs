@@ -97,11 +97,13 @@ async fn main() -> Result<()> {
         "fp" => cmd_fp(&flags),
         "chat" => cmd_chat(&flags).await,
         "serve" => cmd_serve(&flags).await,
+        "revoke" => cmd_revoke(&flags).await,
         _ => {
             eprintln!(
-                "usage:\n  dante gen   --out KEYSTORE\n  dante fp    --keystore KEYSTORE\n  \
-                 dante chat  --keystore KEYSTORE --relay ADDR [--pow-bits N] [--hint NAME]\n  \
-                 dante serve --keystore KEYSTORE --relay ADDR [--http 127.0.0.1:8080] [--pow-bits N]"
+                "usage:\n  dante gen    --out KEYSTORE\n  dante fp     --keystore KEYSTORE\n  \
+                 dante chat   --keystore KEYSTORE --relay ADDR [--pow-bits N] [--hint NAME]\n  \
+                 dante serve  --keystore KEYSTORE --relay ADDR [--http 127.0.0.1:8080] [--pow-bits N]\n  \
+                 dante revoke --keystore KEYSTORE --relay ADDR [--reason compromised|superseded|retired] --yes"
             );
             std::process::exit(2);
         }
@@ -203,6 +205,34 @@ async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
 
     eprintln!("connecting to relay {relay} (proof of work: {bits} bits) ...");
     Ok(Engine::connect(identity, &relay, params, difficulty, store_path).await?)
+}
+
+async fn cmd_revoke(flags: &HashMap<String, String>) -> Result<()> {
+    use dante_core::RevokeReason;
+
+    let reason = match flags.get("reason").map(String::as_str) {
+        Some("compromised") => RevokeReason::Compromised,
+        Some("superseded") => RevokeReason::Superseded,
+        Some("retired") => RevokeReason::Retired,
+        None | Some("unspecified") => RevokeReason::Unspecified,
+        Some(other) => anyhow::bail!("unknown --reason {other:?}"),
+    };
+    if !flags.contains_key("yes") {
+        anyhow::bail!(
+            "revocation is permanent and cannot be undone. \
+             Re-run with --yes to confirm."
+        );
+    }
+
+    let mut engine = connect_engine(flags).await?;
+    let fp = engine.identity().id().to_base32();
+    engine.announce_if_stale("", now_ms()).await?;
+    engine.sync(now_ms()).await?;
+    engine.revoke_identity(reason, now_ms()).await?;
+    engine.sync(now_ms()).await?;
+    engine.persist()?;
+    println!("identity {fp} revoked ({reason:?}). It can no longer be messaged.");
+    Ok(())
 }
 
 fn cmd_gen(flags: &HashMap<String, String>) -> Result<()> {

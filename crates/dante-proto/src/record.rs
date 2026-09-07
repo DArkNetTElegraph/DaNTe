@@ -37,6 +37,8 @@ pub enum RecordKind {
     ServerDelist,
     /// Tombstone written when an identity evaporates.
     Tombstone,
+    /// Explicit, permanent revocation of an identity by its own key.
+    IdentityRevoke,
 }
 
 impl RecordKind {
@@ -49,6 +51,7 @@ impl RecordKind {
             Self::ServerRegister => 4,
             Self::ServerDelist => 5,
             Self::Tombstone => 6,
+            Self::IdentityRevoke => 7,
         }
     }
 
@@ -61,6 +64,7 @@ impl RecordKind {
             4 => Self::ServerRegister,
             5 => Self::ServerDelist,
             6 => Self::Tombstone,
+            7 => Self::IdentityRevoke,
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "RecordKind",
@@ -194,11 +198,12 @@ mod tests {
             RecordKind::ServerRegister,
             RecordKind::ServerDelist,
             RecordKind::Tombstone,
+            RecordKind::IdentityRevoke,
         ] {
             assert_eq!(RecordKind::from_u8(k.as_u8()).unwrap(), k);
         }
         assert!(RecordKind::from_u8(0).is_err());
-        assert!(RecordKind::from_u8(7).is_err());
+        assert!(RecordKind::from_u8(8).is_err());
     }
 
     #[test]

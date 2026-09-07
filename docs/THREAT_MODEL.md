@@ -66,6 +66,7 @@ with no operator who can be compelled to surveil users**. Concretely:
 | Recipient authenticity | A2, A3, A6 | Only after out-of-band fingerprint / safety-number verification. Trust-on-first-use (TOFU) before that is vulnerable to A2/A6. |
 | Anonymity of identity | A3, A4, A5 | Identity carries no PII. See §5 for what still leaks. |
 | Key-directory tamper-evidence | A6 | Consistency proofs + gossiped Merkle roots let clients detect a split view. Detection, not prevention — see §6. |
+| Explicit key revocation | A7 (after the fact), A9 | The holder of a chain's current key can publish a terminal `IdentityRevoke` (kind 7). Every replica then resolves that identity to no usable key and rejects all later records for it, so honest peers stop encrypting to a stolen or retired key as soon as they sync. Does not recall messages already sent, and a relay withholding the revoke record from a victim is the split-view problem (A6, see §6). |
 | Sybil resistance | A5 | Raised cost, not eliminated — see §6. |
 
 ## 5. Non-goals / explicit limitations

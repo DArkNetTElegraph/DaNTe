@@ -6,13 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "DaNTe 1:1 direct messages: X3DH, Double Ratchet, encrypted file transfer, local message store."
+description = "DaNTe 1:1 direct messages: X3DH, Double Ratchet, encrypted file transfer."
 
 [dependencies]
 dante-crypto.workspace = true
 dante-proto.workspace = true
+dante-identity.workspace = true
 thiserror.workspace = true
-serde.workspace = true
+zeroize.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

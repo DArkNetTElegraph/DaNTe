@@ -1,12 +1,25 @@
-//! `dante-dm` — end-to-end-encrypted 1:1 direct messages for DaNTe.
+//! `dante-dm` — end-to-end-encrypted 1:1 direct messages for DaNTe
+//! (`docs/PROTOCOL.md` §4.3).
 //!
-//! Scope:
-//! - `PreKeyBundle` publication and refresh
-//! - X3DH session initiation against a fetched bundle
-//! - Double Ratchet session state, per-message keys, skipped-key handling
-//! - Chunked encrypted file transfer (per-file key, signed manifest)
-//! - Encrypted local message store (`rusqlite`, key from the keystore)
+//! - [`x3dh`] — the initial key agreement: [`PreKeyBundle`](x3dh::PreKeyBundle)
+//!   / [`PreKeySecrets`](x3dh::PreKeySecrets), `initiator` / `responder`
+//! - [`ratchet`] — the Signal [`Ratchet`](ratchet::Ratchet) (Double Ratchet,
+//!   un-encrypted headers), forward secrecy + post-compromise security, skipped
+//!   message keys up to `MAX_SKIP`
+//! - [`session`] — [`Session`](session::Session) ties them together;
+//!   [`InitMessage`](session::InitMessage) is first contact,
+//!   [`DmMessage`](session::DmMessage) every message after
 //!
-//! See `../../docs/PROTOCOL.md` §4.3. This is the Phase 4 MVP deliverable.
+//! Chunked encrypted file transfer and the local encrypted message store are
+//! layered on top in a later step.
 
-// Phase 4 begins implementation here.
+pub mod error;
+pub mod kdf;
+pub mod ratchet;
+pub mod session;
+pub mod x3dh;
+
+pub use error::DmError;
+pub use ratchet::{Header, Ratchet, MAX_SKIP};
+pub use session::{DmMessage, InitMessage, Session};
+pub use x3dh::{PreKeyBundle, PreKeySecrets};

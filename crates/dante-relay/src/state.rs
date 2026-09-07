@@ -217,7 +217,27 @@ impl RelayState {
                 }
             }
 
-            Request::GetPrekeys(id) => Response::Prekeys(self.prekeys.get(&id).cloned()),
+            Request::GetPrekeys(id) => {
+                // Hand out at most one one-time prekey per fetch and shrink our
+                // stored copy, so two initiators never receive the same OTP
+                // (which would make the second X3DH handshake fail). When the
+                // OTPs run out, callers fall back to an OTP-less X3DH.
+                let Some(stored) = self.prekeys.get(&id) else {
+                    return Response::Prekeys(None);
+                };
+                match dante_dm::PreKeyBundle::decode(stored) {
+                    Ok(mut bundle) if !bundle.otps.is_empty() => {
+                        let handed = bundle.otps.remove(0);
+                        let remaining = bundle.encode();
+                        let mut one = bundle;
+                        one.otps = vec![handed];
+                        let out = one.encode();
+                        self.prekeys.insert(id, remaining);
+                        Response::Prekeys(Some(out))
+                    }
+                    _ => Response::Prekeys(Some(stored.clone())),
+                }
+            }
 
             Request::PutBlob(bytes) => {
                 if !self.deposit_rl.check(&ip, now, 1.0) {
@@ -437,6 +457,40 @@ mod tests {
             1_500,
         ) {
             Response::Envelopes(v) => assert_eq!(v.len(), 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_prekeys_hands_out_one_otp_per_fetch() {
+        use dante_dm::{PreKeyBundle, PreKeySecrets};
+        use dante_identity::Identity;
+
+        let mut s = state();
+        let id = Identity::generate(7);
+        let bundle = PreKeySecrets::generate(3).bundle(&id);
+        let key = bundle.identity_id;
+        assert_eq!(
+            s.handle(Request::PublishPrekeys(bundle.encode()), IP, 0),
+            Response::Ok
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..3 {
+            match s.handle(Request::GetPrekeys(key), IP, 0) {
+                Response::Prekeys(Some(b)) => {
+                    let got = PreKeyBundle::decode(&b).unwrap();
+                    assert_eq!(got.otps.len(), 1, "exactly one OTP per fetch");
+                    assert!(seen.insert(got.otps[0]), "OTP never repeats");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // Exhausted: still serves the bundle, now without any OTP.
+        match s.handle(Request::GetPrekeys(key), IP, 0) {
+            Response::Prekeys(Some(b)) => {
+                assert!(PreKeyBundle::decode(&b).unwrap().otps.is_empty());
+            }
             other => panic!("{other:?}"),
         }
     }

@@ -18,6 +18,7 @@ dante-proto.workspace = true
 dante-identity.workspace = true
 dante-ledger.workspace = true
 dante-net.workspace = true
+dante-dm.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

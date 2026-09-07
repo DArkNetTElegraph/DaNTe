@@ -425,17 +425,17 @@ impl Engine {
         }
         let info = ch.info.clone();
         let roster: Vec<[u8; 32]> = ch.roster.iter().copied().collect();
-        // Our own bundle for this channel; other members' bundles are whatever
-        // they last sent us (we only have their public sig keys + chain keys as
-        // receivers, which we cannot re-serialise). For the common host-invites
-        // flow the host is the only established member, so its bundle suffices;
-        // additional members re-share on `KeyBundle` receipt.
-        let my_bundle = ch.group.my_bundle().encode();
+        // Hand the joiner our bundle plus a reconstructed bundle for every other
+        // member we already know, so they can decrypt everyone from the start.
+        // Those members learn the joiner's key from the `KeyBundle` it sends
+        // back (and reply in kind — see `handle_channel_control`).
+        let mut bundles = vec![ch.group.my_bundle().encode()];
+        bundles.extend(ch.group.peer_bundles().iter().map(|b| b.encode()));
 
         let invite = ChannelControl::Invite {
             info,
             roster: roster.clone(),
-            bundles: vec![my_bundle],
+            bundles,
         };
         self.send_content(peer_id, Content::Channel(invite.encode()), now_ms)
             .await?;
@@ -575,12 +575,32 @@ impl Engine {
                 self.dirty = true;
             }
             ChannelControl::KeyBundle { channel_id, bundle } => {
+                let Ok(b) = SenderKeyBundle::decode(&bundle) else {
+                    return Ok(());
+                };
+                let member = b.member;
+                let me = self.my_member_id();
+                let mut reply_to = None;
                 if let Some(ch) = self.channels.get_mut(&channel_id) {
-                    if let Ok(b) = SenderKeyBundle::decode(&bundle) {
-                        ch.roster.insert(b.member);
-                        ch.group.upsert_member(&b)?;
-                        self.dirty = true;
+                    let is_new = !ch.group.known_members().any(|m| *m == member);
+                    ch.roster.insert(member);
+                    ch.group.upsert_member(&b)?;
+                    self.dirty = true;
+                    // First time we hear from this member: hand them our bundle
+                    // back so every pair of members ends up mutually keyed, not
+                    // just each member and the host.
+                    if is_new && member != me {
+                        reply_to = Some(ch.group.my_bundle().encode());
                     }
+                }
+                if let Some(my_bundle) = reply_to {
+                    let kb = ChannelControl::KeyBundle {
+                        channel_id,
+                        bundle: my_bundle,
+                    };
+                    let _ = self
+                        .send_content(&member, Content::Channel(kb.encode()), now_ms)
+                        .await;
                 }
             }
         }
@@ -842,6 +862,7 @@ impl Engine {
 
         let ik = self.identity.agreement_secret();
         let mut out = Vec::new();
+        let mut consumed_prekey = false;
         for env in envelopes {
             let tag = sha256(&env.encode());
             if !self.seen_envelopes.insert(tag) {
@@ -852,6 +873,7 @@ impl Engine {
                 continue;
             };
             let from = sealed.sender_idk;
+            consumed_prekey |= matches!(packet, Packet::Init(_));
 
             let plaintext = match self.decrypt_packet(&from, packet) {
                 Ok(p) => p,
@@ -905,6 +927,12 @@ impl Engine {
             self.dirty = true;
         }
         self.last_fetch_since_ms = now_ms.saturating_sub(2 * dante_proto::envelope::EPOCH_MS);
+        // A first-contact packet consumed one of our one-time prekeys (locally,
+        // and on the relay). Re-publish so the relay's copy tracks our remaining
+        // set and later initiators still get a fresh OTP.
+        if consumed_prekey {
+            let _ = self.publish_prekeys().await;
+        }
         Ok(out)
     }
 

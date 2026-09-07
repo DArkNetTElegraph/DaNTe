@@ -311,6 +311,24 @@ impl Group {
         }
     }
 
+    /// Reconstructed bundles for every *other* member we currently know, at
+    /// their current chain position. Handing these to a new joiner keys them to
+    /// the whole group at once (they still see only messages sent after they
+    /// join — sender-keys has no history). The chain keys are live secrets:
+    /// send only over authenticated DMs.
+    pub fn peer_bundles(&self) -> Vec<SenderKeyBundle> {
+        self.receivers
+            .iter()
+            .map(|(&member, r)| SenderKeyBundle {
+                member,
+                sig_pub: r.sig_pub.to_bytes(),
+                chain_key: r.chain_key,
+                iteration: r.iteration,
+                signal_key: r.signal_key,
+            })
+            .collect()
+    }
+
     /// AEAD-seal an ephemeral signal (e.g. a typing marker) under our static
     /// signal key. Does **not** advance any chain and touches no persisted
     /// state, so it is safe to send often. A member holding our

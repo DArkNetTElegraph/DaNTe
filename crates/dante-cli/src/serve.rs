@@ -325,6 +325,29 @@ fn short_fp(idk: &[u8; 32]) -> String {
     }
 }
 
+/// Completes on the first SIGINT (ctrl-c) or, on unix, SIGTERM.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 fn parse_target(to: &str) -> Result<(bool, [u8; 32]), String> {
     match to.strip_prefix('#') {
         Some(rest) => parse_fingerprint(rest)
@@ -500,6 +523,14 @@ async fn engine_task(
     loop {
         tokio::select! {
             _ = save_tick.tick() => { let _ = engine.persist(); }
+
+            _ = shutdown_signal() => {
+                match engine.persist() {
+                    Ok(()) => eprintln!("state flushed; shutting down"),
+                    Err(e) => eprintln!("WARNING: could not flush state on shutdown: {e}"),
+                }
+                std::process::exit(0);
+            }
 
             _ = sweep_tick.tick() => {
                 if let Ok(kicked) = engine.sweep_inactive_members(now_ms()).await {

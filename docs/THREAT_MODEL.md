@@ -58,7 +58,10 @@ with no operator who can be compelled to surveil users**. Concretely:
 | DM forward secrecy | A1–A6, A8; **partial** vs A7 | Double Ratchet: content before a compromise stays secret; keys already on the device at compromise time are exposed until the next ratchet step. |
 | DM post-compromise security | A7 (after access ends) | Requires both parties to exchange at least one new message post-compromise. |
 | Group (channel/voice) content confidentiality | A1, A2, A3, A5, A6, A8 | **Not** against A4 — a member-host is inside the group and sees plaintext by design. |
-| Group FS / PCS on membership change | A1–A3, A5, A6, A8 | MLS rekeys the group on every add/remove; a removed member cannot read subsequent epochs. |
+| Group forward secrecy within a chain | A1–A3, A5, A6, A8; **partial** vs A7 | The current `dante-group` sender-keys ratchet deletes each message key after use. |
+| Removed member loses access | A (the removed member) | On removal, every remaining member rotates its sender chain and redistributes — O(n). The removed member cannot read messages sent after the rekey. |
+| Group **post-compromise security** | — | **Not provided** by the sender-keys scheme. This is the main reason channels are slated to migrate to MLS (RFC 9420), which also replaces the O(n) rekey with O(log n). |
+| Group message authorship (insider forgery) | A4 / any member | Each member signs its channel messages with a per-group Ed25519 key distributed in its `SenderKeyBundle`; another member who holds the symmetric chain key still cannot forge messages as someone else. |
 | Password-protected server history | A3 | `Argon2id(password)` is an MLS PSK; a relay without the password cannot derive epoch secrets. Not against A4 (a member has the password). |
 | Recipient authenticity | A2, A3, A6 | Only after out-of-band fingerprint / safety-number verification. Trust-on-first-use (TOFU) before that is vulnerable to A2/A6. |
 | Anonymity of identity | A3, A4, A5 | Identity carries no PII. See §5 for what still leaks. |

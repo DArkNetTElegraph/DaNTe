@@ -31,8 +31,8 @@ use crate::{now_ms, parse_fingerprint};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const INBOX_CAP: usize = 500;
-/// A typing signal is shown for this long after it was last seen.
-const TYPING_FRESH_MS: u64 = 6_000;
+/// A typing signal is shown for this long after the last keystroke it carries.
+const TYPING_FRESH_MS: u64 = 4_000;
 
 /// A request from the HTTP side to the single engine task. The reply carries a
 /// string (an id / root on success, or an error message).
@@ -238,6 +238,12 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
 
         let mut tick = tokio::time::interval(Duration::from_millis(700));
         let mut save_tick = tokio::time::interval(Duration::from_secs(15));
+        // Last inbound message time per sender label. A real message supersedes
+        // any typing signal that predates it (the relay keeps serving the stale
+        // signal for a few seconds, which otherwise flashes "is typing" right
+        // after the message lands).
+        let mut last_msg_ms: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
         loop {
             tokio::select! {
                 _ = save_tick.tick() => { let _ = engine.persist(); }
@@ -254,11 +260,13 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                     if let Ok(msgs) = engine.poll_channels(now).await {
                         let mut inbox = engine_shared.inbox.lock().await;
                         for m in msgs {
+                            let from = short_id(&m.sender);
+                            last_msg_ms.insert(from.clone(), now);
                             inbox.push_back(Item::Channel {
                                 seq: engine_shared.next(),
                                 channel: id_b32(&m.channel_id),
                                 channel_name: m.channel_name,
-                                from: short_id(&m.sender),
+                                from,
                                 text: m.text,
                             });
                             while inbox.len() > INBOX_CAP { inbox.pop_front(); }
@@ -270,18 +278,19 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                         for it in items {
                             let seq = engine_shared.next();
                             let entry = match it {
-                                Inbound::Message(m) => Item::Message {
-                                    seq, from: short_fp(&m.from_idk), text: m.text,
-                                },
+                                Inbound::Message(m) => {
+                                    let from = short_fp(&m.from_idk);
+                                    last_msg_ms.insert(from.clone(), now);
+                                    Item::Message { seq, from, text: m.text }
+                                }
                                 Inbound::File { from_idk, filename, data } => {
                                     let safe = filename.rsplit(['/', '\\']).next().unwrap_or("file")
                                         .replace(['/', '\\', '\0'], "_");
                                     let saved = format!("dante-recv-{safe}");
                                     let _ = std::fs::write(&saved, &data);
-                                    Item::File {
-                                        seq, from: short_fp(&from_idk), filename,
-                                        size: data.len(), saved,
-                                    }
+                                    let from = short_fp(&from_idk);
+                                    last_msg_ms.insert(from.clone(), now);
+                                    Item::File { seq, from, filename, size: data.len(), saved }
                                 }
                             };
                             inbox.push_back(entry);
@@ -296,6 +305,12 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                                 TypingScope::Dm(_) => short_fp(&ev.who),
                                 TypingScope::Channel(_) => short_id(&ev.who),
                             };
+                            // Drop a signal that predates this sender's last
+                            // actual message — they typed, then sent, and the
+                            // relay is still serving the stale "typing".
+                            if ev.at_ms <= last_msg_ms.get(&who).copied().unwrap_or(0) {
+                                continue;
+                            }
                             // Key freshness off the signal's own timestamp so a
                             // still-served-but-stale signal ages out on time.
                             match typing.iter_mut().find(|(w, _)| *w == who) {
@@ -305,6 +320,7 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                         }
                         typing.retain(|(_, at)| now.saturating_sub(*at) <= TYPING_FRESH_MS);
                     }
+                    last_msg_ms.retain(|_, t| now.saturating_sub(*t) <= 60_000);
 
                     refresh_channels(&engine, &engine_shared).await;
                 }

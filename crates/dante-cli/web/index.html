@@ -296,7 +296,8 @@ button, input, textarea { font: inherit; color: inherit; }
       <span class="title" id="chat-title"><span class="hash">#</span> …</span>
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
-      <button class="icon-btn" id="btn-invite" title="Invite people" hidden>➕👤</button>
+      <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
+      <button class="icon-btn" id="btn-link" title="Create invite link" hidden>🔗</button>
       <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
     </header>
     <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
@@ -436,6 +437,11 @@ function renderRail() {
   add.title = "Create a server";
   add.onclick = createServerFlow;
   rail.appendChild(add);
+
+  const join = el("button", "rail-btn add", "🔗");
+  join.title = "Join with an invite link";
+  join.onclick = redeemFlow;
+  rail.appendChild(join);
 }
 
 function renderPane() {
@@ -500,11 +506,12 @@ function renderChat() {
   const titleEl = $("#chat-title");
   const log = $("#log");
   const inviteBtn = $("#btn-invite");
+  const linkBtn = $("#btn-link");
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
     $("#chat-topic").textContent = "";
-    inviteBtn.hidden = true;
+    inviteBtn.hidden = true; linkBtn.hidden = true;
     log.innerHTML = '<div class="empty">Pick a channel or start a DM.</div>';
     return;
   }
@@ -514,14 +521,16 @@ function renderChat() {
     $("#chat-topic").textContent = store.view.server;
     inviteBtn.hidden = false;
     inviteBtn.onclick = () => inviteFlow(target);
+    linkBtn.hidden = false;
+    linkBtn.onclick = () => inviteLinkFlow(target);
   } else if (isSelf(target)) {
     titleEl.innerHTML = '<span class="hash">📝</span> Private Note';
     $("#chat-topic").textContent = "only you can see this";
-    inviteBtn.hidden = true;
+    inviteBtn.hidden = true; linkBtn.hidden = true;
   } else {
     titleEl.innerHTML = '<span class="hash">@</span> ' + esc(short(target));
     $("#chat-topic").textContent = "direct message · " + target;
-    inviteBtn.hidden = true;
+    inviteBtn.hidden = true; linkBtn.hidden = true;
   }
 
   const msgs = store.msgsFor(target);
@@ -613,6 +622,29 @@ async function inviteFlow(channelTarget) {
   if (!peer) return;
   try { await api.invite(channelTarget, peer); ui.sys("Invite sent to " + short(peer)); }
   catch (e) { ui.say("Invite failed: " + e.message); }
+}
+async function inviteLinkFlow(channelTarget) {
+  const days = parseFloat(ui.ask("Link valid for how many days?", "7") || "7");
+  const uses = parseInt(ui.ask("Max uses? (0 = unlimited)", "0") || "0", 10);
+  try {
+    const r = await api.post("/api/invite-link", {
+      channel: channelTarget,
+      ttl_secs: Math.max(1, Math.round(days * 86400)),
+      max_uses: Number.isFinite(uses) ? uses : 0,
+    });
+    const link = r.ok;
+    if (navigator.clipboard) navigator.clipboard.writeText(link).catch(() => {});
+    ui.say("Invite link (copied to clipboard):\n\n" + link);
+  } catch (e) { ui.say("Could not create link (are you the host?): " + e.message); }
+}
+async function redeemFlow() {
+  const link = ui.ask("Paste an invite link:");
+  if (!link) return;
+  try {
+    await api.post("/api/redeem", { link });
+    ui.sys("Redeemed — you'll join once the host is online.");
+    setTimeout(refreshChannels, 3000);
+  } catch (e) { ui.say("Redeem failed: " + e.message); }
 }
 function addDmFlow() {
   const fp = ui.ask("Their fingerprint (base32) or 24 words:");

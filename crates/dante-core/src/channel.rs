@@ -77,6 +77,11 @@ pub enum ChannelControl {
         /// Encoded `dante_group::SenderKeyBundle`.
         bundle: Vec<u8>,
     },
+    /// A joiner presents a signed invite token to the host to be added.
+    Redeem {
+        /// Encoded [`crate::invite::InviteToken`].
+        token: Vec<u8>,
+    },
 }
 
 impl ChannelControl {
@@ -103,6 +108,9 @@ impl ChannelControl {
             ChannelControl::KeyBundle { channel_id, bundle } => {
                 w.u8(2).fixed(channel_id).bytes(bundle);
             }
+            ChannelControl::Redeem { token } => {
+                w.u8(3).bytes(token);
+            }
         }
         w.into_vec()
     }
@@ -124,6 +132,9 @@ impl ChannelControl {
             2 => ChannelControl::KeyBundle {
                 channel_id: r.fixed::<32>()?,
                 bundle: r.bytes()?.to_vec(),
+            },
+            3 => ChannelControl::Redeem {
+                token: r.bytes()?.to_vec(),
             },
             other => {
                 return Err(WireError::BadDiscriminant {

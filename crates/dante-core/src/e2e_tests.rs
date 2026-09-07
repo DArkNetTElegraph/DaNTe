@@ -531,3 +531,83 @@ async fn send_dm_to_unknown_peer_fails_until_synced() {
     alice.send_dm(&bob_id, "hi", now).await.unwrap();
     assert_eq!(bob.receive(now).await.unwrap()[0].text, "hi");
 }
+
+#[tokio::test]
+async fn invite_link_redeem_flow_with_use_limit() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut joiner = engine(&relay).await;
+    let mut latecomer = engine(&relay).await;
+
+    for e in [&mut host, &mut joiner, &mut latecomer] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut joiner, &mut latecomer] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+
+    // A one-use link.
+    let link = host.create_invite_link(&chan, 3_600_000, 1, now).unwrap();
+    assert!(link.starts_with("dante-invite:"));
+
+    // Joiner redeems -> DMs the host a request.
+    joiner.redeem_invite(&link, now).await.unwrap();
+    // Host processes it and invites the joiner; settle the bundle exchange.
+    for _ in 0..4 {
+        for e in [&mut host, &mut joiner] {
+            e.receive_all(now).await.unwrap();
+        }
+    }
+    assert!(
+        joiner.channels().iter().any(|c| c.channel_id == chan),
+        "joiner is in the channel"
+    );
+    host.send_channel(&chan, "welcome", now).await.unwrap();
+    assert_eq!(
+        joiner
+            .poll_channels(now)
+            .await
+            .unwrap()
+            .first()
+            .map(|m| m.text.clone()),
+        Some("welcome".to_string())
+    );
+
+    // The link is spent: a second person redeeming it never joins.
+    latecomer.redeem_invite(&link, now).await.unwrap();
+    for _ in 0..4 {
+        for e in [&mut host, &mut latecomer] {
+            e.receive_all(now).await.unwrap();
+        }
+    }
+    assert!(
+        latecomer.channels().is_empty(),
+        "spent link does not admit a second member"
+    );
+}
+
+#[tokio::test]
+async fn forged_invite_link_is_rejected() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut joiner = engine(&relay).await;
+    joiner.announce("", now).await.unwrap();
+
+    // A token signed by a key that is not any server root.
+    use dante_crypto::sign::SignSecret;
+    let bogus = SignSecret::from_bytes(&[3u8; 32]);
+    let mut tok =
+        crate::InviteToken::mint(&bogus, [1u8; 32], [2u8; 32], "", now + 10_000, 0, [4u8; 8]);
+    // valid self-consistent sig, then claim someone else's server key
+    tok.server_root = SignSecret::from_bytes(&[9u8; 32]).public().to_bytes();
+
+    assert!(matches!(
+        joiner.redeem_invite(&tok.to_link(), now).await,
+        Err(crate::CoreError::Invite(_))
+    ));
+}

@@ -7,10 +7,16 @@ use std::{
     path::PathBuf,
 };
 
-use dante_crypto::{hash::sha256, pow::Difficulty, random_array, sign::SignSecret};
+use dante_crypto::{
+    hash::sha256,
+    pow::Difficulty,
+    random_array,
+    sign::{SignPublic, SignSecret},
+};
 use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Session};
 use dante_group::{Group, GroupMessage, SenderKeyBundle};
 use dante_identity::{
+    id::IdentityId,
     records::{IdentityAnnounce, LivenessProof},
     Identity,
 };
@@ -123,6 +129,10 @@ pub struct Engine {
     seen_envelopes: HashSet<[u8; 32]>,
     history: Vec<HistoryEntry>,
     channel_history: Vec<ChannelHistoryEntry>,
+    /// Redemption counts for invite tokens we minted, keyed by token nonce.
+    invite_uses: HashMap<[u8; 8], u32>,
+    /// The relay address this engine connected to (embedded in invite links).
+    relay_addr: String,
     pow: Difficulty,
     last_fetch_since_ms: u64,
     last_announce_ms: u64,
@@ -160,6 +170,8 @@ impl Engine {
             seen_envelopes: HashSet::new(),
             history: Vec::new(),
             channel_history: Vec::new(),
+            invite_uses: HashMap::new(),
+            relay_addr: relay_addr.to_owned(),
             pow,
             last_fetch_since_ms: 0,
             last_announce_ms: 0,
@@ -177,6 +189,7 @@ impl Engine {
             engine.seen_envelopes = s.seen_envelopes.into_iter().collect();
             engine.history = s.history;
             engine.channel_history = s.channel_history;
+            engine.invite_uses = s.invite_uses.into_iter().collect();
             engine.last_fetch_since_ms = s.last_fetch_since_ms;
             engine.last_announce_ms = s.last_announce_ms;
             for c in s.channels {
@@ -266,6 +279,7 @@ impl Engine {
                 .collect(),
             history: self.history.clone(),
             channel_history: self.channel_history.clone(),
+            invite_uses: self.invite_uses.iter().map(|(k, v)| (*k, *v)).collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -456,6 +470,55 @@ impl Engine {
         Ok(())
     }
 
+    /// Mint a shareable invite link for a channel this client hosts. `ttl_ms`
+    /// is how long the link stays valid; `max_uses` of `0` means unlimited.
+    pub fn create_invite_link(
+        &self,
+        channel_id: &[u8; 32],
+        ttl_ms: u64,
+        max_uses: u32,
+        now_ms: u64,
+    ) -> Result<String, CoreError> {
+        let ch = self
+            .channels
+            .get(channel_id)
+            .ok_or(CoreError::UnknownChannel)?;
+        let host = self
+            .hosted
+            .get(&ch.info.server_root)
+            .ok_or(CoreError::NotServerHost)?;
+        let token = crate::invite::InviteToken::mint(
+            &host.root,
+            self.my_member_id(),
+            *channel_id,
+            &self.relay_addr,
+            now_ms.saturating_add(ttl_ms),
+            max_uses,
+            random_array::<8>(),
+        );
+        Ok(token.to_link())
+    }
+
+    /// Redeem an invite link: verify it locally, then DM the host a request to
+    /// be added. Joining completes when the host's `Invite` arrives on a later
+    /// [`Engine::receive_all`].
+    pub async fn redeem_invite(&mut self, link: &str, now_ms: u64) -> Result<(), CoreError> {
+        let token = crate::invite::InviteToken::from_link(link)?;
+        token.verify()?;
+        if token.is_expired(now_ms) {
+            return Err(CoreError::Invite("expired"));
+        }
+        if self.channels.contains_key(&token.channel_id) {
+            return Ok(()); // already a member
+        }
+        let host_id = token.host_id;
+        let redeem = ChannelControl::Redeem {
+            token: token.encode(),
+        };
+        self.send_content(&host_id, Content::Channel(redeem.encode()), now_ms)
+            .await
+    }
+
     /// Send a text message to a channel.
     pub async fn send_channel(
         &mut self,
@@ -539,7 +602,12 @@ impl Engine {
         Ok(out)
     }
 
-    async fn handle_channel_control(&mut self, blob: &[u8], now_ms: u64) -> Result<(), CoreError> {
+    async fn handle_channel_control(
+        &mut self,
+        from: &[u8; 32],
+        blob: &[u8],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
         match ChannelControl::decode(blob)? {
             ChannelControl::Invite {
                 info,
@@ -611,6 +679,36 @@ impl Engine {
                         .send_content(&member, Content::Channel(kb.encode()), now_ms)
                         .await;
                 }
+            }
+            ChannelControl::Redeem { token } => {
+                let token = crate::invite::InviteToken::decode(&token)?;
+                token.verify()?;
+                if token.is_expired(now_ms) || token.host_id != self.my_member_id() {
+                    return Ok(());
+                }
+                // We must actually host this channel's server.
+                let Some(ch) = self.channels.get(&token.channel_id) else {
+                    return Ok(());
+                };
+                if ch.info.server_root != token.server_root
+                    || !self.hosted.contains_key(&token.server_root)
+                {
+                    return Ok(());
+                }
+                let used = *self.invite_uses.get(&token.nonce).unwrap_or(&0);
+                if token.max_uses != 0 && used >= token.max_uses {
+                    return Ok(()); // link is used up — silently ignore
+                }
+                // `from` is the redeemer's Ed25519 key; channel membership is
+                // keyed by IdentityId.
+                let Ok(pk) = SignPublic::from_bytes(from) else {
+                    return Ok(());
+                };
+                let redeemer_id = *IdentityId::of(&pk).as_bytes();
+                self.invite_uses.insert(token.nonce, used + 1);
+                self.dirty = true;
+                self.invite_to_channel(&token.channel_id, &redeemer_id, now_ms)
+                    .await?;
             }
         }
         Ok(())
@@ -924,7 +1022,7 @@ impl Engine {
                     Err(e) => tracing::debug!(error = %e, "dropping file with a failed transfer"),
                 },
                 Ok(Content::Channel(blob)) => {
-                    if let Err(e) = self.handle_channel_control(&blob, now_ms).await {
+                    if let Err(e) = self.handle_channel_control(&from, &blob, now_ms).await {
                         tracing::debug!(error = %e, "dropping channel-control message");
                     }
                 }

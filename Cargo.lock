@@ -362,7 +362,8 @@ dependencies = [
 name = "dante-proto"
 version = "0.0.1"
 dependencies = [
- "serde",
+ "dante-crypto",
+ "hex-literal",
  "thiserror",
 ]
 

@@ -21,14 +21,15 @@ repository = "https://github.com/DArkNetTElegraph/DaNTe"
 authors = ["The DaNTe contributors"]
 
 [workspace.dependencies]
-# Internal crates
-dante-crypto = { path = "crates/dante-crypto" }
-dante-identity = { path = "crates/dante-identity" }
-dante-ledger = { path = "crates/dante-ledger" }
-dante-proto = { path = "crates/dante-proto" }
-dante-net = { path = "crates/dante-net" }
-dante-dm = { path = "crates/dante-dm" }
-dante-core = { path = "crates/dante-core" }
+# Internal crates. Explicit versions so `cargo deny` does not read the bare
+# path deps as wildcard-version dependencies.
+dante-crypto = { path = "crates/dante-crypto", version = "0.0.1" }
+dante-identity = { path = "crates/dante-identity", version = "0.0.1" }
+dante-ledger = { path = "crates/dante-ledger", version = "0.0.1" }
+dante-proto = { path = "crates/dante-proto", version = "0.0.1" }
+dante-net = { path = "crates/dante-net", version = "0.0.1" }
+dante-dm = { path = "crates/dante-dm", version = "0.0.1" }
+dante-core = { path = "crates/dante-core", version = "0.0.1" }
 
 # Shared third-party deps (kept minimal; phases add their own)
 thiserror = "2"

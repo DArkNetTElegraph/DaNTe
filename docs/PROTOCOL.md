@@ -6,14 +6,21 @@
 
 ## 0. Conventions
 
-- **Encoding:** all wire structures are serialized with a canonical, deterministic
-  binary encoding. Phase 0 picks **CBOR (RFC 8949) with canonical/deterministic
-  encoding rules**; `dante-proto` owns the single serializer and no other crate
-  serializes wire types directly.
+- **Encoding:** all wire structures use an **explicit length-prefixed binary
+  codec** owned by `dante-proto` (`enc::Writer` / `enc::Reader`). Integers are
+  big-endian and fixed-width; `[u8; N]` is written raw; variable byte strings and
+  UTF-8 strings carry a `u32` byte-length prefix; lists carry a `u32` count.
+  There is exactly one encoding of a given value — canonical by construction,
+  with no dependency on a serializer's canonicalisation behaviour. (Phase 0
+  proposed canonical CBOR; replaced in Phase 2 because CBOR canonicalisation is
+  an implementation-defined footgun for a signed format.) The local keystore
+  file (§1.2) is the one exception and stays CBOR — it is AEAD-sealed, never
+  signed, and never compared byte-for-byte across implementations.
 - **Hashes:** SHA-256 unless stated. `H(x)` = SHA-256(x). Merkle tree uses
   RFC 6962 domain separation (`0x00` leaf prefix, `0x01` node prefix).
 - **Signatures:** Ed25519 over the canonical encoding of the struct with its
-  `sig` field set to empty/zero.
+  `sig` field omitted entirely (`Record::signing_bytes` = the record encoding up
+  to but not including `sig`).
 - **Time:** unsigned milliseconds since Unix epoch (`u64`). Clients MUST reject
   timestamps more than `CLOCK_SKEW_MS` (default 300_000) in the future.
 - **IDs:**
@@ -78,7 +85,7 @@ consistency proofs between tree states.
 Record {
   v: u16,                     // schema version, = 1
   kind: u8,                   // see 2.2
-  body: bytes,                // CBOR of the kind-specific struct
+  body: bytes,                // enc-encoded kind-specific struct (u32-len-prefixed)
   author: [u8;32],            // ed25519 pubkey of signer
   created_ms: u64,
   sig: [u8;64],               // Ed25519 by `author` over Record{sig: 0}

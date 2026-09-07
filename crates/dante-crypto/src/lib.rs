@@ -10,6 +10,7 @@
 //! - [`agree`]  — X25519 key agreement (RFC 7748)
 //! - [`aead`]   — XChaCha20-Poly1305 and AES-256-GCM (RFC 8439 / reference)
 //! - [`kdf`]    — HKDF-SHA-256 (RFC 5869)
+//! - [`mac`]    — HMAC-SHA-256 (RFC 4231)
 //! - [`hash`]   — SHA-256 / SHA-512
 //! - [`pwhash`] — Argon2id KDF for low-entropy secrets (keystore, key backup)
 //! - [`pow`]    — the `argon2id-pow` memory-hard puzzle (`docs/PROTOCOL.md` §3)
@@ -23,6 +24,7 @@ pub mod aead;
 pub mod agree;
 pub mod hash;
 pub mod kdf;
+pub mod mac;
 pub mod pow;
 pub mod pwhash;
 pub mod sign;

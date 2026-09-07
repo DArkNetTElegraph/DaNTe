@@ -18,7 +18,7 @@ ciborium = "0.2"
 bip39 = "2"
 
 [dev-dependencies]
-hex-literal = "0.4"
+hex-literal = "1.1"
 
 [lints.rust]
 unsafe_code = "forbid"

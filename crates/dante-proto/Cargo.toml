@@ -6,11 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Canonical wire types for DaNTe (records, envelopes, framing). Serialization only, no logic."
+description = "Canonical wire types for DaNTe: the length-prefixed binary codec, the ledger Record envelope, RFC 6962 Merkle proofs."
 
 [dependencies]
-serde.workspace = true
+dante-crypto = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
+
+[dev-dependencies]
+hex-literal = "0.4"
 
 [lints.rust]
 unsafe_code = "forbid"

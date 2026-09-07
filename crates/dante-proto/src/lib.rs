@@ -1,9 +1,24 @@
-//! `dante-proto` — canonical wire types shared across the DaNTe network boundary.
+//! `dante-proto` — canonical wire types shared across the DaNTe network
+//! boundary.
 //!
-//! Owns the single deterministic serializer (canonical CBOR, per
-//! `../../docs/PROTOCOL.md` §0). No other crate serializes wire types directly.
-//! Contains data definitions only — record envelopes, the sealed-sender
-//! `Envelope`, `PreKeyBundle`, `TreeHead`, `PowProof`, etc. — with no protocol
-//! logic.
+//! - [`enc`]    — the deterministic length-prefixed binary codec every wire
+//!   structure is built from
+//! - [`record`] — the body-agnostic ledger [`Record`](record::Record) envelope
+//!   (`docs/PROTOCOL.md` §2.1)
+//! - [`merkle`] — RFC 6962 Merkle Tree Hash, inclusion proofs, consistency
+//!   proofs
+//! - [`head`]   — [`SignedTreeHead`](head::SignedTreeHead) for split-view
+//!   detection (§2.4)
+//!
+//! Body semantics live with the crate that owns them (`dante-identity` for
+//! identity records, `dante-ledger` for the server registry and tombstones);
+//! this crate only defines the envelope and the encoding.
 
-// Phase 2/3 begin implementation here.
+pub mod enc;
+pub mod head;
+pub mod merkle;
+pub mod record;
+
+pub use enc::{Reader, WireError, Writer};
+pub use head::{SignedTreeHead, TreeHead};
+pub use record::{Record, RecordId, RecordKind, CLOCK_SKEW_MS, RECORD_VERSION};

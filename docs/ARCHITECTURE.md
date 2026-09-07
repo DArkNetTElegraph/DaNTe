@@ -52,8 +52,9 @@ community-run relay nodes that provide store-and-forward for offline delivery.
 | `client/` | Tauri app | `src-tauri/` Rust commands bridging `dante-core`; `src/` SvelteKit frontend. |
 
 Dependency direction is strictly downward:
-`cli`/`client` → `core` → {`dm`, `net`, `ledger`, `identity`} → {`proto`, `crypto`}.
-`crypto` and `proto` depend on nothing internal.
+`cli`/`client` → `core` → {`dm`, `net`, `ledger`, `identity`} → `proto` → `crypto`.
+`crypto` depends on nothing internal; `proto` depends only on `crypto` (a wire
+record hashes and verifies itself).
 
 ## Runtime roles
 

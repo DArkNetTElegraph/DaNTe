@@ -29,6 +29,9 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal crates are referenced by path with no version; that is not a real
+# wildcard-version dependency.
+allow-wildcard-paths = true
 # Reject unmaintained TLS / crypto stacks; we standardize on rustls + a vetted
 # crypto stack chosen per-phase.
 deny = [

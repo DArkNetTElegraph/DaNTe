@@ -262,6 +262,9 @@ button, input, textarea { font: inherit; color: inherit; }
 .member-row .avatar { width: 26px; height: 26px; font-size: 10px; }
 .member-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .member-row.you .name { color: var(--accent-warm); }
+.member-row .kick { margin-left: auto; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; font-size: 16px; line-height: 1; visibility: hidden; }
+.member-row:hover .kick { visibility: visible; }
+.member-row .kick:hover { color: var(--accent); }
 
 /* misc */
 .hint { padding: 16px; color: var(--text-faint); font-size: 13px; }
@@ -581,12 +584,27 @@ function renderMembers() {
   $("#members-count").textContent = `Members — ${all.length}`;
 
   wrap.appendChild(el("div", "role-label", "Members"));   // roles: TODO
+  const inChannel = target && target.startsWith("#");
   for (const n of all) {
     const row = el("div", "member-row" + (n === "you" ? " you" : ""));
     row.appendChild(el("div", "avatar", initials(n === "you" ? store.me.fingerprint : n)));
     row.appendChild(el("span", "name", n === "you" ? "you" : short(n)));
+    if (inChannel && n !== "you") {
+      const kick = el("button", "kick", "×");
+      kick.title = "Remove from channel (host only)";
+      kick.onclick = () => removeMemberFlow(target, n);
+      row.appendChild(kick);
+    }
     wrap.appendChild(row);
   }
+}
+
+async function removeMemberFlow(channelTarget, memberFp) {
+  if (!confirm("Remove " + short(memberFp) + " from this channel?")) return;
+  try {
+    await api.post("/api/remove", { channel: channelTarget, member: memberFp });
+    ui.sys("Removed " + short(memberFp) + ".");
+  } catch (e) { ui.say("Remove failed: " + e.message); }
 }
 
 function renderTyping() { $("#typing").textContent = store.typingText || ""; }

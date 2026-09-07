@@ -105,6 +105,8 @@ pub struct PersistedState {
     pub channel_history: Vec<ChannelHistoryEntry>,
     /// Redemption counts for invite tokens we minted (`nonce -> uses`).
     pub invite_uses: Vec<([u8; 8], u32)>,
+    /// Ejected members: `(channel_id, member, removal issued_ms)`.
+    pub channel_removed: Vec<([u8; 32], [u8; 32], u64)>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -246,6 +248,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for (nonce, uses) in &s.invite_uses {
         w.fixed(nonce).u32(*uses);
     }
+
+    w.u32(s.channel_removed.len() as u32);
+    for (chan, member, at) in &s.channel_removed {
+        w.fixed(chan).fixed(member).u64(*at);
+    }
     w.into_vec()
 }
 
@@ -359,6 +366,15 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut channel_removed = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        channel_removed.reserve(n);
+        for _ in 0..n {
+            channel_removed.push((r.fixed::<32>()?, r.fixed::<32>()?, r.u64()?));
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -368,6 +384,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         history,
         channel_history,
         invite_uses,
+        channel_removed,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -423,6 +440,7 @@ mod tests {
                 text: "channel hello".into(),
             }],
             invite_uses: vec![([1u8; 8], 3), ([2u8; 8], 0)],
+            channel_removed: vec![([7u8; 32], [6u8; 32], 55)],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -435,6 +453,7 @@ mod tests {
         assert_eq!(back.history, state.history);
         assert_eq!(back.channel_history, state.channel_history);
         assert_eq!(back.invite_uses, state.invite_uses);
+        assert_eq!(back.channel_removed, state.channel_removed);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -457,6 +476,7 @@ mod tests {
             history: vec![],
             channel_history: vec![],
             invite_uses: vec![],
+            channel_removed: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

@@ -108,6 +108,11 @@ pub(crate) struct ChannelSession {
     pub group: Group,
     pub roster: HashSet<[u8; 32]>,
     pub last_seq: u64,
+    /// Members ejected from this channel: `member -> removal `issued_ms``. We
+    /// refuse to re-key them and drop their messages. Re-admitting a removed
+    /// member is not supported by the sender-keys scheme (MLS migration will
+    /// fix this) — recreate the channel instead.
+    pub removed: HashMap<[u8; 32], u64>,
 }
 
 /// A server this client hosts (holds the root key).
@@ -192,7 +197,14 @@ impl Engine {
             engine.invite_uses = s.invite_uses.into_iter().collect();
             engine.last_fetch_since_ms = s.last_fetch_since_ms;
             engine.last_announce_ms = s.last_announce_ms;
+            let mut removed_by_chan: HashMap<[u8; 32], HashMap<[u8; 32], u64>> = HashMap::new();
+            for (chan, member, at) in s.channel_removed {
+                removed_by_chan.entry(chan).or_default().insert(member, at);
+            }
             for c in s.channels {
+                let removed = removed_by_chan
+                    .remove(&c.info.channel_id)
+                    .unwrap_or_default();
                 engine.channels.insert(
                     c.info.channel_id,
                     ChannelSession {
@@ -200,6 +212,7 @@ impl Engine {
                         group: Group::import(&c.group)?,
                         roster: c.roster.into_iter().collect(),
                         last_seq: c.last_seq,
+                        removed,
                     },
                 );
             }
@@ -280,6 +293,11 @@ impl Engine {
             history: self.history.clone(),
             channel_history: self.channel_history.clone(),
             invite_uses: self.invite_uses.iter().map(|(k, v)| (*k, *v)).collect(),
+            channel_removed: self
+                .channels
+                .iter()
+                .flat_map(|(cid, c)| c.removed.iter().map(move |(m, at)| (*cid, *m, *at)))
+                .collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -420,6 +438,7 @@ impl Engine {
                 group,
                 roster,
                 last_seq: 0,
+                removed: HashMap::new(),
             },
         );
         self.hosted
@@ -519,6 +538,72 @@ impl Engine {
             .await
     }
 
+    /// Eject a member from a channel this client hosts. Issues a server-root-
+    /// signed [`crate::channel::RemoveOrder`] to every remaining member, drops
+    /// the member locally, and rotates our own sender chain. Each remaining
+    /// member does the same on receipt, so the removed member's cached keys go
+    /// stale — an O(n) rekey.
+    pub async fn remove_from_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        member_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if *member_id == self.my_member_id() {
+            return Err(CoreError::Channel("cannot remove yourself"));
+        }
+        let (server_root, targets) = {
+            let ch = self
+                .channels
+                .get(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            if !self.hosted.contains_key(&ch.info.server_root) {
+                return Err(CoreError::NotServerHost);
+            }
+            let me = self.my_member_id();
+            let targets: Vec<[u8; 32]> = ch
+                .roster
+                .iter()
+                .copied()
+                .filter(|m| *m != *member_id && *m != me)
+                .collect();
+            (ch.info.server_root, targets)
+        };
+
+        let order = crate::channel::RemoveOrder::mint(
+            &self.hosted[&server_root].root,
+            *channel_id,
+            *member_id,
+            now_ms,
+        )
+        .encode();
+
+        let new_bundle = {
+            let ch = self.channels.get_mut(channel_id).unwrap();
+            ch.removed.insert(*member_id, now_ms);
+            ch.roster.remove(member_id);
+            ch.group.remove_member(member_id).encode()
+        };
+        self.dirty = true;
+
+        for t in targets {
+            let rm = ChannelControl::Remove {
+                order: order.clone(),
+            };
+            let _ = self
+                .send_content(&t, Content::Channel(rm.encode()), now_ms)
+                .await;
+            let kb = ChannelControl::KeyBundle {
+                channel_id: *channel_id,
+                bundle: new_bundle.clone(),
+            };
+            let _ = self
+                .send_content(&t, Content::Channel(kb.encode()), now_ms)
+                .await;
+        }
+        Ok(())
+    }
+
     /// Send a text message to a channel.
     pub async fn send_channel(
         &mut self,
@@ -567,7 +652,7 @@ impl Engine {
                     let Ok(gm) = GroupMessage::decode(&blob) else {
                         continue;
                     };
-                    if gm.sender == me {
+                    if gm.sender == me || ch.removed.contains_key(&gm.sender) {
                         continue;
                     }
                     match ch.group.decrypt(&gm) {
@@ -631,6 +716,7 @@ impl Engine {
                             group,
                             roster: roster_set,
                             last_seq: 0,
+                            removed: HashMap::new(),
                         },
                     );
                 }
@@ -657,6 +743,15 @@ impl Engine {
                 };
                 let member = b.member;
                 let me = self.my_member_id();
+                // Never re-key a member we've ejected (guards against a stale
+                // bundle that was already in flight when they were removed).
+                if self
+                    .channels
+                    .get(&channel_id)
+                    .is_some_and(|ch| ch.removed.contains_key(&member))
+                {
+                    return Ok(());
+                }
                 let mut reply_to = None;
                 if let Some(ch) = self.channels.get_mut(&channel_id) {
                     let is_new = !ch.group.known_members().any(|m| *m == member);
@@ -709,6 +804,53 @@ impl Engine {
                 self.dirty = true;
                 self.invite_to_channel(&token.channel_id, &redeemer_id, now_ms)
                     .await?;
+            }
+            ChannelControl::Remove { order } => {
+                let order = crate::channel::RemoveOrder::decode(&order)?;
+                order.verify()?;
+                let me = self.my_member_id();
+                if order.member == me {
+                    return Ok(()); // a removal of us — nothing to rotate
+                }
+                let targets = {
+                    let Some(ch) = self.channels.get(&order.channel_id) else {
+                        return Ok(());
+                    };
+                    if ch.info.server_root != order.server_root {
+                        return Ok(());
+                    }
+                    // Already applied this removal (or a newer one) for member.
+                    if ch
+                        .removed
+                        .get(&order.member)
+                        .is_some_and(|&t| t >= order.issued_ms)
+                    {
+                        return Ok(());
+                    }
+                    ch.roster
+                        .iter()
+                        .copied()
+                        .filter(|m| *m != order.member && *m != me)
+                        .collect::<Vec<_>>()
+                };
+
+                let new_bundle = {
+                    let ch = self.channels.get_mut(&order.channel_id).unwrap();
+                    ch.removed.insert(order.member, order.issued_ms);
+                    ch.roster.remove(&order.member);
+                    ch.group.remove_member(&order.member).encode()
+                };
+                self.dirty = true;
+
+                for t in targets {
+                    let kb = ChannelControl::KeyBundle {
+                        channel_id: order.channel_id,
+                        bundle: new_bundle.clone(),
+                    };
+                    let _ = self
+                        .send_content(&t, Content::Channel(kb.encode()), now_ms)
+                        .await;
+                }
             }
         }
         Ok(())

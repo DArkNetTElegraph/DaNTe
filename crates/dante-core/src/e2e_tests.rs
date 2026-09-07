@@ -856,6 +856,32 @@ async fn inactivity_auto_kick() {
 }
 
 #[tokio::test]
+async fn engine_connects_past_a_dead_relay_in_the_list() {
+    let now = now_ms();
+    let live = spawn_relay().await;
+    // A closed port, then the live relay — the client must fail over.
+    let dead = {
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        l.local_addr().unwrap().to_string()
+    };
+
+    let mut e = Engine::connect(
+        Identity::generate(1_000),
+        &format!("{dead}, {live}"),
+        test_params(),
+        D,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(e.relay_endpoints(), &[dead, live]);
+
+    // The connection landed on a working relay: a real round-trip succeeds.
+    e.announce("", now).await.unwrap();
+    assert!(e.sync(now).await.unwrap() >= 1);
+}
+
+#[tokio::test]
 async fn custom_server_emoji_reaches_a_member() {
     let now = now_ms();
     let relay = spawn_relay().await;

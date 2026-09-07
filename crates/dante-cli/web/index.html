@@ -12,6 +12,10 @@
    rather than collapsing.
    ========================================================================== */
 
+/* Toggling visibility with el.hidden / the [hidden] attribute must win over
+   any `display:` set by an id/class rule below (e.g. #onboard, .icon-btn). */
+[hidden] { display: none !important; }
+
 :root {
   /* ---- palette (from the project's inspiration set) ---------------------- */
   --blazing-flame:  #ff3c00;

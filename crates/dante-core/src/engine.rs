@@ -130,6 +130,31 @@ pub(crate) struct HostedServer {
     pub join_pw_hash: Option<[u8; 32]>,
 }
 
+/// Size classes channel-log plaintexts are padded to, so the relay learns only
+/// a coarse bucket instead of the exact message length.
+const CHANNEL_PAD_LADDER: [usize; 8] = [64, 256, 1024, 4096, 16_384, 65_536, 262_144, 1_048_576];
+
+/// `be(len) || plaintext || zero-fill` to the next [`CHANNEL_PAD_LADDER`] class.
+fn pad_channel(pt: &[u8]) -> Vec<u8> {
+    let need = 4 + pt.len();
+    let bucket = CHANNEL_PAD_LADDER
+        .iter()
+        .copied()
+        .find(|&b| b >= need)
+        .unwrap_or(need);
+    let mut out = Vec::with_capacity(bucket);
+    out.extend_from_slice(&(pt.len() as u32).to_be_bytes());
+    out.extend_from_slice(pt);
+    out.resize(bucket, 0);
+    out
+}
+
+/// Recover the real plaintext from a [`pad_channel`] frame.
+fn unpad_channel(b: &[u8]) -> Option<&[u8]> {
+    let n = u32::from_be_bytes(b.get(..4)?.try_into().ok()?) as usize;
+    b.get(4..4 + n)
+}
+
 /// The proof a joiner must present for a password-gated server.
 fn join_pw_hash(server_root: &[u8; 32], pw: &str) -> [u8; 32] {
     let mut buf = Vec::with_capacity(64 + pw.len());
@@ -1100,7 +1125,9 @@ impl Engine {
             .channels
             .get_mut(channel_id)
             .ok_or(CoreError::UnknownChannel)?;
-        let gm = ch.group.encrypt(&Content::Text(text.to_owned()).encode());
+        let gm = ch
+            .group
+            .encrypt(&pad_channel(&Content::Text(text.to_owned()).encode()));
         sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
         self.push_channel_history(ChannelHistoryEntry {
             channel_id: *channel_id,
@@ -1150,8 +1177,8 @@ impl Engine {
                         continue;
                     }
                     match ch.group.decrypt(&gm) {
-                        Ok(pt) => match Content::decode(&pt) {
-                            Ok(Content::Text(text)) => {
+                        Ok(pt) => match unpad_channel(&pt).map(Content::decode) {
+                            Some(Ok(Content::Text(text))) => {
                                 new_history.push(ChannelHistoryEntry {
                                     channel_id: id,
                                     sender: gm.sender,
@@ -1167,11 +1194,11 @@ impl Engine {
                                     seq,
                                 });
                             }
-                            Ok(Content::Reaction {
+                            Some(Ok(Content::Reaction {
                                 target_seq,
                                 emoji,
                                 remove,
-                            }) => {
+                            })) => {
                                 self.new_reactions.push(crate::channel::ChannelReaction {
                                     channel_id: id,
                                     target_seq,
@@ -1211,14 +1238,14 @@ impl Engine {
                 .channels
                 .get_mut(channel_id)
                 .ok_or(CoreError::UnknownChannel)?;
-            ch.group.encrypt(
+            ch.group.encrypt(&pad_channel(
                 &Content::Reaction {
                     target_seq,
                     emoji: emoji.to_owned(),
                     remove,
                 }
                 .encode(),
-            )
+            ))
         };
         sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
         self.new_reactions.push(crate::channel::ChannelReaction {
@@ -1815,5 +1842,30 @@ impl Engine {
     /// Whether `peer_idk` is a live identity in the local replica.
     pub fn knows(&self, peer_idk: &[u8; 32]) -> bool {
         self.ledger.is_live(peer_idk)
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::{pad_channel, unpad_channel, CHANNEL_PAD_LADDER};
+
+    #[test]
+    fn pad_roundtrips_and_snaps_to_a_bucket() {
+        for len in [0usize, 1, 20, 60, 61, 250, 300, 5000] {
+            let pt: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let padded = pad_channel(&pt);
+            assert!(CHANNEL_PAD_LADDER.contains(&padded.len()) || padded.len() == 4 + len);
+            assert!(padded.len() >= 4 + len);
+            assert_eq!(unpad_channel(&padded), Some(pt.as_slice()));
+        }
+    }
+
+    #[test]
+    fn unpad_rejects_a_bogus_length() {
+        // claims 9999 bytes of payload in a 10-byte frame
+        let mut b = 9999u32.to_be_bytes().to_vec();
+        b.extend_from_slice(&[0u8; 6]);
+        assert_eq!(unpad_channel(&b), None);
+        assert_eq!(unpad_channel(&[1, 2]), None);
     }
 }

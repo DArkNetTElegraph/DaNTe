@@ -68,6 +68,14 @@ pub struct Contact {
     pub added_ms: u64,
 }
 
+/// Resolve an Ed25519 identity key to its stable `IdentityId` bytes (falls back
+/// to the raw key if it is malformed).
+fn idk_to_id(idk: &[u8; 32]) -> [u8; 32] {
+    SignPublic::from_bytes(idk)
+        .map(|pk| *IdentityId::of(&pk).as_bytes())
+        .unwrap_or(*idk)
+}
+
 /// TTL on a typing signal's carrier envelope. Deliberately short: a stale
 /// "is typing" is worse than a missing one.
 const TYPING_TTL_MS: u32 = 10_000;
@@ -216,6 +224,10 @@ pub struct Engine {
     verified_peers: HashMap<[u8; 32], [u8; 32]>,
     /// The user's saved contacts, keyed by stable `IdentityId` bytes. Persisted.
     contacts: HashMap<[u8; 32], Contact>,
+    /// Blocked identities (by stable `IdentityId` bytes): their DMs, channel
+    /// messages and typing signals are dropped on receipt, and the client
+    /// refuses to DM them. Persisted.
+    blocked: HashSet<[u8; 32]>,
     /// Relay endpoints this engine may use, preference order. The first is the
     /// one embedded in invite links and server-discovery records; the whole
     /// list is the client's failover set.
@@ -273,6 +285,7 @@ impl Engine {
             channel_reactions: HashMap::new(),
             verified_peers: HashMap::new(),
             contacts: HashMap::new(),
+            blocked: HashSet::new(),
             relay_addrs,
             pow,
             last_fetch_since_ms: 0,
@@ -337,6 +350,7 @@ impl Engine {
                 .into_iter()
                 .map(|(id, petname, added_ms)| (id, Contact { petname, added_ms }))
                 .collect();
+            engine.blocked = s.blocked.into_iter().collect();
             let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
             let joinpw: HashMap<[u8; 32], [u8; 32]> = s.server_join_pw.into_iter().collect();
             for h in s.hosted {
@@ -466,6 +480,7 @@ impl Engine {
                 .iter()
                 .map(|(id, c)| (*id, c.petname.clone(), c.added_ms))
                 .collect(),
+            blocked: self.blocked.iter().copied().collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -633,6 +648,33 @@ impl Engine {
     /// Whether `peer_id` is a saved contact.
     pub fn is_contact(&self, peer_id: &[u8; 32]) -> bool {
         self.contacts.contains_key(peer_id)
+    }
+
+    /// Block an identity: its inbound DMs, channel messages and typing signals
+    /// are dropped, and [`Engine::send_dm`] to it refuses. Local only.
+    pub fn block(&mut self, peer_id: &[u8; 32]) {
+        if self.blocked.insert(*peer_id) {
+            self.dirty = true;
+        }
+    }
+
+    /// Unblock an identity.
+    pub fn unblock(&mut self, peer_id: &[u8; 32]) {
+        if self.blocked.remove(peer_id) {
+            self.dirty = true;
+        }
+    }
+
+    /// Whether `peer_id` is blocked.
+    pub fn is_blocked(&self, peer_id: &[u8; 32]) -> bool {
+        self.blocked.contains(peer_id)
+    }
+
+    /// The blocked identities, sorted.
+    pub fn blocked(&self) -> Vec<[u8; 32]> {
+        let mut v: Vec<_> = self.blocked.iter().copied().collect();
+        v.sort_unstable();
+        v
     }
 
     /// Whether `peer_id` is verified **and** still on the key that was verified.
@@ -1493,7 +1535,10 @@ impl Engine {
                     let Ok(gm) = GroupMessage::decode(&blob) else {
                         continue;
                     };
-                    if gm.sender == me || ch.removed.contains_key(&gm.sender) {
+                    if gm.sender == me
+                        || ch.removed.contains_key(&gm.sender)
+                        || self.blocked.contains(&gm.sender)
+                    {
                         continue;
                     }
                     // Roles: drop messages from a member without PERM_SEND
@@ -1970,6 +2015,9 @@ impl Engine {
                 if sealed.sender_idk != peer_idk {
                     continue;
                 }
+                if self.blocked.contains(&idk_to_id(&sealed.sender_idk)) {
+                    continue;
+                }
                 if let Ok(Content::Typing) = Content::decode(&sealed.inner) {
                     out.push(TypingEvent {
                         scope: TypingScope::Dm(peer_idk),
@@ -1991,7 +2039,7 @@ impl Engine {
                 let Some((member, pt)) = ch.group.open_signal(&blob) else {
                     continue;
                 };
-                if member == me || pt.len() < 8 {
+                if member == me || pt.len() < 8 || self.blocked.contains(&member) {
                     continue;
                 }
                 let at_ms = u64::from_be_bytes(pt[..8].try_into().unwrap());
@@ -2013,6 +2061,10 @@ impl Engine {
         content: Content,
         now_ms: u64,
     ) -> Result<(), CoreError> {
+        if self.blocked.contains(peer_id) && matches!(content, Content::Text(_) | Content::File(_))
+        {
+            return Err(CoreError::Blocked);
+        }
         let peer_idk = self
             .ledger
             .idk_for_id(peer_id)
@@ -2116,6 +2168,9 @@ impl Engine {
                 continue;
             };
             let from = sealed.sender_idk;
+            if self.blocked.contains(&idk_to_id(&from)) {
+                continue;
+            }
             consumed_prekey |= matches!(packet, Packet::Init(_));
 
             let plaintext = match self.decrypt_packet(&from, packet) {

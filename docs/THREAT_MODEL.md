@@ -124,7 +124,11 @@ provide.
    passphrase and the identity is gone. There is no operator to reset it.
 8. **Abuse moderation at the network layer.** There is no global moderator.
    Moderation is per-server (admins/roles) and per-user (block lists). The
-   project cannot remove content from the network.
+   per-user block list is **client-side and receive-side**: a blocked identity's
+   DMs, channel messages and typing signals are dropped by the recipient's
+   engine and it refuses to DM them, but the relay still carries the traffic and
+   a modified client could ignore the list. The project cannot remove content
+   from the network.
 9. **Protection of a user from their own correspondents.** Screenshots,
    forwarding, and malicious clients by someone you are talking to are not
    preventable.

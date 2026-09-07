@@ -72,4 +72,8 @@ pub enum CoreError {
     /// A channel membership operation was rejected.
     #[error("channel operation: {0}")]
     Channel(&'static str),
+
+    /// The target identity is on this client's block list.
+    #[error("that identity is blocked")]
+    Blocked,
 }

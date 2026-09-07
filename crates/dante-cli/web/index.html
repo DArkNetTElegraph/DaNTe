@@ -110,7 +110,7 @@ async function init() {
   setTarget(null);
   await refreshChans();
   poll();
-  setInterval(poll, 2000);
+  setInterval(poll, 700);
   setInterval(refreshChans, 5000);
   setInterval(pollTyping, 1500);
 }

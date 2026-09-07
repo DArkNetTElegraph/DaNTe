@@ -74,6 +74,23 @@ decrypt, or moderate anything; servers are run by independent third parties. The
 contributors do not support or condone any unlawful use. Full statement:
 [`DISCLAIMER.md`](DISCLAIMER.md).
 
+## Support
+
+DaNTe is free and takes no money to run. Donations in Monero are welcome and keep
+the project independent — they are optional and grant nothing.
+
+[![Donate — Monero](https://img.shields.io/badge/Donate-Monero-FF6600?logo=monero&logoColor=white)](monero:88oT41WmnzQEakPZBD5ucLJuc4F3Q59uX9zvJE8hn5Qm68ELKFDKPHiaqNX8VnDA6u1tmoBpFFGYhU2HrLXh5EoEQiMXyBr)
+
+**XMR:**
+
+```
+88oT41WmnzQEakPZBD5ucLJuc4F3Q59uX9zvJE8hn5Qm68ELKFDKPHiaqNX8VnDA6u1tmoBpFFGYhU2HrLXh5EoEQiMXyBr
+```
+
+<sub>The canonical donation address is the one in this file on the `main` branch.
+Verify it against a second source before sending — never trust an address from a
+fork, an issue, or a screenshot.</sub>
+
 ## License
 
 [AGPL-3.0-or-later](LICENSE). This is deliberate: a privacy tool's source, and

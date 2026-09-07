@@ -109,12 +109,62 @@ async fn main() -> Result<()> {
 }
 
 async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
-    let engine = connect_engine(flags).await?;
+    use std::path::PathBuf;
+
     let http = flags
         .get("http")
         .cloned()
         .unwrap_or_else(|| "127.0.0.1:8080".to_string());
-    serve::run(engine, &http).await
+    let relay = arg_value(flags, "relay")?;
+    let bits: u8 = flags
+        .get("pow-bits")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let params = LedgerParams {
+        min_announce_pow_bits: bits,
+        min_liveness_pow_bits: bits.saturating_sub(4).max(1),
+        ..Default::default()
+    };
+    let pow = Difficulty {
+        m_cost_kib: 4_096,
+        t_cost: 1,
+        bits,
+    };
+    let keystore_path = PathBuf::from(
+        flags
+            .get("keystore")
+            .cloned()
+            .unwrap_or_else(|| "dante.keystore".to_string()),
+    );
+    let store_path = if flags.contains_key("no-state") {
+        None
+    } else if let Some(p) = flags.get("state") {
+        Some(PathBuf::from(p))
+    } else {
+        Some(PathBuf::from(format!("{}.state", keystore_path.display())))
+    };
+
+    // If the keystore already exists and DANTE_PASSPHRASE is set, open it up
+    // front; otherwise the web page's onboarding flow creates / unlocks one.
+    let existing = match (keystore_path.exists(), std::env::var("DANTE_PASSPHRASE")) {
+        (true, Ok(pass)) => {
+            let bytes = std::fs::read(&keystore_path)
+                .with_context(|| format!("reading {}", keystore_path.display()))?;
+            let identity = keystore::open(&bytes, pass.as_bytes())?;
+            eprintln!("connecting to relay {relay} (proof of work: {bits} bits) ...");
+            Some(Engine::connect(identity, &relay, params, pow, store_path.clone()).await?)
+        }
+        _ => None,
+    };
+
+    let boot = serve::Bootstrap {
+        relay,
+        keystore_path,
+        store_path,
+        params,
+        pow,
+    };
+    serve::run(existing, &http, boot).await
 }
 
 /// Shared connect + params logic for `chat` and `serve`.

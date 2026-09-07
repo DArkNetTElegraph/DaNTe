@@ -268,9 +268,37 @@ button, input, textarea { font: inherit; color: inherit; }
 
 /* misc */
 .hint { padding: 16px; color: var(--text-faint); font-size: 13px; }
+
+/* onboarding */
+#onboard { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg-rail); z-index: 50; padding: 24px; overflow: auto; }
+#onboard .card { width: 460px; max-width: 100%; background: var(--bg-pane); border: 1px solid var(--divider); border-radius: 12px; padding: 26px; }
+#onboard h1 { margin: 0 0 4px; font-size: 22px; }
+#onboard h1 b { color: var(--accent); }
+#onboard p { color: var(--text-muted); font-size: 14px; margin: 6px 0 16px; }
+#onboard label { display: block; font-size: 12px; color: var(--text-faint); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+#onboard input, #onboard textarea { width: 100%; background: var(--bg-input); border: 1px solid var(--divider); border-radius: 6px; color: var(--text); padding: 10px; font: inherit; }
+#onboard textarea { min-height: 84px; resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
+#onboard .row { display: flex; gap: 10px; margin-top: 18px; }
+#onboard button { flex: 1; border: 0; border-radius: 6px; padding: 11px; font-weight: 700; cursor: pointer; background: var(--accent); color: #fff; }
+#onboard button.ghost { background: var(--bg-input); color: var(--text); border: 1px solid var(--divider); }
+#onboard button:hover { background: var(--accent-warm); color: #1b1832; }
+#onboard .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+#onboard .tabs button { flex: 1; background: var(--bg-input); color: var(--text-muted); border: 1px solid var(--divider); font-weight: 600; padding: 8px; }
+#onboard .tabs button.on { background: var(--bg-active); color: #fff; }
+#onboard .err { color: var(--accent); font-size: 13px; min-height: 1.2em; margin-top: 8px; }
+#onboard .blob { background: var(--bg-input); border: 1px solid var(--divider); border-radius: 6px; padding: 10px; font: 11px/1.4 ui-monospace, monospace; word-break: break-all; color: var(--text-muted); max-height: 140px; overflow: auto; }
 </style>
 </head>
 <body>
+
+<div id="onboard" hidden>
+  <div class="card">
+    <h1>Welcome to <b>DaNTe</b></h1>
+    <div id="ob-body"></div>
+    <div class="err" id="ob-err"></div>
+  </div>
+</div>
+
 <div id="app" data-members="shown">
 
   <!-- ---------- server rail ---------- -->
@@ -881,8 +909,79 @@ $("#btn-members").onclick = () => {
 $("#me-fp").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Fingerprint copied."); };
 $("#me-gear").onclick = () => ui.say("Recovery phrase (keep it secret):\n\n" + store.me.words);
 
+/* ---------- onboarding ---------------------------------------- */
+function obErr(m) { $("#ob-err").textContent = m || ""; }
+
+async function onboardSubmit(mode, fields) {
+  obErr("");
+  try {
+    const r = await api.post("/api/onboard", { mode, ...fields });
+    if (mode === "create" && r.backup) {
+      $("#ob-body").innerHTML =
+        '<p>Your identity is created. <b>Save this recovery blob</b> somewhere safe — ' +
+        'with it and your passphrase you can restore this account on another device. ' +
+        'It is the only backup.</p>' +
+        '<div class="blob" id="ob-blob"></div>' +
+        '<p style="margin-top:12px">Fingerprint: <code>' + esc(short(r.fingerprint)) + '</code></p>' +
+        '<div class="row"><button id="ob-done">I\'ve saved it — continue</button>' +
+        '<button class="ghost" id="ob-copy">Copy</button></div>';
+      $("#ob-blob").textContent = r.backup;
+      $("#ob-copy").onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.backup);
+      $("#ob-done").onclick = () => location.reload();
+    } else {
+      location.reload();
+    }
+  } catch (e) { obErr(e.message || "failed"); }
+}
+
+function renderOnboard(state) {
+  $("#onboard").hidden = false;
+  const b = $("#ob-body");
+  if (state.has_keystore) {
+    b.innerHTML =
+      '<p>Enter your passphrase to unlock this identity.</p>' +
+      '<label>Passphrase</label><input type="password" id="ob-pass" autofocus />' +
+      '<div class="row"><button id="ob-go">Unlock</button></div>';
+    const go = () => onboardSubmit("unlock", { passphrase: $("#ob-pass").value });
+    $("#ob-go").onclick = go;
+    $("#ob-pass").onkeydown = e => { if (e.key === "Enter") go(); };
+    return;
+  }
+  b.innerHTML =
+    '<div class="tabs"><button id="tab-new" class="on">Create new</button>' +
+    '<button id="tab-imp">I have a backup</button></div><div id="ob-form"></div>';
+  const form = $("#ob-form");
+  const showNew = () => {
+    $("#tab-new").classList.add("on"); $("#tab-imp").classList.remove("on");
+    form.innerHTML =
+      '<p>A fresh anonymous identity — no email, no phone. Pick a passphrase ' +
+      '(6+ characters) that encrypts it on this machine.</p>' +
+      '<label>Passphrase</label><input type="password" id="ob-pass" autofocus />' +
+      '<div class="row"><button id="ob-go">Create identity</button></div>';
+    $("#ob-go").onclick = () => onboardSubmit("create", { passphrase: $("#ob-pass").value });
+  };
+  const showImp = () => {
+    $("#tab-imp").classList.add("on"); $("#tab-new").classList.remove("on");
+    form.innerHTML =
+      '<p>Paste a recovery blob (or a keystore) exported from another DaNTe client.</p>' +
+      '<label>Recovery blob</label><textarea id="ob-blob-in"></textarea>' +
+      '<label>Passphrase</label><input type="password" id="ob-pass" />' +
+      '<div class="row"><button id="ob-go">Restore identity</button></div>';
+    $("#ob-go").onclick = () => onboardSubmit("import",
+      { passphrase: $("#ob-pass").value, blob: $("#ob-blob-in").value.trim() });
+  };
+  $("#tab-new").onclick = showNew;
+  $("#tab-imp").onclick = showImp;
+  showNew();
+}
+
 /* ---------- boot ----------------------------------------------- */
 async function init() {
+  let state;
+  try { state = await (await fetch("/api/state")).json(); }
+  catch (_) { state = { ready: false, has_keystore: false }; }
+  if (!state.ready) { renderOnboard(state); return; }
+
   $("#app").dataset.members = LS.get("members", "shown");
   try {
     store.me = await api.me();

@@ -108,6 +108,7 @@ DaNTe/
 - WebRTC (`webrtc-rs`), DTLS-SRTP. Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
 - SFU role in the server relay above ~5 participants; full mesh below.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.
+  Sources: full display, single window, and "follow the active screen" (see `IDEAS.md`).
 - Noise suppression: RNNoise, client-side.
 
 ### Phase 8 — Rich features  (post-MVP)

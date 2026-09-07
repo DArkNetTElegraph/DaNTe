@@ -48,6 +48,10 @@ pub enum LedgerError {
     #[error("identity has evaporated")]
     IdentityEvaporated,
 
+    /// A record targets an identity its own key has permanently revoked.
+    #[error("identity has been revoked")]
+    IdentityRevoked,
+
     /// A record was signed by a key that is not the current tip of its chain.
     #[error("record is not signed by the current chain key")]
     NotChainTip,

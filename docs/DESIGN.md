@@ -149,7 +149,8 @@ DaNTe/
 
 ### Phase 2 — Verifiable ledger  (`dante-ledger`)
 - CT-style append-only Merkle log; inclusion + consistency proofs.
-- Records: `IdentityAnnounce`, `LivenessProof`, `KeyRotation`, `ServerRegister`, `ServerDelist` — each self-signed by the owning identity.
+- Records: `IdentityAnnounce`, `LivenessProof`, `KeyRotation`, `ServerRegister`, `ServerDelist`, `IdentityRevoke` — each self-signed by the owning identity.
+- **Key revocation** *(done)*: `IdentityRevoke` (kind 7, `{ revoked_idk, reason }`) is a terminal record signed by the chain tip. Once accepted the chain resolves to no usable key everywhere (`is_live` → false, `agreement_key`/`idk_for_id`/`tip_key` → `None`), rejects all later liveness/rotation/revoke records, and delists any server it hosts. `Engine::revoke_identity` / `is_revoked`; `dante revoke --keystore … --relay … [--reason compromised|superseded|retired] --yes`. Irreversible; does not recall already-sent messages; a relay hiding the record from a victim is the split-view problem (see THREAT_MODEL §6).
 - Evaporation GC: tombstone + compact identities with newest liveness proof > 90d; deterministic ordering so replicas converge.
 - Replication: gossipsub for new records + request-response range sync; Merkle-root gossip for tamper detection.
 

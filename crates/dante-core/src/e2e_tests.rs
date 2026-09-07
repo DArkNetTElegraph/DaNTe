@@ -111,6 +111,43 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
 }
 
 #[tokio::test]
+async fn a_revoked_identity_can_no_longer_be_messaged() {
+    use dante_identity::RevokeReason;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let bob_idk = bob.identity().sign_public().to_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    alice.sync(now).await.unwrap();
+    alice.send_dm(&bob_id, "hi bob", now).await.unwrap();
+    assert_eq!(bob.receive(now).await.unwrap()[0].text, "hi bob");
+
+    // Bob's key is compromised — he revokes it.
+    bob.revoke_identity(RevokeReason::Compromised, now + 1_000)
+        .await
+        .unwrap();
+
+    // Alice picks the revocation up on her next sync and refuses to send,
+    // even though she already holds a ratchet session with Bob.
+    assert!(alice.sync(now + 2_000).await.unwrap() >= 1);
+    assert!(alice.is_revoked(&bob_idk));
+    assert!(matches!(
+        alice.send_dm(&bob_id, "you there?", now + 2_000).await,
+        Err(crate::CoreError::UnknownPeer)
+    ));
+
+    // Bob himself can no longer prove liveness on the dead chain.
+    assert!(bob.prove_liveness(now + 3_000).await.is_err());
+}
+
+#[tokio::test]
 async fn alice_sends_bob_an_encrypted_file() {
     let now = now_ms();
     let relay = spawn_relay().await;

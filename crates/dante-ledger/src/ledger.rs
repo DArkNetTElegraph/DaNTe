@@ -494,6 +494,7 @@ mod tests {
             tags: vec![],
             entry_relays: vec![],
             discoverable,
+            invite: String::new(),
         }
         .to_record(t, |m| root.sign(m))
     }
@@ -712,6 +713,7 @@ mod tests {
             tags: vec![],
             entry_relays: vec![],
             discoverable: true,
+            invite: String::new(),
         }
         .to_record(1_000, |m| root.sign(m));
         assert!(matches!(

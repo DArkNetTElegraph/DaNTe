@@ -50,6 +50,9 @@ pub struct ServerRegister {
     pub entry_relays: Vec<String>,
     /// If false, the server is registered but omitted from the discovery page.
     pub discoverable: bool,
+    /// A `dante-invite:` link a discovering client can redeem to join. Empty
+    /// for a server that only admits people by direct invite.
+    pub invite: String,
 }
 
 impl ServerRegister {
@@ -65,7 +68,8 @@ impl ServerRegister {
             && self.tags.len() <= TAGS_MAX
             && self.tags.iter().all(|t| t.len() <= TAG_LEN_MAX)
             && self.entry_relays.len() <= RELAYS_MAX
-            && self.entry_relays.iter().all(|r| r.len() <= RELAY_LEN_MAX);
+            && self.entry_relays.iter().all(|r| r.len() <= RELAY_LEN_MAX)
+            && self.invite.len() <= 2048;
         if ok {
             Ok(())
         } else {
@@ -88,6 +92,10 @@ impl ServerRegister {
             w.string(r);
         }
         w.bool(self.discoverable);
+        // Trailing optional: absent in records written before invite links.
+        if !self.invite.is_empty() {
+            w.string(&self.invite);
+        }
         w.into_vec()
     }
 
@@ -100,6 +108,11 @@ impl ServerRegister {
         let tags = read_string_list(&mut r)?;
         let entry_relays = read_string_list(&mut r)?;
         let discoverable = r.bool()?;
+        let invite = if r.remaining() > 0 {
+            r.string()?
+        } else {
+            String::new()
+        };
         r.finish()?;
         Ok(Self {
             server_root,
@@ -108,6 +121,7 @@ impl ServerRegister {
             tags,
             entry_relays,
             discoverable,
+            invite,
         })
     }
 
@@ -189,6 +203,7 @@ mod tests {
             tags: vec!["maps".into(), "geo".into()],
             entry_relays: vec!["/dns4/relay.example/tcp/4001".into()],
             discoverable: true,
+            invite: String::new(),
         }
     }
 

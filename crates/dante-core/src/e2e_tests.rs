@@ -903,3 +903,66 @@ async fn password_gated_invite_link() {
         Some("welcome".to_string())
     );
 }
+
+#[tokio::test]
+async fn server_discovery_and_public_join() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut joiner = engine(&relay).await;
+
+    for e in [&mut host, &mut joiner] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    joiner.sync(now).await.unwrap();
+
+    let server = host.create_server("Cartographers", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+
+    // Not listed yet.
+    joiner.sync(now).await.unwrap();
+    assert!(joiner.discoverable_servers().is_empty());
+
+    host.set_discoverable(
+        &server,
+        true,
+        "maps, mostly",
+        vec!["maps".into()],
+        now + 1000,
+    )
+    .await
+    .unwrap();
+
+    joiner.sync(now).await.unwrap();
+    let listed = joiner.discoverable_servers();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "Cartographers");
+    assert!(listed[0].invite.starts_with("dante-invite:"));
+
+    // Join straight from the directory.
+    joiner.join_discovered(&server, None, now).await.unwrap();
+    for _ in 0..4 {
+        host.receive_all(now).await.unwrap();
+        joiner.receive_all(now).await.unwrap();
+    }
+    assert!(joiner.channels().iter().any(|c| c.channel_id == chan));
+    host.send_channel(&chan, "welcome", now).await.unwrap();
+    assert_eq!(
+        joiner
+            .poll_channels(now)
+            .await
+            .unwrap()
+            .first()
+            .map(|m| m.text.clone()),
+        Some("welcome".to_string())
+    );
+
+    // Un-list.
+    host.set_discoverable(&server, false, "", vec![], now + 2000)
+        .await
+        .unwrap();
+    joiner.sync(now).await.unwrap();
+    assert!(joiner.discoverable_servers().is_empty());
+}

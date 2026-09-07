@@ -307,6 +307,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
+         /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -539,6 +540,64 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     Err(e) => println!("bad server root: {e}"),
                 },
                 _ => println!("usage: /autokick <server-root> <days|off>"),
+            },
+            "discover" => {
+                let list = engine.discoverable_servers();
+                if list.is_empty() {
+                    println!("(no public servers — try /discover again after a sync)");
+                }
+                for s in list {
+                    println!(
+                        "  {}  {}{}",
+                        IdentityId::from_bytes(s.server_root).to_base32(),
+                        s.name,
+                        if s.summary.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {}", s.summary)
+                        }
+                    );
+                }
+            }
+            "publish" => match (a, b) {
+                (Some(root), Some(rest)) => match parse_fingerprint(root) {
+                    Ok(sr) => {
+                        let mut it = rest.splitn(2, char::is_whitespace);
+                        let on = matches!(it.next(), Some("on"));
+                        let summary = it.next().unwrap_or("");
+                        match engine
+                            .set_discoverable(&sr, on, summary, vec![], now_ms())
+                            .await
+                        {
+                            Ok(()) => {
+                                println!(
+                                    "{}",
+                                    if on {
+                                        "listed on discovery"
+                                    } else {
+                                        "unlisted"
+                                    }
+                                )
+                            }
+                            Err(e) => println!("failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /publish <server-root> <on|off> [summary]"),
+            },
+            "joindisc" => match a {
+                Some(root) => match parse_fingerprint(root) {
+                    Ok(sr) => {
+                        let pw = b.map(str::trim).filter(|s| !s.is_empty());
+                        match engine.join_discovered(&sr, pw, now_ms()).await {
+                            Ok(()) => println!("joining — wait for the host to be online"),
+                            Err(e) => println!("failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                None => println!("usage: /joindisc <server-root> [password]"),
             },
             "roles" => match a {
                 Some(root) => match parse_fingerprint(root) {

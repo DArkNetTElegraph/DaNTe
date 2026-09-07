@@ -1024,7 +1024,8 @@ impl Engine {
         rank: u16,
         now_ms: u64,
     ) -> Result<u16, CoreError> {
-        let (mut roles_vec, assignments, owner, version, root) = self.policy_draft(server_root)?;
+        let (mut roles_vec, assignments, emojis, owner, version, root) =
+            self.policy_draft(server_root)?;
         let id = id.unwrap_or_else(|| roles_vec.iter().map(|r| r.id).max().unwrap_or(0) + 1);
         match roles_vec.iter_mut().find(|r| r.id == id) {
             Some(r) => {
@@ -1048,6 +1049,7 @@ impl Engine {
             version,
             roles_vec,
             assignments,
+            emojis,
             now_ms,
         )
         .await?;
@@ -1061,7 +1063,7 @@ impl Engine {
         role_id: u16,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (mut roles_vec, mut assignments, owner, version, root) =
+        let (mut roles_vec, mut assignments, emojis, owner, version, root) =
             self.policy_draft(server_root)?;
         roles_vec.retain(|r| r.id != role_id);
         for (_, ids) in &mut assignments {
@@ -1075,6 +1077,7 @@ impl Engine {
             version,
             roles_vec,
             assignments,
+            emojis,
             now_ms,
         )
         .await
@@ -1089,7 +1092,8 @@ impl Engine {
         add: bool,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, mut assignments, owner, version, root) = self.policy_draft(server_root)?;
+        let (roles_vec, mut assignments, emojis, owner, version, root) =
+            self.policy_draft(server_root)?;
         if add && !roles_vec.iter().any(|r| r.id == role_id) {
             return Err(CoreError::Channel("no such role"));
         }
@@ -1114,9 +1118,96 @@ impl Engine {
             version,
             roles_vec,
             assignments,
+            emojis,
             now_ms,
         )
         .await
+    }
+
+    /// Add or replace a custom emoji on a hosted server. `image` is stored
+    /// **unencrypted** on the relay blob store (keyed by its SHA-256); the
+    /// shortcode -> hash mapping rides the signed `ServerPolicy`. `name` is the
+    /// bare shortcode (no colons), ASCII `[a-z0-9_]`, <= `EMOJI_NAME_MAX`.
+    pub async fn set_server_emoji(
+        &mut self,
+        server_root: &[u8; 32],
+        name: &str,
+        image: &[u8],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if name.is_empty()
+            || name.len() > roles::EMOJI_NAME_MAX
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(CoreError::Channel("bad emoji name"));
+        }
+        if image.is_empty() || image.len() > 256 * 1024 {
+            return Err(CoreError::Channel("emoji image must be 1..=256 KiB"));
+        }
+        let (roles_vec, assignments, mut emojis, owner, version, root) =
+            self.policy_draft(server_root)?;
+        if !emojis.iter().any(|(n, _)| n == name) && emojis.len() >= roles::MAX_SERVER_EMOJIS {
+            return Err(CoreError::Channel("server emoji limit reached"));
+        }
+        sync::put_blob(&mut self.client, image).await?;
+        let hash = sha256(image);
+        match emojis.iter_mut().find(|(n, _)| n == name) {
+            Some(e) => e.1 = hash,
+            None => emojis.push((name.to_owned(), hash)),
+        }
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            emojis,
+            now_ms,
+        )
+        .await
+    }
+
+    /// Drop a custom emoji from a hosted server (the blob is left to expire).
+    pub async fn remove_server_emoji(
+        &mut self,
+        server_root: &[u8; 32],
+        name: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (roles_vec, assignments, mut emojis, owner, version, root) =
+            self.policy_draft(server_root)?;
+        let before = emojis.len();
+        emojis.retain(|(n, _)| n != name);
+        if emojis.len() == before {
+            return Err(CoreError::Channel("no such emoji"));
+        }
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            emojis,
+            now_ms,
+        )
+        .await
+    }
+
+    /// The custom emoji known for a server (hosted or joined), `(shortcode, hash)`.
+    pub fn server_emojis(&self, server_root: &[u8; 32]) -> Vec<(String, [u8; 32])> {
+        self.server_policies
+            .get(server_root)
+            .map(|p| p.emojis.clone())
+            .unwrap_or_default()
+    }
+
+    /// Fetch a blob (custom-emoji image, …) from the relay by its SHA-256.
+    pub async fn fetch_blob(&mut self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>, CoreError> {
+        Ok(sync::get_blob(&mut self.client, hash).await?)
     }
 
     /// Ask for a member to be removed. If we host the server, do it directly;
@@ -1157,6 +1248,7 @@ impl Engine {
     /// Pull the mutable parts of a hosted server's policy plus a fresh copy of
     /// its signing key.
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     fn policy_draft(
         &self,
         server_root: &[u8; 32],
@@ -1164,6 +1256,7 @@ impl Engine {
         (
             Vec<crate::roles::Role>,
             Vec<([u8; 32], Vec<u16>)>,
+            Vec<(String, [u8; 32])>,
             [u8; 32],
             u64,
             SignSecret,
@@ -1183,6 +1276,7 @@ impl Engine {
         Ok((
             p.roles.clone(),
             p.assignments.clone(),
+            p.emojis.clone(),
             p.owner_id,
             p.version,
             SignSecret::from_bytes(&root_bytes),
@@ -1198,6 +1292,7 @@ impl Engine {
         prev_version: u64,
         roles_vec: Vec<crate::roles::Role>,
         assignments: Vec<([u8; 32], Vec<u16>)>,
+        emojis: Vec<(String, [u8; 32])>,
         now_ms: u64,
     ) -> Result<(), CoreError> {
         let np = ServerPolicy::signed(
@@ -1206,6 +1301,7 @@ impl Engine {
             prev_version + 1,
             roles_vec,
             assignments,
+            emojis,
             now_ms,
         );
         self.server_policies.insert(server_root, np);

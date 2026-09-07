@@ -15,7 +15,9 @@
 //! `GET /api/discover`, `POST /api/discover {server,on,summary,tags}`,
 //! `POST /api/discover/join {server,password}`, `GET /api/reactions`,
 //! `POST /api/react {channel,seq,emoji,remove}`,
-//! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`.
+//! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
+//! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
+//! `POST /api/emoji/remove {server,name}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -152,6 +154,18 @@ enum Cmd {
         on: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Add/replace (`image = Some`) or remove (`image = None`) a custom emoji.
+    Emoji {
+        server: String,
+        name: String,
+        image: Option<Vec<u8>>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Fetch a blob (custom-emoji image) by SHA-256.
+    GetEmoji {
+        hash: [u8; 32],
+        reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -253,6 +267,17 @@ fn to_hex(bytes: &[u8]) -> String {
         s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
     }
     s
+}
+
+/// Best-effort image MIME from magic bytes; defaults to PNG.
+fn sniff_image(b: &[u8]) -> &'static str {
+    match b {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        _ => "image/png",
+    }
 }
 
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
@@ -831,11 +856,17 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         .map(|(m, ids)| serde_json::json!({ "member": id_b32(m), "roles": ids }))
                         .collect();
                     let me = *engine.identity().id().as_bytes();
+                    let emojis: Vec<_> = p
+                        .emojis
+                        .iter()
+                        .map(|(n, h)| serde_json::json!({ "name": n, "hash": to_hex(h) }))
+                        .collect();
                     serde_json::json!({
                         "version": p.version,
                         "owner": id_b32(&p.owner_id),
                         "roles": roles,
                         "assignments": assignments,
+                        "emojis": emojis,
                         "me_perms": engine.member_perms(&server, &me),
                     })
                     .to_string()
@@ -865,6 +896,33 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(r);
+        }
+        Cmd::Emoji {
+            server,
+            name,
+            image,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(sr) => match image {
+                    Some(bytes) => engine
+                        .set_server_emoji(&sr, &name, &bytes, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                    None => engine
+                        .remove_server_emoji(&sr, &name, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::GetEmoji { hash, reply } => {
+            let blob = engine.fetch_blob(&hash).await.ok().flatten();
+            let _ = reply.send(blob);
         }
         Cmd::AutoKick {
             server,
@@ -1387,6 +1445,73 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Verify {
                 peer: r.peer,
                 on: r.verified,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/emoji") => {
+            let hex = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("hash="))
+                .unwrap_or("");
+            let Some(hash) = hex_bytes(hex)
+                .filter(|b| b.len() == 32)
+                .map(|b| <[u8; 32]>::try_from(b).unwrap())
+            else {
+                return respond(&mut stream, 400, "text/plain", b"bad hash").await;
+            };
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::GetEmoji { hash, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            match rx.await.ok().flatten() {
+                Some(bytes) => respond(&mut stream, 200, sniff_image(&bytes), &bytes).await,
+                None => respond(&mut stream, 404, "text/plain", b"no such blob").await,
+            }
+        }
+
+        ("POST", "/api/emoji") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                name: String,
+                /// Hex-encoded image bytes.
+                image_hex: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let Some(image) = hex_bytes(&r.image_hex) else {
+                return respond(&mut stream, 400, "text/plain", b"bad image_hex").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Emoji {
+                server: r.server,
+                name: r.name,
+                image: Some(image),
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/emoji/remove") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                name: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Emoji {
+                server: r.server,
+                name: r.name,
+                image: None,
                 reply,
             })
             .await

@@ -136,6 +136,8 @@ button, input, textarea { font: inherit; color: inherit; }
 .icon-btn:hover { color: var(--text); background: var(--bg-hover); }
 #btn-verify:not(.verified) { filter: saturate(1.4); }
 #btn-verify.verified { color: var(--cornflower-blue); }
+img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
+.react-chip img.emoji { height: 1.15em; vertical-align: -0.2em; }
 
 .pane-scroll { flex: 1; overflow-y: auto; padding: 10px 8px; }
 .group-label {
@@ -335,9 +337,11 @@ button, input, textarea { font: inherit; color: inherit; }
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
       <button class="icon-btn" id="btn-verify" title="Safety number" hidden>🛡️</button>
+      <button class="icon-btn" id="btn-emoji" title="Custom emoji" hidden>😀</button>
       <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
       <button class="icon-btn" id="btn-link" title="Create invite link" hidden>🔗</button>
       <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
+      <input type="file" id="emoji-file" accept="image/*" hidden>
     </header>
     <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
     <div id="typing"></div>
@@ -397,6 +401,7 @@ const store = {
   policies: {},                       // server root -> policy JSON
   reactions: {},                      // ref_seq -> [{emoji,count,by}]
   safety: {},                         // dm fp -> {number,verified,available}
+  emojis: {},                         // server root -> { shortcode: hexhash }
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -615,6 +620,8 @@ function renderChat() {
   const linkBtn = $("#btn-link");
   const verifyBtn = $("#btn-verify");
   verifyBtn.hidden = true;
+  const emojiBtn = $("#btn-emoji");
+  emojiBtn.hidden = true;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
@@ -631,6 +638,8 @@ function renderChat() {
     inviteBtn.onclick = () => inviteFlow(target);
     linkBtn.hidden = false;
     linkBtn.onclick = () => inviteLinkFlow(target);
+    emojiBtn.hidden = false;
+    emojiBtn.onclick = () => emojiFlow(store.rootOf(store.view.server));
   } else if (isSelf(target)) {
     titleEl.innerHTML = '<span class="hash">📝</span> Private Note';
     $("#chat-topic").textContent = "only you can see this";
@@ -665,7 +674,9 @@ function renderChat() {
       continue;
     }
     const g = groupShell(m, m.from === lastAuthor);
-    g.body.appendChild(Object.assign(el("div", "msg-line"), { textContent: m.text }));
+    const line = el("div", "msg-line");
+    if (target.startsWith("#")) line.innerHTML = richText(m.text); else line.textContent = m.text;
+    g.body.appendChild(line);
     if (target.startsWith("#") && m.ref_seq) renderReactions(g.body, target, m.ref_seq);
     log.appendChild(g.node);
     lastAuthor = m.from;
@@ -681,7 +692,8 @@ function renderReactions(body, channelTarget, refSeq) {
   const list = store.reactions[refSeq] || [];
   for (const r of list) {
     const has = (r.by || []).includes(mine);
-    const chip = el("button", "react-chip" + (has ? " on" : ""), r.emoji + " " + r.count);
+    const chip = el("button", "react-chip" + (has ? " on" : ""));
+    chip.innerHTML = richText(r.emoji) + " " + r.count;
     chip.title = (r.by || []).map(short).join(", ");
     chip.onclick = () => toggleReact(channelTarget, refSeq, r.emoji, has);
     row.appendChild(chip);
@@ -689,11 +701,45 @@ function renderReactions(body, channelTarget, refSeq) {
   const add = el("button", "react-chip add", "＋");
   add.title = "Add a reaction";
   add.onclick = () => {
-    const e = ui.ask("React with which emoji?\n(" + QUICK_EMOJI.join(" ") + " …)", "👍");
+    const custom = Object.keys(emojiMap()).map(n => ":" + n + ":").join(" ");
+    const e = ui.ask("React with which emoji?\n(" + QUICK_EMOJI.join(" ") + (custom ? "  " + custom : "") + ")", "👍");
     if (e) toggleReact(channelTarget, refSeq, e, false);
   };
   row.appendChild(add);
   body.appendChild(row);
+}
+
+function emojiFlow(root) {
+  if (!root) { ui.say("Open one of your own server's channels to manage its emoji."); return; }
+  const listed = Object.keys(store.emojis[root] || {});
+  const name = ui.ask(
+    "Custom emoji shortcode — letters, digits, underscore.\n" +
+    "Prefix with '-' to remove one instead.\n\n" +
+    (listed.length ? "current: " + listed.map(n => ":" + n + ":").join("  ") : "none yet"),
+    "");
+  if (!name) return;
+  if (name.startsWith("-")) {
+    api.post("/api/emoji/remove", { server: root, name: name.slice(1).trim() })
+      .then(refreshPolicies)
+      .catch(e => ui.sys("remove failed: " + e.message));
+    return;
+  }
+  const inp = $("#emoji-file");
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    inp.value = "";
+    if (!f) return;
+    if (f.size > 256 * 1024) { ui.say("image must be 256 KiB or smaller"); return; }
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    let hex = "";
+    for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+    try {
+      await api.post("/api/emoji", { server: root, name, image_hex: hex });
+      await refreshPolicies();
+      ui.sys("added :" + name + ":");
+    } catch (e) { ui.sys("upload failed: " + e.message); }
+  };
+  inp.click();
 }
 
 async function toggleReact(channelTarget, seq, emoji, remove) {
@@ -871,6 +917,20 @@ function renderTyping() { $("#typing").textContent = store.typingText || ""; }
 function render() { renderRail(); renderPane(); renderChat(); renderMembers(); renderTyping(); }
 const esc = s => { const d = el("div"); d.textContent = s; return d.innerHTML; };
 
+/* custom-emoji map for the server currently in view: { shortcode: hexhash } */
+function emojiMap() {
+  const root = store.rootOf(store.view.server);
+  return (root && store.emojis[root]) || {};
+}
+/* escape, then swap :shortcode: for a known custom emoji <img> */
+function richText(s) {
+  const m = emojiMap();
+  return esc(s).replace(/:([a-z0-9_]{1,32}):/g, (whole, name) =>
+    m[name]
+      ? `<img class="emoji" alt=":${name}:" title=":${name}:" src="/api/emoji?hash=${m[name]}">`
+      : whole);
+}
+
 /* ---------- flows -------------------------------------------------- */
 async function createServerFlow() {
   const name = ui.ask("Server name?");
@@ -991,6 +1051,7 @@ async function refreshPolicies() {
       if (p && p.version != null) {
         const changed = JSON.stringify(p) !== JSON.stringify(store.policies[root]);
         store.policies[root] = p;
+        store.emojis[root] = Object.fromEntries((p.emojis || []).map(e => [e.name, e.hash]));
         if (changed) render();
       }
     } catch (_) {}

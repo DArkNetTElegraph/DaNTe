@@ -486,6 +486,8 @@ function renderPane() {
 
   const mk = (glyph, title, fn) => { const b = el("button", "icon-btn", glyph); b.title = title; b.onclick = fn; return b; };
   actions.appendChild(mk("#＋", "Create channel", () => createChannelFlow(server)));
+  const akDays = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
+  actions.appendChild(mk("⏲", akDays ? `Auto-kick after ${akDays}d — click to change` : "Auto-kick inactive members", () => autoKickFlow(server)));
 
   const lbl = el("div", "group-label");
   lbl.appendChild(el("span", null, "Text Channels"));
@@ -597,6 +599,20 @@ function renderMembers() {
     }
     wrap.appendChild(row);
   }
+}
+
+async function autoKickFlow(server) {
+  const root = store.rootOf(server);
+  if (!root) return ui.say("Unknown server root.");
+  const cur = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
+  const ans = ui.ask("Auto-remove members inactive for how many days? (0 = off)", String(cur));
+  if (ans == null) return;
+  const days = parseFloat(ans) || 0;
+  try {
+    await api.post("/api/autokick", { server: root, days });
+    ui.sys(days > 0 ? `Auto-kick set to ${days} day(s) of inactivity.` : "Auto-kick disabled.");
+    refreshChannels();
+  } catch (e) { ui.say("Could not set auto-kick (host only): " + e.message); }
 }
 
 async function removeMemberFlow(channelTarget, memberFp) {

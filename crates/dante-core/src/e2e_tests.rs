@@ -690,3 +690,63 @@ async fn host_removes_a_member_from_a_channel() {
     assert!(host.poll_channels(now).await.unwrap().is_empty());
     assert!(alice.poll_channels(now).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn inactivity_auto_kick() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    for _ in 0..4 {
+        host.receive_all(now).await.unwrap();
+        alice.receive_all(now).await.unwrap();
+    }
+    host.send_channel(&chan, "hi", now).await.unwrap();
+    assert_eq!(alice.poll_channels(now).await.unwrap().len(), 1);
+
+    let window = 10_000u64;
+    host.set_auto_kick(&server, Some(window)).unwrap();
+    assert_eq!(host.auto_kick_window(&server), Some(window));
+
+    // Within the window: nobody is swept.
+    assert!(host
+        .sweep_inactive_members(now + 5_000)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Past the window: Alice (no fresh ledger activity) is removed; the host is
+    // never swept.
+    let later = now + window + 5_000;
+    let kicked = host.sweep_inactive_members(later).await.unwrap();
+    assert_eq!(kicked, vec![alice_id]);
+
+    for _ in 0..4 {
+        alice.receive_all(later).await.unwrap();
+    }
+    host.send_channel(&chan, "after auto-kick", later)
+        .await
+        .unwrap();
+    assert!(
+        alice.poll_channels(later).await.unwrap().is_empty(),
+        "auto-kicked member is locked out"
+    );
+    // Idempotent: a second sweep finds nothing to do.
+    assert!(host.sweep_inactive_members(later).await.unwrap().is_empty());
+
+    // Clearing the window disables it.
+    host.set_auto_kick(&server, None).unwrap();
+    assert_eq!(host.auto_kick_window(&server), None);
+}

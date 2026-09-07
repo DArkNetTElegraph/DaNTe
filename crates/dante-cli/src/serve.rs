@@ -7,7 +7,8 @@
 //! `POST /api/server {name}`, `POST /api/channel {server,name}`,
 //! `POST /api/invite {channel,peer}`, `POST /api/invite-link
 //! {channel,ttl_secs,max_uses}`, `POST /api/redeem {link}`, `POST /api/remove
-//! {channel,member}`, `GET /api/typing`, `POST /api/typing {to}`.
+//! {channel,member}`, `POST /api/autokick {server,days}`, `GET /api/typing`,
+//! `POST /api/typing {to}`.
 
 use std::{
     collections::VecDeque,
@@ -72,6 +73,11 @@ enum Cmd {
         member: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    AutoKick {
+        server: String,
+        days: f64,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
 }
@@ -115,6 +121,8 @@ struct ChanView {
     server: String,
     /// Base32 of the owning server's root key — what `POST /api/channel` wants.
     root: String,
+    /// Auto-kick window for this server in days; `0` = off.
+    auto_kick_days: u64,
 }
 
 struct Shared {
@@ -256,6 +264,7 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
 
         let mut tick = tokio::time::interval(Duration::from_millis(700));
         let mut save_tick = tokio::time::interval(Duration::from_secs(15));
+        let mut sweep_tick = tokio::time::interval(Duration::from_secs(120));
         // Last inbound message time per sender label. A real message supersedes
         // any typing signal that predates it (the relay keeps serving the stale
         // signal for a few seconds, which otherwise flashes "is typing" right
@@ -265,6 +274,15 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
         loop {
             tokio::select! {
                 _ = save_tick.tick() => { let _ = engine.persist(); }
+
+                _ = sweep_tick.tick() => {
+                    if let Ok(kicked) = engine.sweep_inactive_members(now_ms()).await {
+                        for k in kicked {
+                            eprintln!("auto-kicked inactive member {}", id_b32(&k));
+                        }
+                        refresh_channels(&engine, &engine_shared).await;
+                    }
+                }
 
                 Some(cmd) = cmd_rx.recv() => {
                     handle_cmd(&mut engine, &engine_shared, cmd).await;
@@ -366,6 +384,10 @@ async fn refresh_channels(engine: &Engine, shared: &Shared) {
             name: c.channel_name,
             server: c.server_name,
             root: id_b32(&c.server_root),
+            auto_kick_days: engine
+                .auto_kick_window(&c.server_root)
+                .map(|ms| ms / 86_400_000)
+                .unwrap_or(0),
         })
         .collect();
     *shared.channels.lock().await = views;
@@ -476,6 +498,23 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                     .map(|_| "ok".into())
                     .map_err(|e| e.to_string()),
                 _ => Err("bad channel id or fingerprint".into()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::AutoKick {
+            server,
+            days,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(root) => {
+                    let window = (days > 0.0).then_some((days * 86_400_000.0) as u64);
+                    engine
+                        .set_auto_kick(&root, window)
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(r);
         }
@@ -729,6 +768,24 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::RemoveMember {
                 channel: r.channel,
                 member: r.member,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/autokick") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                #[serde(default)]
+                days: f64,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::AutoKick {
+                server: r.server,
+                days: r.days,
                 reply,
             })
             .await

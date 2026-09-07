@@ -866,6 +866,24 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 }
                 _ => println!("usage: /kick #<channel-id> <fingerprint>"),
             },
+            "leave" => match a {
+                Some(chan) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match parse_fingerprint(chan) {
+                        Ok(cid) => match engine.leave_channel(&cid, now_ms()).await {
+                            Ok(()) => {
+                                if matches!(target, Some(Target::Channel(c)) if *c == cid) {
+                                    *target = None;
+                                }
+                                println!("left");
+                            }
+                            Err(e) => println!("leave failed: {e}"),
+                        },
+                        Err(e) => println!("bad channel id: {e}"),
+                    }
+                }
+                None => println!("usage: /leave #<channel-id>"),
+            },
             "channels" => {
                 for c in engine.channels() {
                     println!(

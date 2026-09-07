@@ -19,8 +19,8 @@
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
 //! `POST /api/emoji/remove {server,name}`,
 //! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
-//! `POST /api/contact/remove {peer}`, `GET /api/blocked`,
-//! `POST /api/block {peer}`, `POST /api/unblock {peer}`.
+//! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
+//! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -180,6 +180,11 @@ enum Cmd {
     /// Forget a contact.
     RemoveContact {
         peer: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Leave a joined channel.
+    Leave {
+        channel: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// The blocked identities as a ready JSON array of fingerprints.
@@ -1018,6 +1023,18 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::Leave { channel, reply } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match parse_fingerprint(channel) {
+                Ok(cid) => engine
+                    .leave_channel(&cid, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::Blocked { reply } => {
             let rows: Vec<_> = engine.blocked().into_iter().map(|id| id_b32(&id)).collect();
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
@@ -1599,6 +1616,21 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             };
             dispatch(&mut stream, &shared, |reply| Cmd::RemoveContact {
                 peer: r.peer,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/leave") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Leave {
+                channel: r.channel,
                 reply,
             })
             .await

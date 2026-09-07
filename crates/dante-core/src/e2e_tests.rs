@@ -856,6 +856,73 @@ async fn inactivity_auto_kick() {
 }
 
 #[tokio::test]
+async fn a_member_can_leave_a_channel() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    host.invite_to_channel(&chan, &bob_id, now).await.unwrap();
+    macro_rules! settle {
+        () => {
+            for _ in 0..8 {
+                for e in [&mut host, &mut alice, &mut bob] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+
+    host.send_channel(&chan, "welcome all", now).await.unwrap();
+    for e in [&mut alice, &mut bob] {
+        assert_eq!(
+            e.poll_channels(now)
+                .await
+                .unwrap()
+                .first()
+                .map(|m| m.text.clone()),
+            Some("welcome all".to_string()),
+            "both members keyed before the leave"
+        );
+    }
+
+    // Bob leaves.
+    bob.leave_channel(&chan, now).await.unwrap();
+    assert!(
+        bob.channels().is_empty(),
+        "channel dropped locally on leave"
+    );
+    settle!();
+
+    // The host processed the leave and rekeyed; Alice stays in.
+    host.send_channel(&chan, "just us now", now).await.unwrap();
+    let got = alice.poll_channels(now).await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text, "just us now");
+
+    // A host cannot "leave" its own server this way.
+    assert!(matches!(
+        host.leave_channel(&chan, now).await,
+        Err(crate::CoreError::Channel(_))
+    ));
+}
+
+#[tokio::test]
 async fn blocking_hides_dms_and_channel_messages() {
     let now = now_ms();
     let relay = spawn_relay().await;

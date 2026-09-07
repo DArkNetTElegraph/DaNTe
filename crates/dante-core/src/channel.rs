@@ -184,6 +184,12 @@ pub enum ChannelControl {
         /// The member to remove.
         member: [u8; 32],
     },
+    /// A member tells the channel it is leaving. The host treats it as a
+    /// self-[`ChannelControl::Remove`] (mint a `RemoveOrder`, rekey everyone).
+    Leave {
+        /// The channel being left.
+        channel_id: [u8; 32],
+    },
 }
 
 impl ChannelControl {
@@ -222,6 +228,9 @@ impl ChannelControl {
             ChannelControl::KickRequest { channel_id, member } => {
                 w.u8(6).fixed(channel_id).fixed(member);
             }
+            ChannelControl::Leave { channel_id } => {
+                w.u8(7).fixed(channel_id);
+            }
         }
         w.into_vec()
     }
@@ -257,6 +266,9 @@ impl ChannelControl {
             6 => ChannelControl::KickRequest {
                 channel_id: r.fixed::<32>()?,
                 member: r.fixed::<32>()?,
+            },
+            7 => ChannelControl::Leave {
+                channel_id: r.fixed::<32>()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -362,6 +374,11 @@ mod tests {
             order: vec![1, 2, 3, 4],
         };
         assert_eq!(ChannelControl::decode(&rm.encode()).unwrap(), rm);
+
+        let leave = ChannelControl::Leave {
+            channel_id: [8u8; 32],
+        };
+        assert_eq!(ChannelControl::decode(&leave.encode()).unwrap(), leave);
 
         assert!(ChannelControl::decode(&[9]).is_err());
     }

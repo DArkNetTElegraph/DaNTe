@@ -202,6 +202,14 @@ DaNTe/
   `dante chat`: `/safety <fp>`, `/verify <fp> [off]`. `dante serve`:
   `GET /api/safety?peer=` / `POST /api/verify`, with a per-DM shield (🛡️/⚠️)
   and a compare dialog in the SPA.
+- **Leave channel** *(done)*: `ChannelControl::Leave { channel_id }` (tag 7).
+  `Engine::leave_channel` DMs it to every other member and drops all local
+  state for the channel (and the server policy if no channels remain); the
+  host turns it into a self-`Remove` (mint a `RemoveOrder`, O(n) rekey) so
+  post-leave messages stay private. A host can't leave its own server this way
+  (`delete_channel` is the path). `dante chat`: `/leave #<chan>`.
+  `dante serve`: `POST /api/leave {channel}`; SPA 🚪 header button (hidden for
+  the owner).
 - **Block list** *(done)*: `Engine.blocked` (set of `IdentityId` bytes,
   persisted, local-only). `block` / `unblock` / `is_blocked` / `blocked`.
   Receive-side enforcement: `receive_all` drops the whole envelope from a

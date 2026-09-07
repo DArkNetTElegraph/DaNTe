@@ -20,7 +20,6 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::{Context, Result};
 use dante_core::Engine;
 use dante_crypto::{pow::Difficulty, sign::SignPublic};
-use dante_dm::PreKeySecrets;
 use dante_identity::{id::IdentityId, keystore, Identity};
 use dante_ledger::LedgerParams;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -138,15 +137,22 @@ async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
         t_cost: 1,
         bits,
     };
+
+    // Encrypted local store: <keystore>.state by default, --state to override,
+    // --no-state to run stateless.
+    let store_path = if flags.contains_key("no-state") {
+        None
+    } else if let Some(p) = flags.get("state") {
+        Some(std::path::PathBuf::from(p))
+    } else {
+        Some(std::path::PathBuf::from(format!(
+            "{}.state",
+            arg_value(flags, "keystore")?
+        )))
+    };
+
     eprintln!("connecting to relay {relay} (proof of work: {bits} bits) ...");
-    Ok(Engine::connect(
-        identity,
-        PreKeySecrets::generate(50),
-        &relay,
-        params,
-        difficulty,
-    )
-    .await?)
+    Ok(Engine::connect(identity, &relay, params, difficulty, store_path).await?)
 }
 
 fn cmd_gen(flags: &HashMap<String, String>) -> Result<()> {
@@ -179,12 +185,34 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     let mut engine = connect_engine(flags).await?;
     let my_fp = engine.identity().id().to_base32();
 
-    eprintln!("announcing ...");
-    engine.announce(&hint, now_ms()).await?;
+    if engine.announce_if_stale(&hint, now_ms()).await? {
+        eprintln!("announced.");
+    } else {
+        eprintln!("resumed (announced recently; no proof of work).");
+    }
     engine.publish_prekeys().await?;
     engine.sync(now_ms()).await?;
 
     println!("you are {my_fp}");
+    if !engine.history().is_empty() {
+        println!(
+            "-- {} earlier message(s) in this store --",
+            engine.history().len()
+        );
+        for h in engine.history() {
+            let who = if h.outgoing {
+                "you".to_string()
+            } else {
+                short_fp(&h.peer_idk)
+            };
+            match &h.kind {
+                dante_core::HistoryKind::Text(t) => println!("<{who}> {t}"),
+                dante_core::HistoryKind::File { filename, size } => {
+                    println!("<{who}> [file: {filename} ({size} bytes)]")
+                }
+            }
+        }
+    }
     println!(
         "commands: /to <fingerprint>   /file <path>   /whoami   /peer   /quit\n\
          (received files are written to ./dante-recv-<name>)"
@@ -192,10 +220,12 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut tick = tokio::time::interval(Duration::from_secs(2));
+    let mut save_tick = tokio::time::interval(Duration::from_secs(15));
     let mut peer: Option<[u8; 32]> = None;
 
     loop {
         tokio::select! {
+            _ = save_tick.tick() => { let _ = engine.persist(); }
             _ = tick.tick() => {
                 let now = now_ms();
                 let _ = engine.sync(now).await;
@@ -239,6 +269,9 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
             }
             _ = tokio::signal::ctrl_c() => break,
         }
+    }
+    if let Err(e) = engine.persist() {
+        eprintln!("warning: could not save state: {e}");
     }
     eprintln!("bye");
     Ok(())

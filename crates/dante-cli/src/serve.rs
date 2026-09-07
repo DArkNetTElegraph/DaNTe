@@ -93,9 +93,38 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
     let engine_shared = Arc::clone(&shared);
     tokio::spawn(async move {
         let mut engine = engine;
+        let mut seq: u64 = 0;
+
+        // Replay stored history into the inbox so the SPA shows past messages.
+        {
+            let mut inbox = engine_shared.inbox.lock().await;
+            for h in engine.history() {
+                seq += 1;
+                let from = if h.outgoing {
+                    "you".to_string()
+                } else {
+                    short_fp(&h.peer_idk)
+                };
+                inbox.push_back(match &h.kind {
+                    dante_core::HistoryKind::Text(t) => Item::Message {
+                        seq,
+                        from,
+                        text: t.clone(),
+                    },
+                    dante_core::HistoryKind::File { filename, size } => Item::File {
+                        seq,
+                        from,
+                        filename: filename.clone(),
+                        size: *size as usize,
+                        saved: String::new(),
+                    },
+                });
+            }
+        }
+
         eprintln!("announcing to the relay ...");
         if let Err(e) = async {
-            engine.announce("", now_ms()).await?;
+            engine.announce_if_stale("", now_ms()).await?;
             engine.publish_prekeys().await?;
             engine.sync(now_ms()).await?;
             Ok::<_, dante_core::CoreError>(())
@@ -104,13 +133,14 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
         {
             eprintln!("engine startup error: {e}");
         } else {
-            eprintln!("announced; ready");
+            eprintln!("ready");
         }
 
-        let mut seq: u64 = 0;
         let mut tick = tokio::time::interval(Duration::from_secs(2));
+        let mut save_tick = tokio::time::interval(Duration::from_secs(15));
         loop {
             tokio::select! {
+                _ = save_tick.tick() => { let _ = engine.persist(); }
                 Some(cmd) = cmd_rx.recv() => match cmd {
                     Cmd::Send { to, text, reply } => {
                         let r = match parse_fingerprint(&to) {

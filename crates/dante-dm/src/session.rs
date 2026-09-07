@@ -6,7 +6,7 @@ use dante_proto::enc::{Reader, WireError, Writer};
 
 use crate::{
     error::DmError,
-    ratchet::{Header, Ratchet},
+    ratchet::{Header, Ratchet, RatchetState},
     x3dh::{self, PreKeyBundle, PreKeySecrets},
 };
 
@@ -194,6 +194,49 @@ impl Session {
     pub fn decrypt(&mut self, msg: &DmMessage) -> Result<Vec<u8>, DmError> {
         self.ratchet.decrypt(&msg.header, &msg.ciphertext, &self.ad)
     }
+
+    /// Snapshot for the encrypted local store. **Secret.**
+    pub fn export(&self) -> SessionState {
+        SessionState {
+            ratchet: self.ratchet.export(),
+            ad: self.ad.clone(),
+        }
+    }
+
+    /// Restore a session from a snapshot.
+    pub fn import(state: SessionState) -> Self {
+        Self {
+            ratchet: Ratchet::import(state.ratchet),
+            ad: state.ad,
+        }
+    }
+}
+
+/// A serializable snapshot of a [`Session`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct SessionState {
+    /// The ratchet snapshot.
+    pub ratchet: RatchetState,
+    /// The session associated data (`IK_a || IK_b`).
+    pub ad: Vec<u8>,
+}
+
+impl SessionState {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.bytes(&self.ratchet.encode()).bytes(&self.ad);
+        w.into_vec()
+    }
+
+    /// Decode.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(bytes);
+        let ratchet = RatchetState::decode(r.bytes()?)?;
+        let ad = r.bytes()?.to_vec();
+        r.finish()?;
+        Ok(Self { ratchet, ad })
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +291,41 @@ mod tests {
         assert_eq!(bob_pks.otps_remaining(), before - 1);
         // replaying the same init (same OTP) now fails
         assert!(Session::accept(&bob, &mut bob_pks, &init).is_err());
+    }
+
+    #[test]
+    fn session_survives_export_import_and_keeps_ratcheting() {
+        let (alice, bob, mut bob_pks, bundle) = setup();
+        let (a, init) = Session::initiate(&alice, &bundle, b"m0").unwrap();
+        let (b, first) = Session::accept(&bob, &mut bob_pks, &init).unwrap();
+        assert_eq!(first, b"m0");
+
+        // snapshot both, drop, restore -- exercising encode/decode
+        let mut a = {
+            let bytes = a.export().encode();
+            drop(a);
+            Session::import(SessionState::decode(&bytes).unwrap())
+        };
+        let mut b = {
+            let bytes = b.export().encode();
+            drop(b);
+            Session::import(SessionState::decode(&bytes).unwrap())
+        };
+
+        let m1 = a.encrypt(b"after reload from alice").unwrap();
+        assert_eq!(b.decrypt(&m1).unwrap(), b"after reload from alice");
+        let m2 = b.encrypt(b"and a reply").unwrap();
+        assert_eq!(a.decrypt(&m2).unwrap(), b"and a reply");
+    }
+
+    #[test]
+    fn prekey_secrets_survive_export_import() {
+        let pks = PreKeySecrets::generate(6);
+        let state = pks.export();
+        let restored =
+            PreKeySecrets::import(x3dh::PreKeySecretsState::decode(&state.encode()).unwrap());
+        assert_eq!(restored.otps_remaining(), 6);
+        assert_eq!(restored.spk_public(), pks.spk_public());
     }
 
     #[test]

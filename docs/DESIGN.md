@@ -35,11 +35,14 @@ achievable with no project-run infrastructure.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 
+- **Persistence** (`dante-core`): encrypted local store — sessions, prekey
+  secrets, message history, cursors survive a restart; `chat` / `serve` skip
+  the announce PoW when recently done.
+
 **Not built yet:** libp2p/DHT + multi-relay gossip (Phase 3 deferred); channels
 wired end-to-end into `Engine`/clients (Phase 6 plumbing — the crypto exists);
 voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
-soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client;
-encrypted local message/session persistence (the CLI re-announces each run).
+soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client.
 
 ## Decisions (locked)
 
@@ -130,9 +133,15 @@ DaNTe/
   (per-file XChaCha20-Poly1305 key, per-chunk nonce, signed manifest of
   ciphertext-chunk hashes), relay `PutBlob`/`GetBlob` TTL'd blob store,
   `Engine::send_file` / `receive_all`, `dante chat /file <path>`.
-- **Deferred:** encrypted local message store (`rusqlite`); petname assignment
-  UI. Safety-number verification exists in `dante-identity`; wiring it into a
-  client flow is Phase 5.
+- **Done:** encrypted local store (`dante_core::store`) — one atomically-rewritten
+  file, XChaCha20-Poly1305 under an HKDF of the identity's `ratchet_db_key`,
+  holding prekey secrets + every Double Ratchet session + message history +
+  the seen-envelope set + announce/fetch cursors. `dante chat` / `dante serve`
+  persist on a 15 s timer and on exit, restore on start, replay history, and
+  skip the announce PoW when it was done within the day. Not `rusqlite` — a
+  single sealed blob; SQLite is a later scale optimisation.
+- **Deferred:** petname assignment UI. Safety-number verification exists in
+  `dante-identity`; wiring it into a client flow is Phase 5.
 
 ### Phase 5 — Client shell  — **MVP**
 - **Done (interim):** `dante serve` — the engine behind a tiny localhost

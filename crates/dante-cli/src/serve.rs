@@ -192,6 +192,25 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
                     },
                 });
             }
+
+            let names: std::collections::HashMap<[u8; 32], String> = engine
+                .channels()
+                .into_iter()
+                .map(|c| (c.channel_id, c.channel_name))
+                .collect();
+            for e in engine.channel_history() {
+                inbox.push_back(Item::Channel {
+                    seq: engine_shared.next(),
+                    channel: id_b32(&e.channel_id),
+                    channel_name: names.get(&e.channel_id).cloned().unwrap_or_default(),
+                    from: if e.outgoing {
+                        "you".to_string()
+                    } else {
+                        short_id(&e.sender)
+                    },
+                    text: e.text.clone(),
+                });
+            }
         }
 
         eprintln!("announcing to the relay ...");

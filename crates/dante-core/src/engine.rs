@@ -21,7 +21,7 @@ use dante_proto::{envelope::recipient_hint, Envelope, Record};
 use crate::{
     channel::{ChannelControl, ChannelInfo, ChannelMessage},
     error::CoreError,
-    store::{self, HistoryEntry, HistoryKind, PersistedState},
+    store::{self, ChannelHistoryEntry, HistoryEntry, HistoryKind, PersistedState},
 };
 
 /// Default envelope TTL for DMs: 7 days.
@@ -32,6 +32,9 @@ pub const REANNOUNCE_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Cap on persisted seen-envelope tags.
 const SEEN_CAP: usize = 5000;
+
+/// Cap on persisted channel-history lines (oldest dropped first).
+const CHANNEL_HISTORY_CAP: usize = 2000;
 
 /// A decrypted inbound direct message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +88,7 @@ pub struct Engine {
     hosted: HashMap<[u8; 32], HostedServer>,
     seen_envelopes: HashSet<[u8; 32]>,
     history: Vec<HistoryEntry>,
+    channel_history: Vec<ChannelHistoryEntry>,
     pow: Difficulty,
     last_fetch_since_ms: u64,
     last_announce_ms: u64,
@@ -121,6 +125,7 @@ impl Engine {
             hosted: HashMap::new(),
             seen_envelopes: HashSet::new(),
             history: Vec::new(),
+            channel_history: Vec::new(),
             pow,
             last_fetch_since_ms: 0,
             last_announce_ms: 0,
@@ -137,6 +142,7 @@ impl Engine {
                 .collect();
             engine.seen_envelopes = s.seen_envelopes.into_iter().collect();
             engine.history = s.history;
+            engine.channel_history = s.channel_history;
             engine.last_fetch_since_ms = s.last_fetch_since_ms;
             engine.last_announce_ms = s.last_announce_ms;
             for c in s.channels {
@@ -176,6 +182,12 @@ impl Engine {
     /// Conversation history restored from and appended to the local store.
     pub fn history(&self) -> &[HistoryEntry] {
         &self.history
+    }
+
+    /// Channel history restored from and appended to the local store, oldest
+    /// first.
+    pub fn channel_history(&self) -> &[ChannelHistoryEntry] {
+        &self.channel_history
     }
 
     /// Flush state to the store file if anything changed since the last flush.
@@ -219,6 +231,7 @@ impl Engine {
                 })
                 .collect(),
             history: self.history.clone(),
+            channel_history: self.channel_history.clone(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -408,7 +421,7 @@ impl Engine {
         &mut self,
         channel_id: &[u8; 32],
         text: &str,
-        _now_ms: u64,
+        now_ms: u64,
     ) -> Result<(), CoreError> {
         let ch = self
             .channels
@@ -416,16 +429,32 @@ impl Engine {
             .ok_or(CoreError::UnknownChannel)?;
         let gm = ch.group.encrypt(&Content::Text(text.to_owned()).encode());
         sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
+        self.push_channel_history(ChannelHistoryEntry {
+            channel_id: *channel_id,
+            sender: self.my_member_id(),
+            outgoing: true,
+            ts_ms: now_ms,
+            text: text.to_owned(),
+        });
         self.dirty = true;
         Ok(())
     }
 
+    fn push_channel_history(&mut self, e: ChannelHistoryEntry) {
+        self.channel_history.push(e);
+        if self.channel_history.len() > CHANNEL_HISTORY_CAP {
+            let overflow = self.channel_history.len() - CHANNEL_HISTORY_CAP;
+            self.channel_history.drain(..overflow);
+        }
+    }
+
     /// Poll every channel's relay log and return newly decrypted messages
     /// (excluding our own).
-    pub async fn poll_channels(&mut self, _now_ms: u64) -> Result<Vec<ChannelMessage>, CoreError> {
+    pub async fn poll_channels(&mut self, now_ms: u64) -> Result<Vec<ChannelMessage>, CoreError> {
         let me = self.my_member_id();
         let ids: Vec<[u8; 32]> = self.channels.keys().copied().collect();
         let mut out = Vec::new();
+        let mut new_history = Vec::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
             let entries = sync::fetch_channel(&mut self.client, &id, since).await?;
@@ -441,6 +470,13 @@ impl Engine {
                     match ch.group.decrypt(&gm) {
                         Ok(pt) => {
                             if let Ok(Content::Text(text)) = Content::decode(&pt) {
+                                new_history.push(ChannelHistoryEntry {
+                                    channel_id: id,
+                                    sender: gm.sender,
+                                    outgoing: false,
+                                    ts_ms: now_ms,
+                                    text: text.clone(),
+                                });
                                 out.push(ChannelMessage {
                                     channel_id: id,
                                     channel_name: ch.info.channel_name.clone(),
@@ -455,6 +491,9 @@ impl Engine {
             }
         }
         if !out.is_empty() {
+            for e in new_history {
+                self.push_channel_history(e);
+            }
             self.dirty = true;
         }
         Ok(out)

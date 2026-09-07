@@ -3,6 +3,12 @@
 **/*.rs.bk
 Cargo.lock.orig
 
+# cargo-fuzz build artefacts + generated corpus (targets are tracked)
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/Cargo.lock
+
 # Tauri / client
 /client/node_modules
 /client/dist

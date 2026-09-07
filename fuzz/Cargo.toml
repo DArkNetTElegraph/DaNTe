@@ -1,0 +1,60 @@
+# Coverage-guided fuzzing for the wire decoders. Detached from the main
+# workspace (its own [workspace] table) and NOT a member of the root workspace,
+# so `cargo build/test/clippy --workspace` and CI never touch it.
+#
+#   rustup toolchain install nightly
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run proto_record
+#
+[package]
+name = "dante-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dante-proto = { path = "../crates/dante-proto" }
+dante-dm = { path = "../crates/dante-dm" }
+dante-group = { path = "../crates/dante-group" }
+dante-net = { path = "../crates/dante-net" }
+
+[[bin]]
+name = "proto_record"
+path = "fuzz_targets/proto_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_envelope"
+path = "fuzz_targets/proto_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dm_packet"
+path = "fuzz_targets/dm_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net_wire"
+path = "fuzz_targets/net_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "group_state"
+path = "fuzz_targets/group_state.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -8,6 +8,10 @@ repository.workspace = true
 authors.workspace = true
 description = "Headless DaNTe client for development and demos."
 
+[lib]
+name = "dante_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "dante"
 path = "src/main.rs"

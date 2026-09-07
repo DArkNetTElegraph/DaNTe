@@ -1,0 +1,39 @@
+# Detached from the main workspace on purpose: Tauri needs system libraries
+# (webkit2gtk / libsoup on Linux, WebView2 on Windows) that are not present in
+# the CI/dev container, so `cargo build --workspace` at the repo root must not
+# try to compile it. Build it explicitly from this directory instead:
+#
+#   cd apps/dante-desktop && cargo tauri dev
+#
+[workspace]
+
+[package]
+name = "dante-desktop"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+description = "DaNTe desktop shell — the dante-cli engine + web UI in a native window."
+publish = false
+
+[[bin]]
+name = "dante-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The engine + HTTP/JSON API + embedded SPA, reused verbatim.
+dante-cli = { path = "../../crates/dante-cli" }
+dante-core = { path = "../../crates/dante-core" }
+dante-crypto = { path = "../../crates/dante-crypto" }
+dante-identity = { path = "../../crates/dante-identity" }
+dante-ledger = { path = "../../crates/dante-ledger" }
+
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+anyhow = "1"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -382,8 +382,22 @@ fn parse_target(to: &str) -> Result<(bool, [u8; 32]), String> {
 }
 
 /// Entry point for the `serve` subcommand. `existing` is `Some` when a keystore
-/// was already loaded; `None` starts the page in onboarding mode.
+/// was already loaded; `None` starts the page in onboarding mode. Binds
+/// `http_addr` and serves forever.
 pub async fn run(existing: Option<Engine>, http_addr: &str, boot: Bootstrap) -> Result<()> {
+    let listener = TcpListener::bind(http_addr)
+        .await
+        .with_context(|| format!("binding {http_addr}"))?;
+    run_on(existing, listener, boot).await
+}
+
+/// Like [`run`] but takes an already-bound listener — the desktop shell binds
+/// an ephemeral port first so it can point the webview at it.
+pub async fn run_on(
+    existing: Option<Engine>,
+    listener: TcpListener,
+    boot: Bootstrap,
+) -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(32);
     let shared = Arc::new(Shared {
         inbox: Mutex::new(VecDeque::new()),
@@ -398,9 +412,10 @@ pub async fn run(existing: Option<Engine>, http_addr: &str, boot: Bootstrap) -> 
         pending_rx: Mutex::new(Some(cmd_rx)),
     });
 
-    let listener = TcpListener::bind(http_addr)
-        .await
-        .with_context(|| format!("binding {http_addr}"))?;
+    let http_addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "127.0.0.1:?".into());
 
     if let Some(engine) = existing {
         {

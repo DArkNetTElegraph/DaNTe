@@ -342,8 +342,8 @@ name = "dante-ledger"
 version = "0.0.1"
 dependencies = [
  "dante-crypto",
+ "dante-identity",
  "dante-proto",
- "serde",
  "thiserror",
 ]
 

@@ -187,6 +187,9 @@ impl LivenessProof {
 /// old one. The record's `author`/`sig` are the **new** `idk`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyRotation {
+    /// The key being rotated away from — the current chain tip. Lets a verifier
+    /// locate the old key without scanning every identity.
+    pub prev_idk: [u8; 32],
     /// New Ed25519 identity key.
     pub new_idk: [u8; 32],
     /// New X25519 agreement key.
@@ -200,34 +203,38 @@ pub struct KeyRotation {
 
 impl KeyRotation {
     /// Input the old key signs to link itself to the new keys:
-    /// `SHA-256(domain || new_idk || new_ik)`.
-    pub fn link_challenge(new_idk: &[u8; 32], new_ik: &[u8; 32]) -> [u8; 32] {
-        sha256_parts(&[ROTATION_LINK_DOMAIN, new_idk, new_ik])
+    /// `SHA-256(domain || prev_idk || new_idk || new_ik)`.
+    pub fn link_challenge(prev_idk: &[u8; 32], new_idk: &[u8; 32], new_ik: &[u8; 32]) -> [u8; 32] {
+        sha256_parts(&[ROTATION_LINK_DOMAIN, prev_idk, new_idk, new_ik])
     }
 
     /// Build a rotation from `old` to `new`.
     pub fn build(old: &Identity, new: &Identity) -> Self {
+        let prev_idk = old.sign_public().to_bytes();
         let new_idk = new.sign_public().to_bytes();
         let new_ik = new.agree_public().to_bytes();
         Self {
+            prev_idk,
             new_idk,
             new_ik,
             new_ik_sig: new.sign(&new_ik),
-            link_sig: old.sign(&Self::link_challenge(&new_idk, &new_ik)),
+            link_sig: old.sign(&Self::link_challenge(&prev_idk, &new_idk, &new_ik)),
         }
     }
 
-    /// Verify both signatures: `new_ik` is bound to `new_idk`, and `old_idk`
-    /// endorsed the new keys.
-    pub fn verify(&self, old_idk: &SignPublic) -> Result<(), IdentityError> {
+    /// Verify both signatures against the declared `prev_idk`: `new_ik` is bound
+    /// to `new_idk`, and the previous key endorsed the new keys.
+    pub fn verify(&self) -> Result<(), IdentityError> {
         let new_idk =
             SignPublic::from_bytes(&self.new_idk).map_err(|_| IdentityError::BadSignature)?;
+        let prev_idk =
+            SignPublic::from_bytes(&self.prev_idk).map_err(|_| IdentityError::BadSignature)?;
         new_idk
             .verify(&self.new_ik, &self.new_ik_sig)
             .map_err(|_| IdentityError::BadSignature)?;
-        old_idk
+        prev_idk
             .verify(
-                &Self::link_challenge(&self.new_idk, &self.new_ik),
+                &Self::link_challenge(&self.prev_idk, &self.new_idk, &self.new_ik),
                 &self.link_sig,
             )
             .map_err(|_| IdentityError::BadSignature)
@@ -235,8 +242,9 @@ impl KeyRotation {
 
     /// Encode the body.
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::with_capacity(32 + 32 + SIG_LEN + SIG_LEN);
-        w.fixed(&self.new_idk)
+        let mut w = Writer::with_capacity(32 + 32 + 32 + SIG_LEN + SIG_LEN);
+        w.fixed(&self.prev_idk)
+            .fixed(&self.new_idk)
             .fixed(&self.new_ik)
             .fixed(&self.new_ik_sig)
             .fixed(&self.link_sig);
@@ -246,12 +254,14 @@ impl KeyRotation {
     /// Decode the body.
     pub fn decode(bytes: &[u8]) -> Result<Self, IdentityError> {
         let mut r = Reader::new(bytes);
+        let prev_idk = r.fixed::<32>()?;
         let new_idk = r.fixed::<32>()?;
         let new_ik = r.fixed::<32>()?;
         let new_ik_sig = r.fixed::<SIG_LEN>()?;
         let link_sig = r.fixed::<SIG_LEN>()?;
         r.finish()?;
         Ok(Self {
+            prev_idk,
             new_idk,
             new_ik,
             new_ik_sig,
@@ -384,20 +394,23 @@ mod tests {
         let old = Identity::generate(0);
         let new = Identity::generate(0);
         let rot = KeyRotation::build(&old, &new);
-        rot.verify(&old.sign_public()).unwrap();
+        rot.verify().unwrap();
         assert_eq!(rot.new_idk, new.sign_public().to_bytes());
+        assert_eq!(rot.prev_idk, old.sign_public().to_bytes());
 
         let back = KeyRotation::decode(&rot.encode()).unwrap();
         assert_eq!(rot, back);
-        back.verify(&old.sign_public()).unwrap();
+        back.verify().unwrap();
 
-        // wrong "old" key
+        // substituted prev_idk (link_sig no longer matches)
         let impostor = Identity::generate(0);
-        assert!(rot.verify(&impostor.sign_public()).is_err());
+        let mut wrong_prev = rot.clone();
+        wrong_prev.prev_idk = impostor.sign_public().to_bytes();
+        assert!(wrong_prev.verify().is_err());
         // tampered new_ik
         let mut bad = rot.clone();
         bad.new_ik[0] ^= 1;
-        assert!(bad.verify(&old.sign_public()).is_err());
+        assert!(bad.verify().is_err());
     }
 
     #[test]
@@ -430,7 +443,10 @@ mod tests {
         assert_eq!(rec.author, new.sign_public().to_bytes());
         rec.verify_signature().unwrap();
         match IdentityRecord::from_record(&rec).unwrap() {
-            IdentityRecord::KeyRotation(b) => b.verify(&old.sign_public()).unwrap(),
+            IdentityRecord::KeyRotation(b) => {
+                assert_eq!(b.prev_idk, old.sign_public().to_bytes());
+                b.verify().unwrap();
+            }
             _ => panic!("wrong variant"),
         }
     }

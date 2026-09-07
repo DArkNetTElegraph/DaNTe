@@ -6,13 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "DaNTe verifiable append-only log: records, Merkle tree, proofs, evaporation GC, replication."
+description = "DaNTe verifiable append-only log: record acceptance, Merkle proofs, evaporation GC, server registry."
 
 [dependencies]
 dante-crypto.workspace = true
 dante-proto.workspace = true
+dante-identity.workspace = true
 thiserror.workspace = true
-serde.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

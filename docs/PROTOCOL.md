@@ -106,7 +106,7 @@ Acceptance rules (all MUST pass):
 |---|---|---|
 | 1 | `IdentityAnnounce` | `{ ik_pub: [u8;32], ik_sig: [u8;64], pow: PowProof, display_hint: string(<=64) }` — `ik_sig` is `idk` over `ik_pub`. `author` = `idk` pubkey. `pow` binds to `H(author || ik_pub)`. |
 | 2 | `LivenessProof` | `{ pow: PowProof }` — `pow` binds to `H(author || created_ms_bucket)` where the bucket is `created_ms / LIVENESS_BUCKET_MS`. Re-announces the identity is active. |
-| 3 | `KeyRotation` | `{ new_idk: [u8;32], new_ik: [u8;32], new_ik_sig: [u8;64], link_sig: [u8;64] }` — `link_sig` is the **old** `idk` over `H(new_idk || new_ik)`; `sig`/`author` are the new key. Establishes a verifiable chain across rotation. `IdentityId` is pinned to the *first* `idk` in the chain. |
+| 3 | `KeyRotation` | `{ prev_idk: [u8;32], new_idk: [u8;32], new_ik: [u8;32], new_ik_sig: [u8;64], link_sig: [u8;64] }` — `prev_idk` is the current chain tip being rotated away from (so a verifier can locate the old key in O(1)); `new_ik_sig` is `new_idk` over `new_ik`; `link_sig` is `prev_idk` over `H("dante/key-rotation/link/v1" ‖ prev_idk ‖ new_idk ‖ new_ik)`; `sig`/`author` are the new key. Establishes a verifiable chain across rotation. `IdentityId` is pinned to the *first* `idk` in the chain. |
 | 4 | `ServerRegister` | `{ server_root: [u8;32], name: string(<=64), summary: string(<=280), tags: [string](<=8), entry_relays: [Multiaddr](<=8), discoverable: bool }` — signed by `server_root`. Only listed on the discovery page when `discoverable = true`. |
 | 5 | `ServerDelist` | `{ server_root: [u8;32] }` — signed by `server_root`; removes a prior `ServerRegister` from discovery. |
 

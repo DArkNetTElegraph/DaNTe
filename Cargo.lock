@@ -294,6 +294,10 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "dante-core",
+ "dante-crypto",
+ "dante-dm",
+ "dante-identity",
+ "dante-ledger",
  "tokio",
  "tracing",
  "tracing-subscriber",

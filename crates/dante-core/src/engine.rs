@@ -107,15 +107,23 @@ impl Engine {
         Ok(())
     }
 
-    /// Send a text DM to `peer_idk`. Establishes a session on first contact,
-    /// fetching the peer's prekeys from the relay; thereafter ratchets forward.
+    /// Send a text DM to the identity whose fingerprint (`IdentityId` bytes) is
+    /// `peer_id`. Establishes a session on first contact, fetching the peer's
+    /// prekeys from the relay; thereafter ratchets forward.
+    ///
+    /// The peer must be present in the local ledger replica ([`Engine::sync`]).
     pub async fn send_dm(
         &mut self,
-        peer_idk: &[u8; 32],
+        peer_id: &[u8; 32],
         text: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let peer_id = sha256(peer_idk);
+        let peer_idk = self
+            .ledger
+            .idk_for_id(peer_id)
+            .ok_or(CoreError::UnknownPeer)?;
+        let peer_idk = &peer_idk;
+        let peer_id = *peer_id;
         let peer_ik = self
             .ledger
             .agreement_key(peer_idk)

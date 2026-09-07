@@ -89,12 +89,18 @@ DaNTe/
   protocol is designed to run unchanged over that overlay; until then a client
   syncs the key directory by pulling records from the relay(s) it connects to.
 
-### Phase 4 — E2E 1:1 DMs  (`dante-dm`)  — **MVP**
-- Signed prekey bundles published to DHT/relay; X3DH session init.
-- Double Ratchet: per-message keys, skipped-key handling, root/chain key management.
-- File transfer: per-file random XChaCha20-Poly1305 key, chunked, key sent in-band over the ratchet, sender signature; blob store in relay/DHT with TTL.
-- Encrypted local message store (`rusqlite` + keystore-derived key).
-- Petname assignment + safety-number verification.
+### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
+- **Done:** signed prekey bundles published to the relay; X3DH session init;
+  Double Ratchet (per-message keys, skipped-key handling, root/chain management).
+- **Done:** `dante-core::Engine` — announce / publish-prekeys / sync / send_dm /
+  receive, over the relay; local ledger replica; sealed-sender envelopes;
+  inbound dedup. Integration-tested (two engines + in-process relay) and
+  demoed live between two `dante` CLI processes over TCP through a relay.
+- **Done:** `dante-cli` (`dante gen` / `fp` / `chat`) — a scriptable headless
+  client.
+- **Deferred:** chunked encrypted file transfer; encrypted local message store
+  (`rusqlite`); petname assignment UI. Safety-number verification exists in
+  `dante-identity`; wiring it into a client flow is Phase 5.
 
 ### Phase 5 — Client shell  (`client/`, Tauri + SvelteKit)  — **MVP**
 - Tauri commands bridging `dante-core`.

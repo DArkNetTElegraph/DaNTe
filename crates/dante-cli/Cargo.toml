@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Headless DaNTe client for development and the integration test harness."
+description = "Headless DaNTe client for development and demos."
 
 [[bin]]
 name = "dante"
@@ -14,10 +14,14 @@ path = "src/main.rs"
 
 [dependencies]
 dante-core.workspace = true
+dante-crypto.workspace = true
+dante-identity.workspace = true
+dante-ledger.workspace = true
+dante-dm.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "time", "net", "sync", "signal"] }
 
 [lints.rust]
 unsafe_code = "forbid"

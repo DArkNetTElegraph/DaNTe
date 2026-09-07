@@ -218,6 +218,11 @@ button, input, textarea { font: inherit; color: inherit; }
 .msg-line { color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
 .msg-line.file { color: var(--link); }
 .sys { color: var(--text-faint); font-style: italic; padding: 4px 0; font-size: 13px; }
+.reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.react-chip { border: 1px solid var(--divider); background: var(--bg-input); color: var(--text-muted); border-radius: 10px; padding: 1px 7px; font-size: 12px; cursor: pointer; line-height: 1.5; }
+.react-chip:hover { border-color: var(--cornflower-blue); color: var(--text); }
+.react-chip.on { background: var(--bg-active); border-color: var(--cornflower-blue); color: #fff; }
+.react-chip.add { color: var(--text-faint); }
 .empty { color: var(--text-faint); text-align: center; margin-top: 20vh; }
 
 #typing { height: 22px; padding: 0 18px; font-size: 12px; color: var(--text-muted); font-style: italic; }
@@ -387,6 +392,7 @@ const store = {
   view: LS.get("view", { server: "@dm", target: null }),
   typingText: "",
   policies: {},                       // server root -> policy JSON
+  reactions: {},                      // ref_seq -> [{emoji,count,by}]
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -643,10 +649,46 @@ function renderChat() {
     }
     const g = groupShell(m, m.from === lastAuthor);
     g.body.appendChild(Object.assign(el("div", "msg-line"), { textContent: m.text }));
+    if (target.startsWith("#") && m.ref_seq) renderReactions(g.body, target, m.ref_seq);
     log.appendChild(g.node);
     lastAuthor = m.from;
   }
   log.scrollTop = log.scrollHeight;
+}
+
+const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
+
+function renderReactions(body, channelTarget, refSeq) {
+  const row = el("div", "reacts");
+  const mine = store.me.fingerprint;
+  const list = store.reactions[refSeq] || [];
+  for (const r of list) {
+    const has = (r.by || []).includes(mine);
+    const chip = el("button", "react-chip" + (has ? " on" : ""), r.emoji + " " + r.count);
+    chip.title = (r.by || []).map(short).join(", ");
+    chip.onclick = () => toggleReact(channelTarget, refSeq, r.emoji, has);
+    row.appendChild(chip);
+  }
+  const add = el("button", "react-chip add", "＋");
+  add.title = "Add a reaction";
+  add.onclick = () => {
+    const e = ui.ask("React with which emoji?\n(" + QUICK_EMOJI.join(" ") + " …)", "👍");
+    if (e) toggleReact(channelTarget, refSeq, e, false);
+  };
+  row.appendChild(add);
+  body.appendChild(row);
+}
+
+async function toggleReact(channelTarget, seq, emoji, remove) {
+  try { await api.post("/api/react", { channel: channelTarget, seq, emoji, remove }); }
+  catch (e) { ui.sys("react failed: " + e.message); }
+}
+
+async function refreshReactions() {
+  try {
+    const r = await (await fetch("/api/reactions")).json();
+    if (JSON.stringify(r) !== JSON.stringify(store.reactions)) { store.reactions = r; renderChat(); }
+  } catch (_) {}
 }
 
 function groupShell(m, sameAuthor) {
@@ -1052,6 +1094,7 @@ async function init() {
   setInterval(poll, 700);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
+  setInterval(refreshReactions, 1500);
   setInterval(refreshPolicies, 6000);
 }
 init();

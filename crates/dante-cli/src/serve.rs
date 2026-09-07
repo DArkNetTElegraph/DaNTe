@@ -13,7 +13,8 @@
 //! {server,password}`, `GET /api/typing`, `POST /api/typing {to}`,
 //! `GET /api/state`, `POST /api/onboard {mode,passphrase,blob}`,
 //! `GET /api/discover`, `POST /api/discover {server,on,summary,tags}`,
-//! `POST /api/discover/join {server,password}`.
+//! `POST /api/discover/join {server,password}`, `GET /api/reactions`,
+//! `POST /api/react {channel,seq,emoji,remove}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -130,6 +131,13 @@ enum Cmd {
     },
     /// The public discovery directory as a ready JSON array.
     DiscoverList { reply: oneshot::Sender<String> },
+    React {
+        channel: String,
+        target_seq: u64,
+        emoji: String,
+        remove: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
 }
@@ -155,6 +163,8 @@ enum Item {
         channel_name: String,
         from: String,
         text: String,
+        /// The relay-log seq — what reactions point at; `0` for our own echo.
+        ref_seq: u64,
     },
 }
 
@@ -191,6 +201,13 @@ struct Shared {
     channels: Mutex<Vec<ChanView>>,
     /// Recently-seen typers: `(who label, last-seen ms)`. Pruned on read.
     typing: Mutex<Vec<(String, u64)>>,
+    /// `target_seq -> emoji -> set of member labels`. Live-session only.
+    reactions: Mutex<
+        std::collections::HashMap<
+            u64,
+            std::collections::HashMap<String, std::collections::HashSet<String>>,
+        >,
+    >,
     /// Monotonic id stamped on every inbox item, drawn by both the engine tick
     /// loop and command handlers so the SPA's `since` cursor never regresses.
     next_seq: AtomicU64,
@@ -275,6 +292,7 @@ pub async fn run(existing: Option<Engine>, http_addr: &str, boot: Bootstrap) -> 
         inbox: Mutex::new(VecDeque::new()),
         channels: Mutex::new(Vec::new()),
         typing: Mutex::new(Vec::new()),
+        reactions: Mutex::new(std::collections::HashMap::new()),
         next_seq: AtomicU64::new(0),
         me: Mutex::new((String::new(), String::new())),
         ready: AtomicBool::new(false),
@@ -387,6 +405,7 @@ async fn engine_task(
                     short_id(&e.sender)
                 },
                 text: e.text.clone(),
+                ref_seq: 0,
             });
         }
     }
@@ -447,8 +466,22 @@ async fn engine_task(
                             channel_name: m.channel_name,
                             from,
                             text: m.text,
+                            ref_seq: m.seq,
                         });
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                    }
+                }
+
+                {
+                    let reacts = engine.take_reactions();
+                    if !reacts.is_empty() {
+                        let mut map = engine_shared.reactions.lock().await;
+                        for r in reacts {
+                            let who = short_id(&r.member);
+                            let set = map.entry(r.target_seq).or_default().entry(r.emoji).or_default();
+                            if r.removed { set.remove(&who); } else { set.insert(who); }
+                        }
+                        map.retain(|_, e| { e.retain(|_, s| !s.is_empty()); !e.is_empty() });
                     }
                 }
 
@@ -550,6 +583,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                             channel_name: String::new(),
                             from: "you".into(),
                             text,
+                            ref_seq: 0,
                         });
                     }
                 }
@@ -735,6 +769,24 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 })
                 .collect();
             let _ = reply.send(serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()));
+        }
+        Cmd::React {
+            channel,
+            target_seq,
+            emoji,
+            remove,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match parse_fingerprint(channel) {
+                Ok(cid) => engine
+                    .send_react(&cid, target_seq, &emoji, remove, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
         }
         Cmd::GetPolicy { server, reply } => {
             let json = match engine.server_policy(&server) {
@@ -1095,6 +1147,48 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Redeem {
                 link: r.link,
                 password: r.password,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/reactions") => {
+            let map = shared.reactions.lock().await;
+            let obj: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(seq, emojis)| {
+                    let arr: Vec<_> = emojis
+                        .iter()
+                        .map(|(e, by)| {
+                            let mut v: Vec<&String> = by.iter().collect();
+                            v.sort();
+                            serde_json::json!({ "emoji": e, "count": by.len(), "by": v })
+                        })
+                        .collect();
+                    (seq.to_string(), serde_json::Value::Array(arr))
+                })
+                .collect();
+            let body = serde_json::Value::Object(obj).to_string();
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/react") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                seq: u64,
+                emoji: String,
+                #[serde(default)]
+                remove: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::React {
+                channel: r.channel,
+                target_seq: r.seq,
+                emoji: r.emoji,
+                remove: r.remove,
                 reply,
             })
             .await

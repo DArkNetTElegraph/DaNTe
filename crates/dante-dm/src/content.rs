@@ -22,6 +22,16 @@ pub enum Content {
     /// the receiver shows it for a few seconds and then forgets it. Sending is
     /// gated by a user setting; see `docs/DESIGN.md` Phase 8.
     Typing,
+    /// An emoji reaction to another channel message, identified by its relay-log
+    /// sequence number. `remove` toggles it off.
+    Reaction {
+        /// The `seq` of the message being reacted to.
+        target_seq: u64,
+        /// The emoji (a short UTF-8 string).
+        emoji: String,
+        /// True to withdraw a previously-added reaction.
+        remove: bool,
+    },
 }
 
 impl Content {
@@ -41,6 +51,13 @@ impl Content {
             Content::Typing => {
                 w.u8(4);
             }
+            Content::Reaction {
+                target_seq,
+                emoji,
+                remove,
+            } => {
+                w.u8(5).u64(*target_seq).string(emoji).bool(*remove);
+            }
         }
         w.into_vec()
     }
@@ -53,6 +70,11 @@ impl Content {
             2 => Content::File(FileManifest::decode(r.bytes()?)?),
             3 => Content::Channel(r.bytes()?.to_vec()),
             4 => Content::Typing,
+            5 => Content::Reaction {
+                target_seq: r.u64()?,
+                emoji: r.string()?,
+                remove: r.bool()?,
+            },
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "dm::Content",
@@ -88,6 +110,16 @@ mod tests {
     #[test]
     fn typing_roundtrip() {
         let c = Content::Typing;
+        assert_eq!(Content::decode(&c.encode()).unwrap(), c);
+    }
+
+    #[test]
+    fn reaction_roundtrip() {
+        let c = Content::Reaction {
+            target_seq: 42,
+            emoji: "🔥".into(),
+            remove: true,
+        };
         assert_eq!(Content::decode(&c.encode()).unwrap(), c);
     }
 

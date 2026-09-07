@@ -257,6 +257,75 @@ async fn host_and_member_exchange_channel_messages() {
 }
 
 #[tokio::test]
+async fn three_channel_members_all_key_each_other() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    host.invite_to_channel(&chan, &bob_id, now).await.unwrap();
+
+    // Let the invite + bundle-exchange settle.
+    for _ in 0..8 {
+        for e in [&mut host, &mut alice, &mut bob] {
+            e.sync(now).await.unwrap();
+            e.receive_all(now).await.unwrap();
+        }
+    }
+    assert!(
+        alice.channels().iter().any(|c| c.channel_id == chan),
+        "alice joined"
+    );
+    assert!(
+        bob.channels().iter().any(|c| c.channel_id == chan),
+        "bob joined"
+    );
+
+    // Alice posts; BOTH host and bob decrypt it (bob<->alice were never
+    // directly introduced by the host).
+    alice
+        .send_channel(&chan, "hello from alice", now)
+        .await
+        .unwrap();
+    assert_eq!(
+        bob.poll_channels(now)
+            .await
+            .unwrap()
+            .first()
+            .map(|m| m.text.clone()),
+        Some("hello from alice".to_string())
+    );
+    assert_eq!(
+        host.poll_channels(now)
+            .await
+            .unwrap()
+            .first()
+            .map(|m| m.text.clone()),
+        Some("hello from alice".to_string())
+    );
+
+    // And a typing signal from bob reaches alice.
+    bob.send_typing_channel(&chan, now).await.unwrap();
+    let ev = alice.poll_typing(now).await.unwrap();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].who, bob_id);
+}
+
+#[tokio::test]
 async fn channel_typing_signals_reach_members_without_burning_the_chain() {
     use crate::{TypingEvent, TypingScope};
 

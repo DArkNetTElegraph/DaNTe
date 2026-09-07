@@ -44,8 +44,11 @@ achievable with no project-run infrastructure.
   `invite_to_channel` / `send_channel` / `poll_channels`. Invites + sender-key
   exchange ride authenticated DMs (`Content::Channel`); channel messages go to a
   per-`channel_id` relay log (`PostToChannel` / `FetchChannel`, opaque to the
-  relay). `dante chat`: `/server`, `/channel`, `/invite`, `/channels`,
-  `/to #<id>`. The `serve` web UI lists channels as clickable chips, has
+  relay). Every member ends up keyed to every other member, not just the host:
+  an invite carries reconstructed bundles for all members the host knows, and a
+  member replies with its own bundle the first time it hears a `KeyBundle` from
+  a member it did not have. `dante chat`: `/server`, `/channel`, `/invite`,
+  `/channels`, `/to #<id>`. The `serve` web UI lists channels as clickable chips, has
   create-server / create-channel / invite controls, and routes the composer to
   a channel or a DM peer (`GET /api/channels`, `POST /api/server` / `/channel` /
   `/invite`, `POST /api/send {to:"#<id>"|fingerprint}`). Verified across a relay
@@ -70,9 +73,11 @@ achievable with no project-run infrastructure.
 links, member removal in the client, private-channel access control beyond the
 secret `channel_id`. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
 voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
-soundboards, bots, discovery UI, embeds (Phase 8); member<->member channel keys
-(only host<->member roster propagation is wired today); the Tauri desktop
-client; MLS migration for channels.
+soundboards, bots, discovery UI, embeds (Phase 8); one-time-prekey
+replenishment (the relay hands out one OTP per fetch and clients re-publish
+their remaining set, but nothing mints fresh OTPs once a client's pool drains
+— first contact then falls back to OTP-less X3DH); the Tauri desktop client;
+MLS migration for channels.
 
 **`dante serve` is a throwaway.** It is a hand-rolled HTTP server + a
 single-file vanilla-JS page, built only so the engine has a clickable client

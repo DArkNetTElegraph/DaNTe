@@ -229,7 +229,17 @@ infrastructure. Reached. ---**
   Full role hierarchy and private-channel-per-role-set come with the MLS
   migration.
 - Public text channels: still MLS-encrypted to *members* (passive non-member relays never see plaintext; the member-host does — matches the trust model). History replication via the server relay + hybrid logical clock ordering.
-- Discovery: `ServerRegister` record; private servers simply omit it.
+- **Discovery** *(done)*: `ServerRegister` (kind 4) gained an `invite` field —
+  an unlimited-use `dante-invite:` link the host embeds when it lists a server.
+  `Engine::set_discoverable(root, on, summary, tags)` re-submits the signed
+  record; `discoverable_servers()` reads the ledger replica; `join_discovered`
+  redeems the embedded link (with a join password if the server has one).
+  `serve` `GET`/`POST /api/discover`, `POST /api/discover/join`; CLI
+  `/discover` `/publish` `/joindisc`. Private servers omit the record entirely.
+- **`dante serve` sends a strict CSP** (`default-src 'none'`, same-origin
+  `connect-src`, inline script/style only) plus `X-Frame-Options: DENY`,
+  `nosniff`, `no-referrer` on every response — an injected string cannot pull
+  an external script or exfiltrate cross-origin.
 - **Invite links** *(done)*: `InviteToken { server_root, host_id, channel_id, relay_hint, expires_ms, max_uses, nonce, sig }`, signed by the server root key, rendered `dante-invite:<hex>`. `Engine::create_invite_link` mints one; `redeem_invite` verifies it locally then DMs the host a `ChannelControl::Redeem`; the host checks the signature/expiry/use-count (`invite_uses` map, persisted) and runs the normal channel-invite. The relay is never involved. `serve`: `POST /api/invite-link` / `POST /api/redeem`; CLI: `/invitelink` / `/redeem`.
 - **Member removal** *(done, manual)*: `Engine::remove_from_channel` (host only) mints a server-root-signed `RemoveOrder { server_root, channel_id, member, issued_ms, sig }`, DMs it to every remaining member, drops the member locally, and rotates its own sender chain + signal key (`Group::remove_member`). Each remaining member verifies the order, does the same, and re-keys the others — O(n). The removed member's cached keys go stale; their messages are dropped (`ChannelSession.removed`, persisted; also guards against a stale in-flight `KeyBundle`). **Re-admitting a removed member is not supported** by the sender-keys scheme — recreate the channel (MLS migration fixes this). `serve`: `POST /api/remove`; CLI: `/kick`.
 - **Optional join password** *(gatekeeping done)*: the host stores

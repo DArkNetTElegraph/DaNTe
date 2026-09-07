@@ -489,6 +489,49 @@ function renderRail() {
   join.title = "Join with an invite link";
   join.onclick = redeemFlow;
   rail.appendChild(join);
+
+  const disc = el("button", "rail-btn add", "🧭");
+  disc.title = "Browse public servers";
+  disc.onclick = discoverFlow;
+  rail.appendChild(disc);
+}
+
+async function discoverFlow() {
+  let list;
+  try { list = await api.get("/api/discover"); }
+  catch (e) { return ui.say("Could not load discovery: " + e.message); }
+  if (!list.length) return ui.say("No public servers listed right now.");
+  const menu = list.map((s, i) =>
+    `${i + 1}. ${s.name}${s.summary ? " — " + s.summary : ""}${s.tags && s.tags.length ? "  [" + s.tags.join(", ") + "]" : ""}`
+  ).join("\n");
+  const pick = parseInt(ui.ask("Public servers:\n\n" + menu + "\n\nJoin which number?"), 10);
+  const chosen = list[pick - 1];
+  if (!chosen) return;
+  const password = ui.ask("Server password? (blank if none)") || "";
+  try {
+    await api.post("/api/discover/join", { server: chosen.root, password });
+    ui.sys(`Joining "${chosen.name}" — you'll appear once the host is online.`);
+    setTimeout(refreshChannels, 3000);
+  } catch (e) { ui.say("Join failed: " + e.message); }
+}
+
+async function publishFlow(server) {
+  const root = store.rootOf(server);
+  if (!root) return ui.say("Unknown server root.");
+  if (!confirm("List \"" + server + "\" on the public discovery directory? Anyone will be able to join (subject to a join password if set).")) {
+    // offer to unlist instead
+    if (confirm("Remove it from discovery instead?")) {
+      try { await api.post("/api/discover", { server: root, on: false }); ui.sys("Unlisted."); }
+      catch (e) { ui.say("Failed: " + e.message); }
+    }
+    return;
+  }
+  const summary = ui.ask("Short description (optional):") || "";
+  const tags = (ui.ask("Tags, comma-separated (optional):") || "").split(",").map(t => t.trim()).filter(Boolean);
+  try {
+    await api.post("/api/discover", { server: root, on: true, summary, tags });
+    ui.sys("Server is now public.");
+  } catch (e) { ui.say("Could not publish (host only): " + e.message); }
 }
 
 function renderPane() {
@@ -532,6 +575,7 @@ function renderPane() {
   actions.appendChild(mk("#＋", "Create channel", () => createChannelFlow(server)));
   actions.appendChild(mk("🛡", "Roles", () => rolesFlow(server)));
   actions.appendChild(mk("🔑", "Set a join password", () => joinPwFlow(server)));
+  actions.appendChild(mk("🧭", "List on public discovery", () => publishFlow(server)));
   const akDays = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
   actions.appendChild(mk("⏲", akDays ? `Auto-kick after ${akDays}d — click to change` : "Auto-kick inactive members", () => autoKickFlow(server)));
 

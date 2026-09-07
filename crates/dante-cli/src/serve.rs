@@ -11,7 +11,9 @@
 //! /api/policy?server=`, `POST /api/role {server,id,name,allow,deny,rank}`,
 //! `POST /api/roleassign {server,member,role_id,add}`, `POST /api/joinpw
 //! {server,password}`, `GET /api/typing`, `POST /api/typing {to}`,
-//! `GET /api/state`, `POST /api/onboard {mode,passphrase,blob}`.
+//! `GET /api/state`, `POST /api/onboard {mode,passphrase,blob}`,
+//! `GET /api/discover`, `POST /api/discover {server,on,summary,tags}`,
+//! `POST /api/discover/join {server,password}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -114,6 +116,20 @@ enum Cmd {
         server: [u8; 32],
         reply: oneshot::Sender<String>,
     },
+    Discover {
+        server: String,
+        on: bool,
+        summary: String,
+        tags: Vec<String>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    DiscoverJoin {
+        server: String,
+        password: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The public discovery directory as a ready JSON array.
+    DiscoverList { reply: oneshot::Sender<String> },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
 }
@@ -672,6 +688,54 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::Discover {
+            server,
+            on,
+            summary,
+            tags,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(root) => engine
+                    .set_discoverable(&root, on, &summary, tags, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::DiscoverJoin {
+            server,
+            password,
+            reply,
+        } => {
+            let pw = (!password.is_empty()).then_some(password.as_str());
+            let r = match parse_fingerprint(&server) {
+                Ok(root) => engine
+                    .join_discovered(&root, pw, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::DiscoverList { reply } => {
+            let list: Vec<_> = engine
+                .discoverable_servers()
+                .into_iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "root": id_b32(&s.server_root),
+                        "name": s.name,
+                        "summary": s.summary,
+                        "tags": s.tags,
+                    })
+                })
+                .collect();
+            let _ = reply.send(serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()));
+        }
         Cmd::GetPolicy { server, reply } => {
             let json = match engine.server_policy(&server) {
                 Some(p) => {
@@ -1036,6 +1100,61 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             .await
         }
 
+        ("GET", "/api/discover") => {
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::DiscoverList { reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/discover") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                on: bool,
+                #[serde(default)]
+                summary: String,
+                #[serde(default)]
+                tags: Vec<String>,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Discover {
+                server: r.server,
+                on: r.on,
+                summary: r.summary,
+                tags: r.tags,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/discover/join") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                #[serde(default)]
+                password: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::DiscoverJoin {
+                server: r.server,
+                password: r.password,
+                reply,
+            })
+            .await
+        }
+
         ("POST", "/api/joinpw") => {
             #[derive(serde::Deserialize)]
             struct Req {
@@ -1199,13 +1318,24 @@ async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) ->
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        409 => "Conflict",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         _ => "Status",
     };
+    // The page is one self-contained file with inline script/style and only
+    // same-origin fetches — lock everything else down so an injected string
+    // can't pull in an external script or exfiltrate to another origin.
+    const SEC: &str = "Content-Security-Policy: default-src 'none'; \
+         script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+         connect-src 'self'; img-src 'self' data:; base-uri 'none'; \
+         form-action 'none'; frame-ancestors 'none'\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         X-Frame-Options: DENY\r\n";
     let head = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{SEC}Connection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;

@@ -435,6 +435,7 @@ impl Engine {
             tags: vec![],
             entry_relays: vec![],
             discoverable: false,
+            invite: String::new(),
         };
         let rec = reg.to_record(now_ms, |m| root.sign(m));
         sync::submit_record(&mut self.client, &rec).await?;
@@ -626,6 +627,79 @@ impl Engine {
         self.hosted
             .get(server_root)
             .is_some_and(|h| h.join_pw_hash.is_some())
+    }
+
+    /// List / unlist a server we host on the public discovery directory. When
+    /// listing, an unlimited `dante-invite:` link for the server's first
+    /// channel is minted and embedded so anyone can join. Re-submits a signed
+    /// `ServerRegister` record to the ledger.
+    pub async fn set_discoverable(
+        &mut self,
+        server_root: &[u8; 32],
+        discoverable: bool,
+        summary: &str,
+        tags: Vec<String>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let h = self
+            .hosted
+            .get(server_root)
+            .ok_or(CoreError::NotServerHost)?;
+        let name = h.name.clone();
+        let first_channel = h.channels.first().copied();
+
+        let invite = if discoverable {
+            let ch = first_channel.ok_or(CoreError::Channel("create a channel first"))?;
+            // ~10 years, unlimited uses.
+            self.create_invite_link(&ch, 315_360_000_000, 0, now_ms)?
+        } else {
+            String::new()
+        };
+
+        let root_bytes = self.hosted[server_root].root.to_bytes();
+        let root = SignSecret::from_bytes(&root_bytes);
+        let reg = ServerRegister {
+            server_root: *server_root,
+            name: name.chars().take(64).collect(),
+            summary: summary.chars().take(280).collect(),
+            tags: tags
+                .into_iter()
+                .map(|t| t.chars().take(32).collect())
+                .take(8)
+                .collect(),
+            entry_relays: vec![self.relay_addr.clone()],
+            discoverable,
+            invite,
+        };
+        let rec = reg.to_record(now_ms, |m| root.sign(m));
+        sync::submit_record(&mut self.client, &rec).await?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Public servers currently on the discovery directory (call
+    /// [`Engine::sync`] first to refresh the local replica).
+    pub fn discoverable_servers(&self) -> Vec<ServerRegister> {
+        self.ledger.discoverable_servers()
+    }
+
+    /// Join a server found via [`Engine::discoverable_servers`] by redeeming the
+    /// invite link it published.
+    pub async fn join_discovered(
+        &mut self,
+        server_root: &[u8; 32],
+        password: Option<&str>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let link = self
+            .ledger
+            .discoverable_servers()
+            .into_iter()
+            .find(|s| s.server_root == *server_root)
+            .map(|s| s.invite)
+            .filter(|i| !i.is_empty())
+            .ok_or(CoreError::Channel("that server has no public join link"))?;
+        self.redeem_invite(&link, password, now_ms).await
     }
 
     /// Eject a member from a channel this client hosts. Issues a server-root-

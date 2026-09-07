@@ -8,7 +8,7 @@ use std::{
 };
 
 use dante_crypto::{
-    hash::sha256,
+    hash::{sha256, sha512},
     pow::Difficulty,
     random_array,
     sign::{SignPublic, SignSecret},
@@ -45,6 +45,9 @@ const CHANNEL_HISTORY_CAP: usize = 2000;
 
 /// One-time-prekey pool is refilled to this before each publish.
 const PREKEY_POOL_TARGET: usize = 50;
+
+/// Domain separator for the human-comparable safety number of a DM pair.
+const SAFETY_NUMBER_DOMAIN: &[u8] = b"dante/safety-number/v1";
 
 /// Standing reaction state: `channel_id -> target_seq -> emoji -> members`.
 type ReactionMap = HashMap<[u8; 32], HashMap<u64, HashMap<String, HashSet<[u8; 32]>>>>;
@@ -194,6 +197,10 @@ pub struct Engine {
     /// Persisted: the channel log is only re-polled from `last_seq`, so a
     /// restart would otherwise lose every reaction.
     channel_reactions: ReactionMap,
+    /// DM peers whose safety number the user confirmed out-of-band, keyed by
+    /// stable `IdentityId` bytes and pinned to the peer `idk` that was verified
+    /// (so a later key rotation drops back to unverified). Persisted.
+    verified_peers: HashMap<[u8; 32], [u8; 32]>,
     /// The relay address this engine connected to (embedded in invite links).
     relay_addr: String,
     pow: Difficulty,
@@ -237,6 +244,7 @@ impl Engine {
             server_policies: HashMap::new(),
             new_reactions: Vec::new(),
             channel_reactions: HashMap::new(),
+            verified_peers: HashMap::new(),
             relay_addr: relay_addr.to_owned(),
             pow,
             last_fetch_since_ms: 0,
@@ -295,6 +303,7 @@ impl Engine {
                     .or_default()
                     .insert(member);
             }
+            engine.verified_peers = s.verified_peers.into_iter().collect();
             let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
             let joinpw: HashMap<[u8; 32], [u8; 32]> = s.server_join_pw.into_iter().collect();
             for h in s.hosted {
@@ -403,6 +412,11 @@ impl Engine {
                     })
                 })
                 .collect(),
+            verified_peers: self
+                .verified_peers
+                .iter()
+                .map(|(id, idk)| (*id, *idk))
+                .collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -466,6 +480,65 @@ impl Engine {
     /// chain). A client should refuse to encrypt to a revoked identity.
     pub fn is_revoked(&self, idk: &[u8; 32]) -> bool {
         self.ledger.is_revoked(idk)
+    }
+
+    /// The human-comparable "safety number" for the DM pair (this identity and
+    /// `peer_id`): 60 decimal digits in 12 space-separated groups of 5, derived
+    /// from `SHA-512(domain || min(idk) || max(idk))` over the two current
+    /// signing keys. Order-independent, so both ends display the same string.
+    /// `None` if the peer is unknown or revoked. Read it aloud / scan it out of
+    /// band; a match rules out a MITM'd key exchange.
+    pub fn safety_number(&self, peer_id: &[u8; 32]) -> Option<String> {
+        let peer_idk = self.ledger.idk_for_id(peer_id)?;
+        let mine = self.identity.sign_public().to_bytes();
+        let (lo, hi) = if mine <= peer_idk {
+            (mine, peer_idk)
+        } else {
+            (peer_idk, mine)
+        };
+        let mut buf = Vec::with_capacity(SAFETY_NUMBER_DOMAIN.len() + 64);
+        buf.extend_from_slice(SAFETY_NUMBER_DOMAIN);
+        buf.extend_from_slice(&lo);
+        buf.extend_from_slice(&hi);
+        let h = sha512(&buf);
+
+        let mut groups = Vec::with_capacity(12);
+        for chunk in h[..60].chunks_exact(5) {
+            let mut v = 0u64;
+            for &b in chunk {
+                v = (v << 8) | u64::from(b);
+            }
+            groups.push(format!("{:05}", v % 100_000));
+        }
+        Some(groups.join(" "))
+    }
+
+    /// Mark (or clear) `peer_id` as safety-number-verified. When setting it, the
+    /// peer's current `idk` is pinned; a subsequent key rotation makes
+    /// [`Engine::is_verified`] report `false` again until re-verified.
+    pub fn set_verified(&mut self, peer_id: &[u8; 32], verified: bool) -> Result<(), CoreError> {
+        if verified {
+            let idk = self
+                .ledger
+                .idk_for_id(peer_id)
+                .ok_or(CoreError::UnknownPeer)?;
+            self.verified_peers.insert(*peer_id, idk);
+        } else {
+            self.verified_peers.remove(peer_id);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Whether `peer_id` is verified **and** still on the key that was verified.
+    pub fn is_verified(&self, peer_id: &[u8; 32]) -> bool {
+        match (
+            self.verified_peers.get(peer_id),
+            self.ledger.idk_for_id(peer_id),
+        ) {
+            (Some(pinned), Some(current)) => pinned == &current,
+            _ => false,
+        }
     }
 
     /// Announce on first run, then only re-prove liveness once a day — a

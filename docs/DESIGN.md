@@ -186,8 +186,14 @@ DaNTe/
   persist on a 15 s timer and on exit, restore on start, replay history, and
   skip the announce PoW when it was done within the day. Not `rusqlite` — a
   single sealed blob; SQLite is a later scale optimisation.
-- **Deferred:** petname assignment UI. Safety-number verification exists in
-  `dante-identity`; wiring it into a client flow is Phase 5.
+- **Safety-number verification** *(engine + CLI done)*: `Engine::safety_number`
+  derives a 60-digit pair fingerprint from
+  `SHA-512("dante/safety-number/v1" ‖ min(idk) ‖ max(idk))` (order-independent,
+  both ends match). `set_verified` / `is_verified` persist the confirmation,
+  pinned to the peer `idk` so a key rotation drops it back to unverified.
+  `dante chat`: `/safety <fp>`, `/verify <fp> [off]`. The `dante serve` UI
+  affordance (a per-DM shield + compare dialog) is still to build.
+- **Deferred:** petname assignment UI.
 
 ### Phase 5 — Client shell  — **MVP**
 - **Done (interim):** `dante serve` — the engine behind a tiny localhost

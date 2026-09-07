@@ -148,6 +148,73 @@ async fn a_revoked_identity_can_no_longer_be_messaged() {
 }
 
 #[tokio::test]
+async fn safety_numbers_match_on_both_ends_and_verification_persists() {
+    use dante_identity::keystore;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-safety-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("alice.state");
+
+    let mut bob = engine(&relay).await;
+    let bob_id = *bob.identity().id().as_bytes();
+
+    let alice_ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+    let alice_number;
+    {
+        let mut alice = Engine::connect(
+            keystore::open(&alice_ks, b"pw").unwrap(),
+            &relay,
+            test_params(),
+            D,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap();
+        let alice_id = *alice.identity().id().as_bytes();
+        for e in [&mut alice, &mut bob] {
+            e.announce("", now).await.unwrap();
+            e.publish_prekeys().await.unwrap();
+        }
+        alice.sync(now).await.unwrap();
+        bob.sync(now).await.unwrap();
+
+        alice_number = alice.safety_number(&bob_id).unwrap();
+        // Order-independent: Bob derives the identical string for Alice.
+        assert_eq!(bob.safety_number(&alice_id).unwrap(), alice_number);
+        // 12 groups of 5 digits.
+        assert_eq!(alice_number.split(' ').count(), 12);
+        assert!(alice_number
+            .split(' ')
+            .all(|g| g.len() == 5 && g.bytes().all(|b| b.is_ascii_digit())));
+
+        assert!(!alice.is_verified(&bob_id));
+        alice.set_verified(&bob_id, true).unwrap();
+        assert!(alice.is_verified(&bob_id));
+        alice.persist().unwrap();
+    }
+
+    let mut alice = Engine::connect(
+        keystore::open(&alice_ks, b"pw").unwrap(),
+        &relay,
+        test_params(),
+        D,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    alice.sync(now).await.unwrap();
+    assert!(
+        alice.is_verified(&bob_id),
+        "verification survived the restart"
+    );
+    assert_eq!(alice.safety_number(&bob_id).unwrap(), alice_number);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn alice_sends_bob_an_encrypted_file() {
     let now = now_ms();
     let relay = spawn_relay().await;

@@ -116,6 +116,8 @@ pub struct PersistedState {
     /// Standing channel reactions: `(channel_id, target_seq, emoji, member)`,
     /// one row per member who currently holds that reaction.
     pub channel_reactions: Vec<([u8; 32], u64, String, [u8; 32])>,
+    /// Safety-number-verified DM peers: `(peer IdentityId, pinned idk)`.
+    pub verified_peers: Vec<([u8; 32], [u8; 32])>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -282,6 +284,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for (chan, seq, emoji, member) in &s.channel_reactions {
         w.fixed(chan).u64(*seq).string(emoji).fixed(member);
     }
+
+    w.u32(s.verified_peers.len() as u32);
+    for (id, idk) in &s.verified_peers {
+        w.fixed(id).fixed(idk);
+    }
     w.into_vec()
 }
 
@@ -440,6 +447,15 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut verified_peers = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        verified_peers.reserve(n);
+        for _ in 0..n {
+            verified_peers.push((r.fixed::<32>()?, r.fixed::<32>()?));
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -454,6 +470,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         server_join_pw,
         server_policies,
         channel_reactions,
+        verified_peers,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -517,6 +534,7 @@ mod tests {
                 ([7u8; 32], 12, "👍".into(), [6u8; 32]),
                 ([7u8; 32], 12, "🔥".into(), [5u8; 32]),
             ],
+            verified_peers: vec![([3u8; 32], [4u8; 32])],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -534,6 +552,7 @@ mod tests {
         assert_eq!(back.server_policies, state.server_policies);
         assert_eq!(back.server_join_pw, state.server_join_pw);
         assert_eq!(back.channel_reactions, state.channel_reactions);
+        assert_eq!(back.verified_peers, state.verified_peers);
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
@@ -561,6 +580,7 @@ mod tests {
             server_policies: vec![],
             server_join_pw: vec![],
             channel_reactions: vec![],
+            verified_peers: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

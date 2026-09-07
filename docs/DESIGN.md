@@ -56,8 +56,15 @@ achievable with no project-run infrastructure.
 links, member removal in the client, private-channel access control beyond the
 secret `channel_id`. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
 voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
-soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client;
-MLS migration for channels.
+soundboards, bots, discovery UI, embeds, **typing indicators** (Phase 8); the
+Tauri desktop client; MLS migration for channels.
+
+**`dante serve` is a throwaway.** It is a hand-rolled HTTP server + a
+single-file vanilla-JS page, built only so the engine has a clickable client
+that is verifiable headlessly. It polls `/api/messages` every 2 s, so inbound
+messages land with up to ~2 s of latency — a real client (Tauri, or a rewrite
+with a push transport / SSE / WebSocket) replaces both the transport and the
+visual design. Do not invest in its look.
 
 ## Decisions (locked)
 
@@ -195,6 +202,19 @@ infrastructure. Reached. ---**
 - URL embeds — opt-in (leaks IP); optionally via a relay-side unfurler.
 - Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.
 - Custom profiles, per-server nicknames/avatars — stored in the relevant MLS group state.
+- **Typing indicators.** Ephemeral "is typing" signals, never persisted and never
+  written to the channel log. A keystroke sends an encrypted `typing` control to
+  the DM peer (over the ratchet) or to channel members (over the sender-keys
+  group); it carries a short TTL (~5 s) and is also cancelled on send or on an
+  idle timeout. **Off by default**; a user-settings toggle ("broadcast when I'm
+  typing") gates *sending* — a user who does not broadcast still *sees* others'
+  indicators. Receiver display: one name → "Alice is typing…", two or three →
+  name them, **more than three concurrent → "several people are typing…"** with
+  no names. Rendering is best-effort: a dropped or late signal just means the
+  dots do not show. Metadata note: a typing signal reveals activity timing to
+  exactly the parties that already see message timing (and, for channels, the
+  relay sees another entry on the `channel_id` side channel) — hence opt-in and
+  off by default. Tracked in `THREAT_MODEL.md` §5.
 
 ## Cross-cutting
 - Reproducible builds + signed releases (users must be able to trust binaries).

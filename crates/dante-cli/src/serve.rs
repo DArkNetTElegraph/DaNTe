@@ -236,7 +236,7 @@ pub async fn run(engine: Engine, http_addr: &str) -> Result<()> {
         }
         refresh_channels(&engine, &engine_shared).await;
 
-        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        let mut tick = tokio::time::interval(Duration::from_millis(700));
         let mut save_tick = tokio::time::interval(Duration::from_secs(15));
         loop {
             tokio::select! {

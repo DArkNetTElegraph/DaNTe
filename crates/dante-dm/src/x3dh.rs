@@ -139,6 +139,74 @@ impl PreKeySecrets {
     pub fn otps_remaining(&self) -> usize {
         self.otps.len()
     }
+
+    /// Snapshot the secret halves for the encrypted local store. **Secret.**
+    pub fn export(&self) -> PreKeySecretsState {
+        PreKeySecretsState {
+            spk_secret: self.spk.to_bytes(),
+            otp_secrets: self.otps.iter().map(|o| o.to_bytes()).collect(),
+        }
+    }
+
+    /// Restore from a snapshot.
+    pub fn import(state: PreKeySecretsState) -> Self {
+        Self {
+            spk: AgreeSecret::from_bytes(&state.spk_secret),
+            otps: state
+                .otp_secrets
+                .iter()
+                .map(AgreeSecret::from_bytes)
+                .collect(),
+        }
+    }
+}
+
+/// A serializable snapshot of [`PreKeySecrets`].
+#[derive(Clone)]
+pub struct PreKeySecretsState {
+    spk_secret: [u8; 32],
+    otp_secrets: Vec<[u8; 32]>,
+}
+
+impl PreKeySecretsState {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.fixed(&self.spk_secret).u32(self.otp_secrets.len() as u32);
+        for s in &self.otp_secrets {
+            w.fixed(s);
+        }
+        w.into_vec()
+    }
+
+    /// Decode.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(bytes);
+        let spk_secret = r.fixed::<32>()?;
+        let n = r.u32()? as usize;
+        if n > r.remaining() {
+            return Err(WireError::LengthTooLarge(n as u64));
+        }
+        let mut otp_secrets = Vec::with_capacity(n);
+        for _ in 0..n {
+            otp_secrets.push(r.fixed::<32>()?);
+        }
+        r.finish()?;
+        Ok(Self {
+            spk_secret,
+            otp_secrets,
+        })
+    }
+}
+
+impl Drop for PreKeySecretsState {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.spk_secret.zeroize();
+        for s in &mut self.otp_secrets {
+            s.zeroize();
+        }
+    }
 }
 
 /// Output of a successful handshake, on either side.

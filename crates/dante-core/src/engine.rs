@@ -1,7 +1,11 @@
 //! [`Engine`] — one client's whole world: an identity, a local ledger replica,
-//! a relay connection, prekeys, and live DM sessions.
+//! a relay connection, prekeys, live DM sessions, and (optionally) an encrypted
+//! on-disk store so all of that survives a restart.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use dante_crypto::{hash::sha256, pow::Difficulty};
 use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Session};
@@ -13,10 +17,19 @@ use dante_ledger::{Ledger, LedgerParams, MemoryStore};
 use dante_net::{sync, transport::Client};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
 
-use crate::error::CoreError;
+use crate::{
+    error::CoreError,
+    store::{self, HistoryEntry, HistoryKind, PersistedState},
+};
 
 /// Default envelope TTL for DMs: 7 days.
 pub const DM_TTL_MS: u32 = 7 * 24 * 60 * 60 * 1000;
+
+/// Re-announce / re-prove liveness only if the last one is older than this.
+pub const REANNOUNCE_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Cap on persisted seen-envelope tags.
+const SEEN_CAP: usize = 5000;
 
 /// A decrypted inbound direct message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,38 +65,101 @@ pub struct Engine {
     client: Client,
     sessions: HashMap<[u8; 32], Session>,
     seen_envelopes: HashSet<[u8; 32]>,
+    history: Vec<HistoryEntry>,
     pow: Difficulty,
     last_fetch_since_ms: u64,
+    last_announce_ms: u64,
+    store_path: Option<PathBuf>,
+    dirty: bool,
 }
 
 impl Engine {
-    /// Connect to a relay and build an engine around `identity`.
-    ///
-    /// `pow` is the difficulty used for this client's own announce/liveness
-    /// records; it must meet the network's floor (tests pass a low value).
+    /// Connect to a relay and build an engine around `identity`, restoring
+    /// prior state from `store_path` if that file exists (otherwise a fresh
+    /// prekey set is generated). `pow` is the difficulty for this client's own
+    /// announce/liveness records; it must meet the network's floor.
     pub async fn connect(
         identity: Identity,
-        prekeys: PreKeySecrets,
         relay_addr: &str,
         params: LedgerParams,
         pow: Difficulty,
+        store_path: Option<PathBuf>,
     ) -> Result<Self, CoreError> {
         let client = Client::connect(relay_addr).await?;
-        Ok(Self {
+
+        let restored = match &store_path {
+            Some(p) => store::load(p, &identity)?,
+            None => None,
+        };
+
+        let mut engine = Self {
+            prekeys: PreKeySecrets::generate(50),
             identity,
-            prekeys,
             ledger: Ledger::new(MemoryStore::default(), params),
             client,
             sessions: HashMap::new(),
             seen_envelopes: HashSet::new(),
+            history: Vec::new(),
             pow,
             last_fetch_since_ms: 0,
-        })
+            last_announce_ms: 0,
+            store_path,
+            dirty: false,
+        };
+
+        if let Some(s) = restored {
+            engine.prekeys = PreKeySecrets::import(s.prekeys);
+            engine.sessions = s
+                .sessions
+                .into_iter()
+                .map(|(idk, st)| (idk, Session::import(st)))
+                .collect();
+            engine.seen_envelopes = s.seen_envelopes.into_iter().collect();
+            engine.history = s.history;
+            engine.last_fetch_since_ms = s.last_fetch_since_ms;
+            engine.last_announce_ms = s.last_announce_ms;
+        }
+        Ok(engine)
     }
 
     /// This identity.
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    /// Conversation history restored from and appended to the local store.
+    pub fn history(&self) -> &[HistoryEntry] {
+        &self.history
+    }
+
+    /// Flush state to the store file if anything changed since the last flush.
+    /// A no-op when no store path was configured.
+    pub fn persist(&mut self) -> Result<(), CoreError> {
+        let Some(path) = self.store_path.clone() else {
+            return Ok(());
+        };
+        if !self.dirty {
+            return Ok(());
+        }
+        let mut seen: Vec<[u8; 32]> = self.seen_envelopes.iter().copied().collect();
+        if seen.len() > SEEN_CAP {
+            seen.drain(..seen.len() - SEEN_CAP);
+        }
+        let state = PersistedState {
+            prekeys: self.prekeys.export(),
+            sessions: self
+                .sessions
+                .iter()
+                .map(|(k, s)| (*k, s.export()))
+                .collect(),
+            history: self.history.clone(),
+            seen_envelopes: seen,
+            last_announce_ms: self.last_announce_ms,
+            last_fetch_since_ms: self.last_fetch_since_ms,
+        };
+        store::save(&path, &self.identity, &state)?;
+        self.dirty = false;
+        Ok(())
     }
 
     /// Pull new ledger records from the relay into the local replica. Returns
@@ -106,6 +182,8 @@ impl Engine {
         let rec = IdentityAnnounce::build(&self.identity, display_hint, self.pow)
             .to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
+        self.last_announce_ms = now_ms;
+        self.dirty = true;
         Ok(())
     }
 
@@ -114,7 +192,27 @@ impl Engine {
         let rec = LivenessProof::build(&self.identity, now_ms, self.pow)
             .to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
+        self.last_announce_ms = now_ms;
+        self.dirty = true;
         Ok(())
+    }
+
+    /// Announce on first run, then only re-prove liveness once a day — a
+    /// restored client that announced recently skips the PoW entirely.
+    pub async fn announce_if_stale(
+        &mut self,
+        display_hint: &str,
+        now_ms: u64,
+    ) -> Result<bool, CoreError> {
+        if now_ms.saturating_sub(self.last_announce_ms) <= REANNOUNCE_AFTER_MS {
+            return Ok(false);
+        }
+        if self.last_announce_ms == 0 {
+            self.announce(display_hint, now_ms).await?;
+        } else {
+            self.prove_liveness(now_ms).await?;
+        }
+        Ok(true)
     }
 
     /// Publish this identity's prekey bundle to the relay.
@@ -171,6 +269,13 @@ impl Engine {
             .ledger
             .agreement_key(&peer_idk)
             .ok_or(CoreError::UnknownPeer)?;
+        let history_kind = match &content {
+            Content::Text(t) => HistoryKind::Text(t.clone()),
+            Content::File(m) => HistoryKind::File {
+                filename: m.filename.clone(),
+                size: m.total_size,
+            },
+        };
         let plaintext = content.encode();
 
         let packet = if let Some(session) = self.sessions.get_mut(&peer_idk) {
@@ -200,6 +305,13 @@ impl Engine {
             |m| self.identity.sign(m),
         )?;
         sync::deposit(&mut self.client, &env).await?;
+        self.history.push(HistoryEntry {
+            peer_idk,
+            outgoing: true,
+            ts_ms: now_ms,
+            kind: history_kind,
+        });
+        self.dirty = true;
         Ok(())
     }
 
@@ -255,20 +367,40 @@ impl Engine {
                 }
             };
             match Content::decode(&plaintext) {
-                Ok(Content::Text(text)) => out.push(Inbound::Message(ReceivedDm {
-                    from_idk: from,
-                    text,
-                })),
-                Ok(Content::File(manifest)) => match self.fetch_file(manifest).await {
-                    Ok((filename, data)) => out.push(Inbound::File {
+                Ok(Content::Text(text)) => {
+                    self.history.push(HistoryEntry {
+                        peer_idk: from,
+                        outgoing: false,
+                        ts_ms: now_ms,
+                        kind: HistoryKind::Text(text.clone()),
+                    });
+                    out.push(Inbound::Message(ReceivedDm {
                         from_idk: from,
-                        filename,
-                        data,
-                    }),
+                        text,
+                    }));
+                }
+                Ok(Content::File(manifest)) => match self.fetch_file(manifest).await {
+                    Ok((filename, data)) => {
+                        self.history.push(HistoryEntry {
+                            peer_idk: from,
+                            outgoing: false,
+                            ts_ms: now_ms,
+                            kind: HistoryKind::File {
+                                filename: filename.clone(),
+                                size: data.len() as u64,
+                            },
+                        });
+                        out.push(Inbound::File {
+                            from_idk: from,
+                            filename,
+                            data,
+                        });
+                    }
                     Err(e) => tracing::debug!(error = %e, "dropping file with a failed transfer"),
                 },
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }
+            self.dirty = true;
         }
         self.last_fetch_since_ms = now_ms.saturating_sub(2 * dante_proto::envelope::EPOCH_MS);
         Ok(out)

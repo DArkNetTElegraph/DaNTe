@@ -4,7 +4,6 @@
 use std::{net::Ipv4Addr, sync::Arc};
 
 use dante_crypto::pow::Difficulty;
-use dante_dm::PreKeySecrets;
 use dante_identity::Identity;
 use dante_ledger::LedgerParams;
 use dante_net::transport::serve;
@@ -48,15 +47,9 @@ async fn spawn_relay() -> String {
 }
 
 async fn engine(relay: &str) -> Engine {
-    Engine::connect(
-        Identity::generate(1_000),
-        PreKeySecrets::generate(8),
-        relay,
-        test_params(),
-        D,
-    )
-    .await
-    .unwrap()
+    Engine::connect(Identity::generate(1_000), relay, test_params(), D, None)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -154,6 +147,57 @@ async fn alice_sends_bob_an_encrypted_file() {
     }
     // receive() (text-only view) hides it
     assert!(bob.receive(now).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn bob_restarts_and_resumes_the_conversation_from_disk() {
+    use dante_identity::keystore;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-persist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("bob.state");
+
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    // A persistent Bob identity we can reload byte-for-byte via a keystore blob.
+    let bob_ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+    let bob_id = *keystore::open(&bob_ks, b"pw").unwrap().id().as_bytes();
+
+    {
+        let bob_identity = keystore::open(&bob_ks, b"pw").unwrap();
+        let mut bob = Engine::connect(bob_identity, &relay, test_params(), D, Some(store.clone()))
+            .await
+            .unwrap();
+        for e in [&mut alice, &mut bob] {
+            e.announce("", now).await.unwrap();
+            e.publish_prekeys().await.unwrap();
+        }
+        alice.sync(now).await.unwrap();
+
+        alice.send_dm(&bob_id, "before restart", now).await.unwrap();
+        assert_eq!(bob.receive(now).await.unwrap()[0].text, "before restart");
+        bob.persist().unwrap();
+        assert_eq!(bob.history().len(), 1);
+    } // bob dropped — simulates the process exiting
+
+    // Bob comes back from disk.
+    let bob_identity = keystore::open(&bob_ks, b"pw").unwrap();
+    let mut bob = Engine::connect(bob_identity, &relay, test_params(), D, Some(store.clone()))
+        .await
+        .unwrap();
+    assert_eq!(bob.history().len(), 1, "history restored");
+    // Announced recently -> skips the PoW entirely.
+    assert!(!bob.announce_if_stale("", now).await.unwrap());
+    // The existing ratchet session decrypts a follow-up without a new handshake.
+    alice.send_dm(&bob_id, "after restart", now).await.unwrap();
+    assert_eq!(bob.receive(now).await.unwrap()[0].text, "after restart");
+    assert_eq!(bob.history().len(), 2);
+
+    let _ = alice_id;
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]

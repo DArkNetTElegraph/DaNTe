@@ -47,4 +47,8 @@ pub enum CoreError {
     /// A file's chunk is no longer in the relay blob store (expired).
     #[error("a file chunk is missing from the relay")]
     MissingBlob,
+
+    /// The encrypted local store could not be read or written.
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
 }

@@ -184,6 +184,142 @@ impl Drop for Ratchet {
     }
 }
 
+/// A serializable snapshot of a [`Ratchet`], for the encrypted local store.
+/// **All secret** — persist only under a key derived from the keystore.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RatchetState {
+    dhs_secret: [u8; 32],
+    dhr: Option<[u8; 32]>,
+    rk: [u8; 32],
+    cks: Option<[u8; 32]>,
+    ckr: Option<[u8; 32]>,
+    ns: u32,
+    nr: u32,
+    pn: u32,
+    skipped: Vec<([u8; 32], u32, [u8; 32])>,
+}
+
+impl Ratchet {
+    /// Snapshot the ratchet.
+    pub fn export(&self) -> RatchetState {
+        RatchetState {
+            dhs_secret: self.dhs.to_bytes(),
+            dhr: self.dhr,
+            rk: self.rk,
+            cks: self.cks,
+            ckr: self.ckr,
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+            skipped: self
+                .skipped
+                .iter()
+                .map(|(&(dh, n), &mk)| (dh, n, mk))
+                .collect(),
+        }
+    }
+
+    /// Restore a ratchet from a snapshot.
+    pub fn import(s: RatchetState) -> Self {
+        // `s` has a `Drop` impl, so read fields by copy rather than moving.
+        let out = Self {
+            dhs: AgreeSecret::from_bytes(&s.dhs_secret),
+            dhr: s.dhr,
+            rk: s.rk,
+            cks: s.cks,
+            ckr: s.ckr,
+            ns: s.ns,
+            nr: s.nr,
+            pn: s.pn,
+            skipped: s.skipped.iter().map(|&(dh, n, mk)| ((dh, n), mk)).collect(),
+        };
+        out
+    }
+}
+
+impl RatchetState {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.fixed(&self.dhs_secret);
+        write_opt32(&mut w, &self.dhr);
+        w.fixed(&self.rk);
+        write_opt32(&mut w, &self.cks);
+        write_opt32(&mut w, &self.ckr);
+        w.u32(self.ns)
+            .u32(self.nr)
+            .u32(self.pn)
+            .u32(self.skipped.len() as u32);
+        for (dh, n, mk) in &self.skipped {
+            w.fixed(dh).u32(*n).fixed(mk);
+        }
+        w.into_vec()
+    }
+
+    /// Decode.
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(bytes);
+        let dhs_secret = r.fixed::<32>()?;
+        let dhr = read_opt32(&mut r)?;
+        let rk = r.fixed::<32>()?;
+        let cks = read_opt32(&mut r)?;
+        let ckr = read_opt32(&mut r)?;
+        let (ns, nr, pn) = (r.u32()?, r.u32()?, r.u32()?);
+        let count = r.u32()? as usize;
+        if count > r.remaining() {
+            return Err(WireError::LengthTooLarge(count as u64));
+        }
+        let mut skipped = Vec::with_capacity(count);
+        for _ in 0..count {
+            skipped.push((r.fixed::<32>()?, r.u32()?, r.fixed::<32>()?));
+        }
+        r.finish()?;
+        Ok(Self {
+            dhs_secret,
+            dhr,
+            rk,
+            cks,
+            ckr,
+            ns,
+            nr,
+            pn,
+            skipped,
+        })
+    }
+}
+
+impl Drop for RatchetState {
+    fn drop(&mut self) {
+        self.dhs_secret.zeroize();
+        self.rk.zeroize();
+        for c in [&mut self.cks, &mut self.ckr].into_iter().flatten() {
+            c.zeroize();
+        }
+        for (_, _, mk) in &mut self.skipped {
+            mk.zeroize();
+        }
+    }
+}
+
+fn write_opt32(w: &mut Writer, v: &Option<[u8; 32]>) {
+    match v {
+        Some(b) => {
+            w.bool(true).fixed(b);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
+}
+
+fn read_opt32(r: &mut Reader<'_>) -> Result<Option<[u8; 32]>, WireError> {
+    Ok(if r.bool()? {
+        Some(r.fixed::<32>()?)
+    } else {
+        None
+    })
+}
+
 fn aad_with_header(ad: &[u8], header: &Header) -> Vec<u8> {
     let mut v = Vec::with_capacity(ad.len() + 40);
     v.extend_from_slice(ad);

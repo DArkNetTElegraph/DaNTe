@@ -10,9 +10,11 @@
 
 pub mod engine;
 pub mod error;
+pub mod store;
 
 pub use engine::{Engine, Inbound, ReceivedDm, DM_TTL_MS};
 pub use error::CoreError;
+pub use store::{HistoryEntry, HistoryKind};
 
 #[cfg(test)]
 mod e2e_tests;

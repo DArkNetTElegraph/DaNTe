@@ -46,6 +46,12 @@ const CHANNEL_HISTORY_CAP: usize = 2000;
 /// One-time-prekey pool is refilled to this before each publish.
 const PREKEY_POOL_TARGET: usize = 50;
 
+/// Standing reaction state: `channel_id -> target_seq -> emoji -> members`.
+type ReactionMap = HashMap<[u8; 32], HashMap<u64, HashMap<String, HashSet<[u8; 32]>>>>;
+
+/// A reaction pending a fold-in: `(channel_id, target_seq, emoji, member, removed)`.
+type PendingReaction = ([u8; 32], u64, String, [u8; 32], bool);
+
 /// TTL on a typing signal's carrier envelope. Deliberately short: a stale
 /// "is typing" is worse than a missing one.
 const TYPING_TTL_MS: u32 = 10_000;
@@ -181,9 +187,13 @@ pub struct Engine {
     /// Role configuration per server_root: the one we sign for servers we host,
     /// the latest verified broadcast for servers we have joined.
     server_policies: HashMap<[u8; 32], ServerPolicy>,
-    /// Reactions seen since the last `take_reactions()` — live-session only,
-    /// not persisted.
+    /// Reactions seen since the last `take_reactions()` — the live delta the
+    /// UI folds into its view.
     new_reactions: Vec<crate::channel::ChannelReaction>,
+    /// Standing reaction state, `channel_id -> target_seq -> emoji -> members`.
+    /// Persisted: the channel log is only re-polled from `last_seq`, so a
+    /// restart would otherwise lose every reaction.
+    channel_reactions: ReactionMap,
     /// The relay address this engine connected to (embedded in invite links).
     relay_addr: String,
     pow: Difficulty,
@@ -226,6 +236,7 @@ impl Engine {
             invite_uses: HashMap::new(),
             server_policies: HashMap::new(),
             new_reactions: Vec::new(),
+            channel_reactions: HashMap::new(),
             relay_addr: relay_addr.to_owned(),
             pow,
             last_fetch_since_ms: 0,
@@ -272,6 +283,17 @@ impl Engine {
                         engine.server_policies.insert(p.server_root, p);
                     }
                 }
+            }
+            for (chan, seq, emoji, member) in s.channel_reactions {
+                engine
+                    .channel_reactions
+                    .entry(chan)
+                    .or_default()
+                    .entry(seq)
+                    .or_default()
+                    .entry(emoji)
+                    .or_default()
+                    .insert(member);
             }
             let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
             let joinpw: HashMap<[u8; 32], [u8; 32]> = s.server_join_pw.into_iter().collect();
@@ -370,6 +392,17 @@ impl Engine {
                 .filter_map(|(root, h)| h.join_pw_hash.map(|hash| (*root, hash)))
                 .collect(),
             server_policies: self.server_policies.values().map(|p| p.encode()).collect(),
+            channel_reactions: self
+                .channel_reactions
+                .iter()
+                .flat_map(|(cid, by_seq)| {
+                    by_seq.iter().flat_map(move |(seq, by_emoji)| {
+                        by_emoji.iter().flat_map(move |(emoji, members)| {
+                            members.iter().map(move |m| (*cid, *seq, emoji.clone(), *m))
+                        })
+                    })
+                })
+                .collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -1155,6 +1188,7 @@ impl Engine {
         let ids: Vec<[u8; 32]> = self.channels.keys().copied().collect();
         let mut out = Vec::new();
         let mut new_history = Vec::new();
+        let mut new_reacts: Vec<PendingReaction> = Vec::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
             let entries = sync::fetch_channel(&mut self.client, &id, since).await?;
@@ -1199,13 +1233,7 @@ impl Engine {
                                 emoji,
                                 remove,
                             })) => {
-                                self.new_reactions.push(crate::channel::ChannelReaction {
-                                    channel_id: id,
-                                    target_seq,
-                                    emoji,
-                                    member: gm.sender,
-                                    removed: remove,
-                                });
+                                new_reacts.push((id, target_seq, emoji, gm.sender, remove));
                             }
                             _ => {}
                         },
@@ -1214,7 +1242,10 @@ impl Engine {
                 }
             }
         }
-        if !out.is_empty() || !self.new_reactions.is_empty() {
+        for (cid, seq, emoji, member, removed) in new_reacts {
+            self.record_reaction(cid, seq, emoji, member, removed);
+        }
+        if !out.is_empty() {
             for e in new_history {
                 self.push_channel_history(e);
             }
@@ -1248,19 +1279,72 @@ impl Engine {
             ))
         };
         sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
-        self.new_reactions.push(crate::channel::ChannelReaction {
-            channel_id: *channel_id,
-            target_seq,
-            emoji: emoji.to_owned(),
-            member: self.my_member_id(),
-            removed: remove,
-        });
+        let me = self.my_member_id();
+        self.record_reaction(*channel_id, target_seq, emoji.to_owned(), me, remove);
         Ok(())
     }
 
     /// Drain the reactions seen since the last call (own and inbound).
     pub fn take_reactions(&mut self) -> Vec<crate::channel::ChannelReaction> {
         std::mem::take(&mut self.new_reactions)
+    }
+
+    /// The full standing reaction state, one [`ChannelReaction`] per
+    /// `(channel, message, emoji, member)` currently held (all `removed:
+    /// false`). Used to seed a fresh view on startup.
+    pub fn reaction_snapshot(&self) -> Vec<crate::channel::ChannelReaction> {
+        let mut out = Vec::new();
+        for (cid, by_seq) in &self.channel_reactions {
+            for (seq, by_emoji) in by_seq {
+                for (emoji, members) in by_emoji {
+                    for m in members {
+                        out.push(crate::channel::ChannelReaction {
+                            channel_id: *cid,
+                            target_seq: *seq,
+                            emoji: emoji.clone(),
+                            member: *m,
+                            removed: false,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Fold one reaction into the standing map and queue it for the next
+    /// [`Engine::take_reactions`].
+    fn record_reaction(
+        &mut self,
+        channel_id: [u8; 32],
+        target_seq: u64,
+        emoji: String,
+        member: [u8; 32],
+        removed: bool,
+    ) {
+        let by_seq = self.channel_reactions.entry(channel_id).or_default();
+        let slot = by_seq.entry(target_seq).or_default();
+        if removed {
+            if let Some(set) = slot.get_mut(&emoji) {
+                set.remove(&member);
+                if set.is_empty() {
+                    slot.remove(&emoji);
+                }
+            }
+            if slot.is_empty() {
+                by_seq.remove(&target_seq);
+            }
+        } else {
+            slot.entry(emoji.clone()).or_default().insert(member);
+        }
+        self.new_reactions.push(crate::channel::ChannelReaction {
+            channel_id,
+            target_seq,
+            emoji,
+            member,
+            removed,
+        });
+        self.dirty = true;
     }
 
     async fn handle_channel_control(

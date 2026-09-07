@@ -178,6 +178,13 @@ impl<S: RecordStore> Ledger<S> {
         self.chain_of(idk).is_some_and(|c| !c.tombstoned)
     }
 
+    /// Newest announce / liveness-proof / key-rotation time for the chain that
+    /// contains `idk`. `None` if `idk` is not in any known chain. Drives
+    /// inactivity policies (e.g. a server's auto-kick window).
+    pub fn last_activity(&self, idk: &[u8; 32]) -> Option<u64> {
+        self.chain_of(idk).map(|c| c.last_activity_ms)
+    }
+
     /// The stable [`IdentityId`] for any `idk` in a known chain.
     pub fn identity_id(&self, idk: &[u8; 32]) -> Option<IdentityId> {
         let root = self.chain_of(idk)?.root_idk;

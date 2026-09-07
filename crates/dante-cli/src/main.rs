@@ -255,6 +255,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     println!(
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
          /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
+         /autokick <root> <days|off>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -441,6 +442,32 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     }
                 }
                 None => println!("usage: /redeem <invite-link>"),
+            },
+            "autokick" => match (a, b) {
+                (Some(root), Some(spec)) => match parse_fingerprint(root) {
+                    Ok(sr) => {
+                        let window = if spec.eq_ignore_ascii_case("off") || spec == "0" {
+                            None
+                        } else {
+                            spec.parse::<f64>().ok().map(|d| (d * 86_400_000.0) as u64)
+                        };
+                        match window {
+                            None if spec.eq_ignore_ascii_case("off") || spec == "0" => {
+                                match engine.set_auto_kick(&sr, None) {
+                                    Ok(()) => println!("auto-kick disabled"),
+                                    Err(e) => println!("failed: {e}"),
+                                }
+                            }
+                            Some(w) => match engine.set_auto_kick(&sr, Some(w)) {
+                                Ok(()) => println!("auto-kick after {spec} day(s) of inactivity"),
+                                Err(e) => println!("failed: {e}"),
+                            },
+                            None => println!("usage: /autokick <server-root> <days|off>"),
+                        }
+                    }
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /autokick <server-root> <days|off>"),
             },
             "kick" => match (a, b) {
                 (Some(chan), Some(fp)) => {

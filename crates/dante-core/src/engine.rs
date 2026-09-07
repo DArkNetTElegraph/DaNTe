@@ -120,6 +120,10 @@ pub(crate) struct HostedServer {
     pub name: String,
     pub root: SignSecret,
     pub channels: Vec<[u8; 32]>,
+    /// If set, [`Engine::sweep_inactive_members`] removes any channel member
+    /// whose identity has had no ledger activity for this many ms. Off by
+    /// default.
+    pub auto_kick_ms: Option<u64>,
 }
 
 /// The client engine.
@@ -216,10 +220,12 @@ impl Engine {
                     },
                 );
             }
+            let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
             for h in s.hosted {
                 engine.hosted.insert(
                     h.root_pub,
                     HostedServer {
+                        auto_kick_ms: autokick.get(&h.root_pub).copied(),
                         name: h.name,
                         root: SignSecret::from_bytes(&h.root_secret),
                         channels: h.channels,
@@ -297,6 +303,11 @@ impl Engine {
                 .channels
                 .iter()
                 .flat_map(|(cid, c)| c.removed.iter().map(move |(m, at)| (*cid, *m, *at)))
+                .collect(),
+            server_autokick: self
+                .hosted
+                .iter()
+                .filter_map(|(root, h)| h.auto_kick_ms.map(|ms| (*root, ms)))
                 .collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
@@ -401,6 +412,7 @@ impl Engine {
                 name: name.to_owned(),
                 root,
                 channels: vec![],
+                auto_kick_ms: None,
             },
         );
         self.dirty = true;
@@ -602,6 +614,79 @@ impl Engine {
                 .await;
         }
         Ok(())
+    }
+
+    /// Set (or clear, with `None`) the inactivity auto-kick window for a server
+    /// this client hosts. When set, [`Engine::sweep_inactive_members`] removes
+    /// channel members whose identity has had no ledger activity for `window_ms`.
+    pub fn set_auto_kick(
+        &mut self,
+        server_root: &[u8; 32],
+        window_ms: Option<u64>,
+    ) -> Result<(), CoreError> {
+        let h = self
+            .hosted
+            .get_mut(server_root)
+            .ok_or(CoreError::NotServerHost)?;
+        h.auto_kick_ms = window_ms;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// The configured auto-kick window for a hosted server, if any.
+    pub fn auto_kick_window(&self, server_root: &[u8; 32]) -> Option<u64> {
+        self.hosted.get(server_root).and_then(|h| h.auto_kick_ms)
+    }
+
+    /// For every hosted server with an auto-kick window, remove channel members
+    /// whose identity has had no ledger activity within the window (or has
+    /// evaporated / is unknown). Returns the ids removed. Call periodically;
+    /// keep the local ledger replica fresh with [`Engine::sync`] first.
+    pub async fn sweep_inactive_members(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<Vec<[u8; 32]>, CoreError> {
+        let me = self.my_member_id();
+        let mut victims: Vec<([u8; 32], [u8; 32])> = Vec::new();
+        for (root, h) in &self.hosted {
+            let Some(window) = h.auto_kick_ms else {
+                continue;
+            };
+            for chan_id in &h.channels {
+                let Some(ch) = self.channels.get(chan_id) else {
+                    continue;
+                };
+                if ch.info.server_root != *root {
+                    continue;
+                }
+                for m in &ch.roster {
+                    if *m == me || ch.removed.contains_key(m) {
+                        continue;
+                    }
+                    let inactive = match self.ledger.idk_for_id(m) {
+                        None => true, // unknown / evaporated
+                        Some(idk) => self
+                            .ledger
+                            .last_activity(&idk)
+                            .is_none_or(|t| now_ms.saturating_sub(t) > window),
+                    };
+                    if inactive {
+                        victims.push((*chan_id, *m));
+                    }
+                }
+            }
+        }
+        let mut removed = Vec::with_capacity(victims.len());
+        for (chan_id, member) in victims {
+            if self
+                .remove_from_channel(&chan_id, &member, now_ms)
+                .await
+                .is_ok()
+            {
+                removed.push(member);
+            }
+        }
+        Ok(removed)
     }
 
     /// Send a text message to a channel.

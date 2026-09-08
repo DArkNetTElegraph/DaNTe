@@ -162,10 +162,7 @@ impl Node {
         // Every DaNTe node is a full DHT participant (stores records, answers
         // queries). Without this, libp2p-kad stays in client mode until it
         // observes an external address, and `put_record` fails the quorum.
-        swarm
-            .behaviour_mut()
-            .kad
-            .set_mode(Some(kad::Mode::Server));
+        swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Server));
 
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (evt_tx, evt_rx) = mpsc::channel(256);
@@ -368,10 +365,7 @@ impl Driver {
             })) => {
                 // Feed identify's address book into Kademlia so the DHT can route.
                 for addr in info.listen_addrs {
-                    self.swarm
-                        .behaviour_mut()
-                        .kad
-                        .add_address(&peer_id, addr);
+                    self.swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                 }
                 self.emit(Event::PeerRoutable(peer_id)).await;
             }
@@ -407,8 +401,8 @@ impl Driver {
                 // Bootstrap progresses in steps; only answer on the final one.
                 if last {
                     if let Some(reply) = self.pending_bootstrap.remove(&id) {
-                        let _ = reply
-                            .send(res.map(|_| ()).map_err(|e| P2pError::Store(e.to_string())));
+                        let _ =
+                            reply.send(res.map(|_| ()).map_err(|e| P2pError::Store(e.to_string())));
                     }
                 }
             }
@@ -486,7 +480,11 @@ mod tests {
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {}
             }
         }
-        assert_eq!(got.as_deref(), Some(&b"ping"[..]), "gossip message delivered");
+        assert_eq!(
+            got.as_deref(),
+            Some(&b"ping"[..]),
+            "gossip message delivered"
+        );
     }
 
     #[tokio::test]

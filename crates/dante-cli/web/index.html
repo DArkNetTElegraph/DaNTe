@@ -1136,6 +1136,18 @@ const store = {
     return rs[0] ? rs[0].name : null;
   },
   myPerms(root) { return (this.policies[root] || {}).me_perms || PERM_SEND; },
+  // Effective permission mask for any member (owner = everything).
+  permsOf(root, fp) {
+    const p = this.policies[root];
+    if (!p) return PERM_SEND;
+    if (fp === p.owner) return 0xffffffff;
+    const a = (p.assignments || []).find(x => x.member === fp);
+    let allow = PERM_SEND, deny = 0;
+    for (const r of (p.roles || [])) {
+      if (a && a.roles.includes(r.id)) { allow |= (r.allow || 0); deny |= (r.deny || 0); }
+    }
+    return allow & ~deny;
+  },
 
   servers() {
     const names = [];
@@ -2261,8 +2273,8 @@ function renderMembers() {
   const inChannel = target && target.startsWith("#");
   const root = inChannel ? store.rootOf(store.view.server) : null;
   const canKick = root && (store.myPerms(root) & PERM_KICK) !== 0;
-  const canRoles = root && (store.myPerms(root) & (PERM_MANAGE_ROLES | PERM_KICK)) !== 0
-    && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
+  const iAmOwner = root && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
+  const canRoles = root && (store.myPerms(root) & (PERM_MANAGE_ROLES | PERM_KICK)) !== 0 && iAmOwner;
 
   // group by role
   const groups = new Map();
@@ -2295,7 +2307,9 @@ function renderMembers() {
         row.appendChild(rb);
       }
       const isOwner = root && store.policies[root] && store.policies[root].owner === fp;
-      if (inChannel && !isMe && canKick && !isOwner) {
+      // A member with kick/manage power is staff — only the owner may kick staff.
+      const isStaff = root && (store.permsOf(root, fp) & (PERM_KICK | PERM_MANAGE_ROLES)) !== 0;
+      if (inChannel && !isMe && canKick && !isOwner && (iAmOwner || !isStaff)) {
         const kick = el("button", "kick", "×");
         kick.title = "Remove from channel";
         kick.onclick = () => removeMemberFlow(target, fp);

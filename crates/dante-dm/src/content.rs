@@ -125,6 +125,19 @@ pub enum Content {
         /// The `id` of the [`TextId`](Content::TextId) message being deleted.
         target: [u8; 16],
     },
+    /// A WebRTC signalling blob for a **voice channel** mesh leg. Unlike the
+    /// 1:1 `Call*` variants, `dante-core` does not interpret `data` at all — it
+    /// just relays it between the two browsers, which own the peer connection.
+    /// `kind`: 0 = SDP offer, 1 = SDP answer, 2 = ICE candidate (`data` is the
+    /// candidate line; empty = end-of-candidates), 3 = leg teardown.
+    VoiceSignal {
+        /// The voice channel this leg belongs to.
+        channel_id: [u8; 32],
+        /// 0 offer, 1 answer, 2 ICE, 3 bye.
+        kind: u8,
+        /// The opaque signalling payload (SDP or an ICE candidate line).
+        data: String,
+    },
     /// A message forwarded into a channel from elsewhere. Otherwise an ordinary
     /// channel message (editable / deletable / pinnable), but it also carries a
     /// label of where it came from so the UI can mark it.
@@ -209,6 +222,13 @@ impl Content {
             Content::GroupCallJoinRequest { channel_id } => {
                 w.u8(21).fixed(channel_id);
             }
+            Content::VoiceSignal {
+                channel_id,
+                kind,
+                data,
+            } => {
+                w.u8(22).fixed(channel_id).u8(*kind).string(data);
+            }
         }
         w.into_vec()
     }
@@ -273,6 +293,11 @@ impl Content {
             },
             21 => Content::GroupCallJoinRequest {
                 channel_id: r.fixed::<32>()?,
+            },
+            22 => Content::VoiceSignal {
+                channel_id: r.fixed::<32>()?,
+                kind: r.u8()?,
+                data: r.string()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -351,6 +376,11 @@ mod tests {
             Content::GroupCallJoinRequest {
                 channel_id: [6u8; 32],
             },
+            Content::VoiceSignal {
+                channel_id: [7u8; 32],
+                kind: 2,
+                data: "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".into(),
+            },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }
@@ -404,6 +434,6 @@ mod tests {
 
     #[test]
     fn bad_tag_rejected() {
-        assert!(Content::decode(&[22]).is_err());
+        assert!(Content::decode(&[23]).is_err());
     }
 }

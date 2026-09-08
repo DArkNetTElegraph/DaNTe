@@ -315,13 +315,18 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
   padding: 14px 18px; border-radius: var(--radius-lg); background: var(--bg-raised);
   border: 1px solid var(--divider); min-width: 96px; }
 .voice-tile.me { border-color: var(--accent); }
+.voice-tile.live { border-color: var(--ok, #3ba55d); box-shadow: 0 0 0 1px var(--ok, #3ba55d) inset; }
 .voice-tile .avatar.big { width: 56px; height: 56px; font-size: 18px; }
-.voice-tile-name { font-size: 12px; color: var(--text-muted); max-width: 120px;
+.voice-tile-name { font-size: 12px; color: var(--text-muted); max-width: 140px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.voice-join-btn { margin-top: 10px; padding: 10px 24px; border: 0; border-radius: var(--radius-pill);
+.voice-room-controls { display: flex; gap: 10px; margin-top: 10px; }
+.voice-join-btn { padding: 10px 24px; border: 0; border-radius: var(--radius-pill);
   background: var(--accent); color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
 .voice-join-btn:hover { filter: brightness(1.08); }
 .voice-join-btn.leave { background: var(--bg-raised); color: var(--text); border: 1px solid var(--divider); }
+.voice-mic-btn { padding: 10px 18px; border: 1px solid var(--divider); border-radius: var(--radius-pill);
+  background: var(--bg-raised); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; }
+.voice-mic-btn.off { background: var(--danger, #d83c3e); color: #fff; border-color: transparent; }
 
 /* user panel */
 #user-panel {
@@ -1198,7 +1203,7 @@ function renderPane() {
       const row = el("button", "chan-row" + (curTarget() === t ? " active" : ""));
       row.appendChild(Object.assign(el("span", "hash"), { textContent: "🔊" }));
       row.appendChild(el("span", "name", c.name));
-      if (room.joined) row.appendChild(Object.assign(el("span", "tag"), { textContent: "●" }));
+      if (room.joined || voiceRtc.channelId === c.id) row.appendChild(Object.assign(el("span", "tag"), { textContent: "●" }));
       row.onclick = () => selectTarget(server, t);
       list.appendChild(row);
       if (room.participants.length) {
@@ -1459,6 +1464,7 @@ function renderVoiceRoom(c, target) {
   $("#gcallbar").hidden = true;
 
   const room = store.voice[c.id] || { joined: false, participants: [] };
+  const connected = voiceRtc.channelId === c.id;
   const people = room.participants.slice().sort();
 
   log.innerHTML = "";
@@ -1473,19 +1479,31 @@ function renderVoiceRoom(c, target) {
     const stage = el("div", "voice-stage");
     for (const fp of people) {
       const mine = isSelf(fp);
-      const tile = el("div", "voice-tile" + (mine ? " me" : ""));
+      const link = !mine && voiceRtc.peers.get(fp);
+      const live = mine ? connected : !!(link && link.pc.connectionState === "connected");
+      const tile = el("div", "voice-tile" + (mine ? " me" : "") + (live ? " live" : ""));
       tile.appendChild(Object.assign(el("div", "avatar big"),
         { textContent: initials(dmLabel(fp) || short(fp)) }));
-      tile.appendChild(el("span", "voice-tile-name", mine ? "You" : (dmLabel(fp) || short(fp))));
+      const nm = el("span", "voice-tile-name", mine ? "You" : (dmLabel(fp) || short(fp)));
+      if (mine && connected && !voiceRtc.micOn) nm.textContent += " · muted";
+      tile.appendChild(nm);
       stage.appendChild(tile);
     }
     wrap.appendChild(stage);
   }
 
-  const btn = el("button", "voice-join-btn" + (room.joined ? " leave" : ""),
-    room.joined ? "Disconnect" : "Join voice");
-  btn.onclick = () => voiceAction(c.id, !room.joined);
-  wrap.appendChild(btn);
+  const row = el("div", "voice-room-controls");
+  const btn = el("button", "voice-join-btn" + (connected ? " leave" : ""),
+    connected ? "Disconnect" : "Join voice");
+  btn.onclick = () => voiceAction(c.id, !connected);
+  row.appendChild(btn);
+  if (connected) {
+    const mic = el("button", "voice-mic-btn" + (voiceRtc.micOn ? "" : " off"),
+      voiceRtc.micOn ? "🎙 Mute" : "🔇 Unmute");
+    mic.onclick = voiceToggleMic;
+    row.appendChild(mic);
+  }
+  wrap.appendChild(row);
 
   log.appendChild(wrap);
 }
@@ -2108,14 +2126,181 @@ async function refreshVoice() {
       store.voice = v;
       render();
     }
+    // Keep the mesh in step with who the relay says is in the room.
+    if (voiceRtc.channelId) voiceSyncPeers();
   } catch (_) {}
 }
 
+/* ---------- voice channels: real browser WebRTC audio -------------------
+   The browser owns the peer connections; `dante serve` only relays the
+   offer / answer / ICE blobs (POST /api/voice/signal, delivered back as
+   `voicesignal` stream items). A full mesh: for each pair, the lower
+   fingerprint makes the offer. Presence still rides the engine's beacon
+   via /api/voice so we know who to connect to. */
+const voiceRtc = {
+  channelId: null,        // id of the voice channel we're connected to (media)
+  localStream: null,      // our mic MediaStream
+  micOn: true,
+  iceServers: [],
+  peers: new Map(),       // fingerprint -> { pc, audio, polite, pending: [] }
+};
+
 async function voiceAction(channelId, join) {
   try {
-    await (join ? api.voiceJoin(channelId) : api.voiceLeave(channelId));
+    if (join) {
+      // Mic first — this is what pops the browser permission prompt.
+      await voiceRtcStart(channelId);
+      await api.voiceJoin(channelId);
+    } else {
+      voiceRtcStop();
+      await api.voiceLeave(channelId);
+    }
     await refreshVoice();
-  } catch (e) { ui.sys("voice: " + e.message); }
+    render();
+  } catch (e) {
+    voiceRtcStop();
+    try { await api.voiceLeave(channelId); } catch (_) {}
+    ui.sys("voice: " + (e && e.message ? e.message : e));
+    await refreshVoice();
+  }
+}
+
+async function voiceRtcStart(channelId) {
+  if (voiceRtc.channelId === channelId) return;
+  if (voiceRtc.channelId) voiceRtcStop();
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  voiceRtc.localStream = stream;
+  voiceRtc.micOn = true;
+  voiceRtc.channelId = channelId;
+  try {
+    const ice = await api.get("/api/ice");
+    // `/api/ice` exposes only urls+kind (never TURN creds), so this yields
+    // STUN for srflx candidates; TURN needs creds and isn't wired here.
+    voiceRtc.iceServers = (ice || [])
+      .filter(s => s.kind === "stun" && s.urls && s.urls.length)
+      .map(s => ({ urls: s.urls }));
+  } catch (_) { voiceRtc.iceServers = []; }
+  voiceSyncPeers();
+}
+
+function voiceRtcStop() {
+  for (const fp of [...voiceRtc.peers.keys()]) {
+    voiceSignalSend(fp, 3, "");
+    voicePeerClose(fp);
+  }
+  if (voiceRtc.localStream) {
+    for (const t of voiceRtc.localStream.getTracks()) t.stop();
+  }
+  voiceRtc.localStream = null;
+  voiceRtc.channelId = null;
+  voiceRtc.peers.clear();
+}
+
+function voiceToggleMic() {
+  if (!voiceRtc.localStream) return;
+  voiceRtc.micOn = !voiceRtc.micOn;
+  for (const t of voiceRtc.localStream.getAudioTracks()) t.enabled = voiceRtc.micOn;
+  render();
+}
+
+// Connect to everyone the relay says is present; drop anyone who left.
+function voiceSyncPeers() {
+  const cid = voiceRtc.channelId;
+  if (!cid) return;
+  const room = store.voice[cid] || { participants: [] };
+  const me = store.me.fingerprint;
+  const present = new Set((room.participants || []).filter(fp => fp !== me && short(fp) !== short(me)));
+  for (const fp of present) {
+    if (!voiceRtc.peers.has(fp)) voicePeerConnect(fp, me < fp);   // lower fp offers
+  }
+  for (const fp of [...voiceRtc.peers.keys()]) {
+    if (!present.has(fp)) voicePeerClose(fp);
+  }
+}
+
+function voicePeerClose(fp) {
+  const p = voiceRtc.peers.get(fp);
+  if (!p) return;
+  try { p.pc.close(); } catch (_) {}
+  if (p.audio) { try { p.audio.srcObject = null; } catch (_) {} }
+  voiceRtc.peers.delete(fp);
+  if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+}
+
+async function voicePeerConnect(fp, initiator) {
+  if (voiceRtc.peers.has(fp)) return;
+  const pc = new RTCPeerConnection({ iceServers: voiceRtc.iceServers });
+  const entry = { pc, audio: null, polite: store.me.fingerprint > fp, pending: [], makingOffer: false };
+  voiceRtc.peers.set(fp, entry);
+
+  for (const t of voiceRtc.localStream.getTracks()) pc.addTrack(t, voiceRtc.localStream);
+
+  pc.onicecandidate = e => {
+    if (e.candidate) voiceSignalSend(fp, 2, JSON.stringify(e.candidate));
+  };
+  pc.ontrack = e => {
+    let a = entry.audio;
+    if (!a) { a = new Audio(); a.autoplay = true; entry.audio = a; }
+    a.srcObject = e.streams[0];
+    a.play().catch(() => {});
+    if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+  };
+  pc.onconnectionstatechange = () => {
+    if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+      // Let presence-driven voiceSyncPeers re-establish if they're still here.
+      if (pc.connectionState === "failed") voicePeerClose(fp);
+    }
+    if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+  };
+  pc.onnegotiationneeded = async () => {
+    try {
+      entry.makingOffer = true;
+      await pc.setLocalDescription(await pc.createOffer());
+      voiceSignalSend(fp, 0, pc.localDescription.sdp);
+    } catch (_) {} finally { entry.makingOffer = false; }
+  };
+  // Non-initiators wait for the offer; `onnegotiationneeded` fires on the
+  // initiator once tracks are added.
+  if (!initiator) { /* wait */ }
+}
+
+function voiceSignalSend(fp, kind, data) {
+  api.post("/api/voice/signal", { channel: voiceRtc.channelId, to: fp, kind, data }).catch(() => {});
+}
+
+// A relayed offer / answer / ICE / bye from another participant.
+async function voiceOnSignal(fp, kind, data) {
+  if (!voiceRtc.channelId) return;
+  if (kind === 3) { voicePeerClose(fp); return; }
+  if (!voiceRtc.peers.has(fp)) {
+    if (kind !== 0) return;                 // only an offer bootstraps a peer
+    await voicePeerConnect(fp, false);
+  }
+  const entry = voiceRtc.peers.get(fp);
+  const pc = entry.pc;
+  try {
+    if (kind === 0) {                       // offer
+      const collision = entry.makingOffer || pc.signalingState !== "stable";
+      if (collision && !entry.polite) return;   // impolite peer ignores
+      if (collision) await pc.setLocalDescription({ type: "rollback" });
+      await pc.setRemoteDescription({ type: "offer", sdp: data });
+      for (const c of entry.pending.splice(0)) { try { await pc.addIceCandidate(c); } catch (_) {} }
+      await pc.setLocalDescription(await pc.createAnswer());
+      voiceSignalSend(fp, 1, pc.localDescription.sdp);
+    } else if (kind === 1) {                // answer
+      await pc.setRemoteDescription({ type: "answer", sdp: data });
+      for (const c of entry.pending.splice(0)) { try { await pc.addIceCandidate(c); } catch (_) {} }
+    } else if (kind === 2) {                // ICE candidate
+      const cand = JSON.parse(data);
+      if (pc.remoteDescription && pc.remoteDescription.type) {
+        try { await pc.addIceCandidate(cand); } catch (_) {}
+      } else {
+        entry.pending.push(cand);
+      }
+    }
+  } catch (e) { /* renegotiation races are expected; presence sync recovers */ }
 }
 
 function groupCallFor(channelId) {
@@ -2198,6 +2383,10 @@ function ingest(items) {
     }
     if (it.kind === "dmedit") {
       store.dmEdits[it.msg_id] = { text: it.text, deleted: it.deleted };
+      continue;
+    }
+    if (it.kind === "voicesignal") {
+      if (it.channel === voiceRtc.channelId) voiceOnSignal(it.from, it.sig_kind, it.data);
       continue;
     }
     if (it.kind === "channel") {

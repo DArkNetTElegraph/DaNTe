@@ -274,6 +274,18 @@ pub enum Inbound {
         /// The channel the call belongs to.
         channel_id: [u8; 32],
     },
+    /// A WebRTC signalling blob for a voice-channel mesh leg, relayed from
+    /// another participant's browser. The engine does not interpret it.
+    VoiceSignal {
+        /// The voice channel this leg belongs to.
+        channel_id: [u8; 32],
+        /// The other participant's Ed25519 identity key.
+        from_idk: [u8; 32],
+        /// 0 offer, 1 answer, 2 ICE, 3 bye.
+        kind: u8,
+        /// The opaque payload (SDP or ICE candidate line).
+        data: String,
+    },
 }
 
 /// One channel group call this client is in. Ephemeral — a restart drops it.
@@ -1658,6 +1670,30 @@ impl Engine {
         self.leave_group_call(channel_id, now_ms).await
     }
 
+    /// Relay one WebRTC signalling blob to another voice-channel participant.
+    /// The browsers own the peer connection; the engine is a dumb pipe. `to` is
+    /// the peer's `IdentityId` bytes; `kind` is 0 offer / 1 answer / 2 ICE /
+    /// 3 bye.
+    pub async fn send_voice_signal(
+        &mut self,
+        to: &[u8; 32],
+        channel_id: &[u8; 32],
+        kind: u8,
+        data: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.send_content(
+            to,
+            Content::VoiceSignal {
+                channel_id: *channel_id,
+                kind,
+                data: data.to_owned(),
+            },
+            now_ms,
+        )
+        .await
+    }
+
     /// Post a presence beacon for every voice channel we are currently
     /// connected to. Call each tick.
     pub async fn send_voice_presence(&mut self, now_ms: u64) -> Result<(), CoreError> {
@@ -2123,15 +2159,26 @@ impl Engine {
 
     /// Set (or clear, with `None`) the join password for a server this client
     /// hosts. It gates invite-link redemption; direct invites bypass it.
+    ///
+    /// If a password is already set, `current` must carry it — an empty or wrong
+    /// `current` is rejected. When no password is set yet, `current` is ignored.
     pub fn set_join_password(
         &mut self,
         server_root: &[u8; 32],
         password: Option<&str>,
+        current: Option<&str>,
     ) -> Result<(), CoreError> {
         let h = self
             .hosted
             .get_mut(server_root)
             .ok_or(CoreError::NotServerHost)?;
+        if let Some(existing) = h.join_pw_hash {
+            let ok =
+                current.is_some_and(|c| !c.is_empty() && join_pw_hash(server_root, c) == existing);
+            if !ok {
+                return Err(CoreError::Channel("current join password does not match"));
+            }
+        }
         h.join_pw_hash = password.map(|pw| join_pw_hash(server_root, pw));
         self.dirty = true;
         Ok(())
@@ -3965,7 +4012,8 @@ impl Engine {
             | Content::DmEdit { .. }
             | Content::DmDelete { .. }
             | Content::Forward { .. }
-            | Content::GroupCallJoinRequest { .. } => (None, [0u8; 16]),
+            | Content::GroupCallJoinRequest { .. }
+            | Content::VoiceSignal { .. } => (None, [0u8; 16]),
         };
         let plaintext = content.encode();
 
@@ -4309,6 +4357,18 @@ impl Engine {
                     if self.group_calls.contains_key(&channel_id) {
                         out.push(Inbound::GroupCallMembersChanged { channel_id });
                     }
+                }
+                Ok(Content::VoiceSignal {
+                    channel_id,
+                    kind,
+                    data,
+                }) => {
+                    out.push(Inbound::VoiceSignal {
+                        channel_id,
+                        from_idk: from,
+                        kind,
+                        data,
+                    });
                 }
                 // Typing / reactions / edits / forwards are channel-scoped,
                 // never delivered by DM.

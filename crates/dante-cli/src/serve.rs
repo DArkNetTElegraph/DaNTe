@@ -77,6 +77,8 @@ enum Cmd {
     },
     CreateServer {
         name: String,
+        /// Optional join password to set on the new server.
+        password: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     CreateChannel {
@@ -141,6 +143,16 @@ enum Cmd {
     JoinPw {
         server: String,
         password: String,
+        /// The current join password, required when one is already set.
+        current: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Relay a WebRTC signalling blob to another voice-channel participant.
+    VoiceSignal {
+        channel: String,
+        to: String,
+        kind: u8,
+        data: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     RemoveMember {
@@ -405,6 +417,19 @@ enum Item {
         text: String,
         deleted: bool,
     },
+    /// A relayed WebRTC signalling blob for a voice-channel mesh leg. The SPA
+    /// owns the peer connections; this just carries offer / answer / ICE / bye.
+    VoiceSignal {
+        seq: u64,
+        /// The voice channel id (base32).
+        channel: String,
+        /// The other participant's fingerprint.
+        from: String,
+        /// 0 offer, 1 answer, 2 ICE, 3 bye.
+        sig_kind: u8,
+        /// The opaque payload (SDP or ICE candidate line).
+        data: String,
+    },
 }
 
 impl Item {
@@ -415,7 +440,8 @@ impl Item {
             | Item::Channel { seq, .. }
             | Item::ChannelEdit { seq, .. }
             | Item::ChannelPin { seq, .. }
-            | Item::DmEdit { seq, .. } => *seq,
+            | Item::DmEdit { seq, .. }
+            | Item::VoiceSignal { seq, .. } => *seq,
         }
     }
 }
@@ -1011,6 +1037,15 @@ async fn engine_task(
                                     forwarded_from: None,
                                 }
                             }
+                            Inbound::VoiceSignal { channel_id, from_idk, kind, data } => {
+                                Item::VoiceSignal {
+                                    seq,
+                                    channel: id_b32(&channel_id),
+                                    from: short_fp(&from_idk),
+                                    sig_kind: kind,
+                                    data,
+                                }
+                            }
                         };
                         inbox.push_back(entry);
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }
@@ -1372,12 +1407,29 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(body);
         }
-        Cmd::CreateServer { name, reply } => {
-            let r = engine
-                .create_server(&name, now_ms())
-                .await
-                .map(|root| id_b32(&root))
-                .map_err(|e| e.to_string());
+        Cmd::CreateServer {
+            name,
+            password,
+            reply,
+        } => {
+            let r = async {
+                let root = engine
+                    .create_server(&name, now_ms())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // Every server starts with a #general text channel that can't be
+                // removed or converted — the always-there default.
+                engine
+                    .create_channel(&root, "general", true, None)
+                    .map_err(|e| e.to_string())?;
+                if !password.is_empty() {
+                    engine
+                        .set_join_password(&root, Some(password.as_str()), None)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok::<_, String>(id_b32(&root))
+            }
+            .await;
             let _ = reply.send(r);
         }
         Cmd::CreateChannel {
@@ -1468,14 +1520,37 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
         Cmd::JoinPw {
             server,
             password,
+            current,
             reply,
         } => {
             let r = match parse_fingerprint(&server) {
                 Ok(root) => engine
-                    .set_join_password(&root, (!password.is_empty()).then_some(password.as_str()))
+                    .set_join_password(
+                        &root,
+                        (!password.is_empty()).then_some(password.as_str()),
+                        (!current.is_empty()).then_some(current.as_str()),
+                    )
                     .map(|_| "ok".into())
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::VoiceSignal {
+            channel,
+            to,
+            kind,
+            data,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match (parse_fingerprint(channel), parse_fingerprint(&to)) {
+                (Ok(cid), Ok(pid)) => engine
+                    .send_voice_signal(&pid, &cid, kind, &data, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                _ => Err("bad channel id or fingerprint".into()),
             };
             let _ = reply.send(r);
         }
@@ -2297,12 +2372,16 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             #[derive(serde::Deserialize)]
             struct Req {
                 name: String,
+                /// Optional join password for the new server.
+                #[serde(default)]
+                password: String,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
             };
             dispatch(&mut stream, &shared, |reply| Cmd::CreateServer {
                 name: r.name,
+                password: r.password,
                 reply,
             })
             .await
@@ -2351,6 +2430,28 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Voice {
                 channel: r.channel,
                 join,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/voice/signal") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                to: String,
+                kind: u8,
+                #[serde(default)]
+                data: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::VoiceSignal {
+                channel: r.channel,
+                to: r.to,
+                kind: r.kind,
+                data: r.data,
                 reply,
             })
             .await
@@ -2576,6 +2677,9 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 server: String,
                 #[serde(default)]
                 password: String,
+                /// The current password, required when one is already set.
+                #[serde(default)]
+                current: String,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
@@ -2583,6 +2687,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::JoinPw {
                 server: r.server,
                 password: r.password,
+                current: r.current,
                 reply,
             })
             .await

@@ -434,9 +434,7 @@ impl RelayState {
                 if blob.len() > MAX_CHANNEL_BLOB_BYTES {
                     return Response::Error("channel frame too large".into());
                 }
-                if !self.channels.contains_key(&channel_id)
-                    && self.channels.len() >= MAX_CHANNELS
-                {
+                if !self.channels.contains_key(&channel_id) && self.channels.len() >= MAX_CHANNELS {
                     return Response::Error("channel directory full".into());
                 }
                 if self.channel_bytes.saturating_add(blob.len()) > CHANNEL_STORE_CAP {
@@ -902,7 +900,10 @@ mod tests {
         // Drain the burst with cheap reads at a single instant...
         let mut ok = 0;
         for _ in 0..(cap as usize) {
-            if !matches!(s.handle(Request::GetTreeHead, IP, 1_000), Response::Error(_)) {
+            if !matches!(
+                s.handle(Request::GetTreeHead, IP, 1_000),
+                Response::Error(_)
+            ) {
                 ok += 1;
             }
         }
@@ -920,7 +921,11 @@ mod tests {
         // A prekey bundle above the cap is refused, so a later GetPrekeys can't
         // be driven to over-allocate on decode.
         assert!(matches!(
-            s.handle(Request::PublishPrekeys(vec![0u8; MAX_PREKEY_BYTES + 1]), IP, 0),
+            s.handle(
+                Request::PublishPrekeys(vec![0u8; MAX_PREKEY_BYTES + 1]),
+                IP,
+                0
+            ),
             Response::Error(_)
         ));
         // An over-large channel frame is refused up front.

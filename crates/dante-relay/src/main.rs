@@ -216,7 +216,9 @@ fn parse_args() -> Args {
     // never lands in argv; a `--turn-secret` on the command line still wins if
     // both are set (the operator asked for it explicitly).
     if ice.turn_secret.is_none() {
-        ice.turn_secret = std::env::var("DANTE_TURN_SECRET").ok().filter(|s| !s.is_empty());
+        ice.turn_secret = std::env::var("DANTE_TURN_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
     }
     Args {
         listen,

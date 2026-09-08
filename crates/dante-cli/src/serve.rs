@@ -2268,7 +2268,13 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
     // Reject a browser being aimed at this localhost API from another site
     // (CSRF) or via a rebound hostname (DNS rebinding) before reading any body.
     if !request_is_local(&head, method, &shared.local_authorities) {
-        return respond(&mut stream, 403, "text/plain", b"cross-origin request refused").await;
+        return respond(
+            &mut stream,
+            403,
+            "text/plain",
+            b"cross-origin request refused",
+        )
+        .await;
     }
 
     let content_length: usize = lines
@@ -3689,7 +3695,11 @@ mod tests {
         let auth = loopback_authorities(8080);
         // Same-origin browser POST from the served page.
         assert!(request_is_local(
-            &head(&["Host: 127.0.0.1:8080", "Origin: http://127.0.0.1:8080", "Sec-Fetch-Site: same-origin"]),
+            &head(&[
+                "Host: 127.0.0.1:8080",
+                "Origin: http://127.0.0.1:8080",
+                "Sec-Fetch-Site: same-origin"
+            ]),
             "POST",
             &auth,
         ));
@@ -3700,7 +3710,11 @@ mod tests {
             &auth,
         ));
         // curl / CLI: correct Host, no Origin, no Sec-Fetch-Site.
-        assert!(request_is_local(&head(&["Host: 127.0.0.1:8080"]), "POST", &auth));
+        assert!(request_is_local(
+            &head(&["Host: 127.0.0.1:8080"]),
+            "POST",
+            &auth
+        ));
     }
 
     #[test]
@@ -3725,7 +3739,11 @@ mod tests {
             &auth,
         ));
         // A rebound GET (reads) is refused too, on the Host check alone.
-        assert!(!request_is_local(&head(&["Host: evil.example"]), "GET", &auth));
+        assert!(!request_is_local(
+            &head(&["Host: evil.example"]),
+            "GET",
+            &auth
+        ));
         // Opaque/sandboxed origin must not slip through.
         assert!(!request_is_local(
             &head(&["Host: 127.0.0.1:8080", "Origin: null"]),

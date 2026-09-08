@@ -32,6 +32,14 @@ achievable with no project-run infrastructure.
 - **Groups** (`dante-group`): sender-keys channel ratchet (FS within a chain,
   removed-member lockout, insider-forgery resistance; **no PCS** — MLS migration
   planned).
+- **MLS groundwork** (`crates/dante-mls`, detached): thin OpenMLS (RFC 9420)
+  wrapper — `Member::{create, publish_key_package, add, remove, encrypt,
+  process}` plus `Member::call_key`, the per-epoch group-call media key every
+  member derives identically and that rotates on each membership change. Not
+  yet wired into `dante-core`; state is in-memory only. Detached from the
+  workspace because OpenMLS's current release trips four RUSTSEC advisories in
+  its `hpke-rs`/`libcrux` SHA-3 stack (unused by our SHA-256 ciphersuite) —
+  see the crate README.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 
@@ -374,7 +382,10 @@ infrastructure. Reached. ---**
   round-trip). The mic opens only for the duration of a call. `dante-audio` is
   a dependency of the (detached) desktop crate, never of `dante-cli`, so the
   CI gate never links libopus/cpal.
-- **Still to build:** screen share; group calls (MLS-derived media keys).
+- **Still to build:** screen share; group calls. The media-key half is
+  prototyped — `dante_mls::Member::call_key` exports a per-epoch group secret
+  that rekeys on every join/leave — but it needs the channel MLS migration
+  under it and an N-party mix/SFU path.
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
 - SFU role in the server relay above ~5 participants; full mesh below.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

@@ -29,18 +29,26 @@ achievable with no project-run infrastructure.
   blob store, per-IP rate limiting; `dante-relay` binary.
 - **E2E DMs** (`dante-dm`): X3DH + Double Ratchet (FS + PCS), chunked encrypted
   file transfer.
-- **Groups** (`dante-group`): sender-keys channel ratchet (FS within a chain,
-  removed-member lockout, insider-forgery resistance; **no PCS** — MLS migration
-  planned).
-- **MLS** (`crates/dante-mls`): thin OpenMLS 0.9 (RFC 9420) wrapper —
-  `Member::{create, publish_key_package, add, remove, encrypt, process}`,
-  `Member::call_key` (the per-epoch group-call media key every member derives
-  identically and that rotates on each membership change), and
-  `Member::{export, import}` (whole-member byte blob for DaNTe's encrypted
-  local state). Workspace MSRV is 1.91 (OpenMLS's floor); one build-time
-  advisory (`RUSTSEC-2026-0173`, unmaintained proc-macro) is allow-listed in
-  `deny.toml`. Drives group calls today; the channel-messaging migration off
-  the sender-keys ratchet is still pending.
+- **Groups** (`crates/dante-mls`): channels and group calls each run **one MLS
+  group** (RFC 9420, via OpenMLS 0.9) — forward secrecy, post-compromise
+  security, O(log n) rekey, working re-admission of removed members.
+  `Member::{create, publish_key_package, add, remove, encrypt, process,
+  process_from}`, `Member::export_key` (per-epoch application secrets:
+  group-call media key, channel typing-signal key), `Member::{export, import}`
+  (whole-member byte blob for DaNTe's encrypted local state). Workspace MSRV is
+  1.91 (OpenMLS's floor); one build-time advisory (`RUSTSEC-2026-0173`,
+  unmaintained proc-macro) is allow-listed in `deny.toml`. `dante-group` (the
+  old sender-keys ratchet) is retired — kept only for its fuzz target.
+- **Channels *(done — MLS)*:** each channel is an MLS group; the server host is
+  the sole committer. Membership commits (add / remove) travel in the channel's
+  relay log, tagged and interleaved with the encrypted messages, so every
+  member applies them in order and converges on one epoch. A joiner gets an MLS
+  **Welcome** over an authenticated DM (`ChannelControl::MlsWelcome`) then
+  catches up from the log; `process_from(_, Some(host_id))` makes members honour
+  commits only from the host. Each client keeps a pool of 12 single-use
+  KeyPackages published to the relay (`PublishKeyPackages` / `GetKeyPackage`).
+  Persisted as `Member::export()`; a channel whose MLS state can't be restored
+  is dropped with a warning.
 - **Group calls *(done — 1:1-mesh + MLS key)*:** a channel group call is an
   MLS group for a shared media key (`Engine::group_call_key`, rotates on every
   join/leave) plus a full mesh of the existing 1:1 `Call`s for the media. The
@@ -84,22 +92,20 @@ achievable with no project-run infrastructure.
   new relay *signal* channel — a topic-keyed buffer held ~12 s and never logged
   (`PostSignal` / `FetchSignals`). DM: a fresh sealed-sender envelope (no ratchet
   step) posted to a per-pair topic `SHA-256(domain ‖ sorted idks)`; freshness is
-  judged from its AEAD-bound `deposited_ms`. Channel: `Group::seal_signal` AEADs
-  the marker under a **static per-member `signal_key`** carried in the
-  `SenderKeyBundle` (rotated on member removal), so a typing signal never
-  advances the sender-keys message chain; the marker's plaintext prefixes an
-  8-byte timestamp for the same freshness rule. `dante serve`: a "broadcast
-  when I'm typing" toggle, `GET`/`POST /api/typing`, and the coalescing rule
-  (>3 concurrent → "several people are typing…"). `GroupState` gained a
-  tail-appended signal-key block so pre-existing stores still load (minting
-  fresh keys).
+  judged from its AEAD-bound `deposited_ms`. Channel: the marker is XChaCha20-
+  Poly1305-sealed under a key derived from the channel MLS group's current
+  epoch (`Member::export_key("dante/channel-signal/v1", …)`), framed
+  `member(32) ‖ nonce(24) ‖ ct`, so it never touches the message log; its
+  plaintext prefixes an 8-byte timestamp for the same freshness rule.
+  `dante serve`: a "broadcast when I'm typing" toggle, `GET`/`POST /api/typing`,
+  and the coalescing rule (>3 concurrent → "several people are typing…").
 
-**Not built yet:** roles/permissions, per-server passwords (MLS PSK), invite
-links, member removal in the client, private-channel access control beyond the
-secret `channel_id`. libp2p/DHT + multi-relay gossip (Phase 3 deferred);
-voice/video/screenshare (Phase 7); rich features — reactions, emoji/stickers/
-soundboards, bots, discovery UI, embeds (Phase 8); the Tauri desktop client;
-MLS migration for channels.
+**Not built yet:** content-protecting per-server passwords (the `Argon2id` PSK
+into the channel MLS key schedule — now unblocked), private-channel access
+control beyond the secret `channel_id`. libp2p/DHT + multi-relay gossip
+(Phase 3 deferred); screen share + an SFrame layer over the group-call key
+(Phase 7); rich features — emoji/stickers/soundboards, bots, embeds (Phase 8);
+the Tauri desktop native layer.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -229,19 +235,19 @@ DaNTe/
   `GET /api/safety?peer=` / `POST /api/verify`, with a per-DM shield (🛡️/⚠️)
   and a compare dialog in the SPA.
 - **Delete channel / server** *(done, host)*: `Engine::delete_channel` DMs every
-  member a server-root-signed `RemoveOrder` with the **all-zeros sentinel
-  member** — the `Remove` handler reads that as "the host closed this channel"
-  and drops it locally — then removes it from `hosted`. `Engine::delete_server`
+  member a `ChannelControl::Closed { channel_id }` — recipients verify it came
+  from the recorded `host_id` and drop the channel — then removes it from
+  `hosted`. `Engine::delete_server`
   closes every channel that way and publishes a `ServerDelist` (ledger kind 5)
   so the server leaves discovery, then drops the `hosted` entry and its policy.
   `dante chat`: `/delchannel #<chan>`, `/delserver <root>`. `dante serve`:
   `POST /api/channel/delete`, `POST /api/server/delete`; SPA 🗑 buttons for the
   owner (channel header + server pane actions).
-- **Leave channel** *(done)*: `ChannelControl::Leave { channel_id }` (tag 7).
-  `Engine::leave_channel` DMs it to every other member and drops all local
-  state for the channel (and the server policy if no channels remain); the
-  host turns it into a self-`Remove` (mint a `RemoveOrder`, O(n) rekey) so
-  post-leave messages stay private. A host can't leave its own server this way
+- **Leave channel** *(done)*: `ChannelControl::Leave { channel_id }`.
+  `Engine::leave_channel` DMs it to the host and drops all local state for the
+  channel (and the server policy if no channels remain); the host commits an
+  MLS remove of the leaver so post-leave messages stay private. A host can't
+  leave its own server this way
   (`delete_channel` is the path). `dante chat`: `/leave #<chan>`.
   `dante serve`: `POST /api/leave {channel}`; SPA 🚪 header button (hidden for
   the owner).
@@ -327,16 +333,16 @@ infrastructure. Reached. ---**
   `connect-src`, inline script/style only) plus `X-Frame-Options: DENY`,
   `nosniff`, `no-referrer` on every response — an injected string cannot pull
   an external script or exfiltrate cross-origin.
-- **Invite links** *(done)*: `InviteToken { server_root, host_id, channel_id, relay_hint, expires_ms, max_uses, nonce, sig }`, signed by the server root key, rendered `dante-invite:<hex>`. `Engine::create_invite_link` mints one; `redeem_invite` verifies it locally then DMs the host a `ChannelControl::Redeem`; the host checks the signature/expiry/use-count (`invite_uses` map, persisted) and runs the normal channel-invite. The relay is never involved. `serve`: `POST /api/invite-link` / `POST /api/redeem`; CLI: `/invitelink` / `/redeem`.
-- **Member removal** *(done, manual)*: `Engine::remove_from_channel` (host only) mints a server-root-signed `RemoveOrder { server_root, channel_id, member, issued_ms, sig }`, DMs it to every remaining member, drops the member locally, and rotates its own sender chain + signal key (`Group::remove_member`). Each remaining member verifies the order, does the same, and re-keys the others — O(n). The removed member's cached keys go stale; their messages are dropped (`ChannelSession.removed`, persisted; also guards against a stale in-flight `KeyBundle`). **Re-admitting a removed member is not supported** by the sender-keys scheme — recreate the channel (MLS migration fixes this). `serve`: `POST /api/remove`; CLI: `/kick`.
+- **Invite links** *(done)*: `InviteToken { server_root, host_id, channel_id, relay_hint, expires_ms, max_uses, nonce, sig }`, signed by the server root key, rendered `dante-invite:<hex>`. `Engine::create_invite_link` mints one; `redeem_invite` verifies it locally then DMs the host a `ChannelControl::Redeem`; the host checks the signature/expiry/use-count (`invite_uses` map, persisted), fetches the redeemer's MLS KeyPackage, and runs the normal channel add. The relay only stores KeyPackages. `serve`: `POST /api/invite-link` / `POST /api/redeem`; CLI: `/invitelink` / `/redeem`.
+- **Member removal** *(done — MLS)*: `Engine::remove_from_channel` (host only) commits an MLS remove of the member's leaf and posts the Commit to the channel log. Every remaining member applies it (O(log n) rekey); the removed member sees the Commit, learns it is evicted, and drops the channel. `ChannelSession.removed` still tombstones the ex-member so their already-cached backlog is hidden. **Re-admitting** a removed member now works — the host just adds them again with a fresh KeyPackage. `serve`: `POST /api/remove`; CLI: `/kick`.
 - **Optional join password** *(gatekeeping done)*: the host stores
   `SHA-256("dante/join-pw/v1" || server_root || password)` (`Engine::
   set_join_password`); an invite-link redemption (`ChannelControl::Redeem`)
   carries the password and the host checks it before admitting the joiner.
   Direct invites bypass it. `POST /api/joinpw`, `/joinpw`. The
-  content-protection form (an `Argon2id` PSK woven into the channel key
-  schedule so the password is needed to *decrypt*, not just to join) waits for
-  the MLS migration — sender-keys has no key schedule to mix it into.
+  content-protection form (an `Argon2id` PSK woven into the channel MLS key
+  schedule so the password is needed to *decrypt*, not just to join) is now
+  unblocked by the MLS migration — still to wire in.
 - **Optional per-server auto-kick** *(done)*: `HostedServer.auto_kick_ms` (opt-in, off by default; `Engine::set_auto_kick`). `Engine::sweep_inactive_members` — run periodically by the client — removes any channel member whose ledger identity has had no announce / liveness-proof / rotation within the window (`Ledger::last_activity`), driving the same `remove_from_channel` rekey. Inactivity is measured against **ledger activity**, not chattiness, so a member active elsewhere in DaNTe is safe. `serve` sweeps every 120 s; `POST /api/autokick {server,days}`; CLI `/autokick <root> <days|off>`.
 
 ### Phase 7 — Voice & media  (post-MVP)
@@ -411,8 +417,8 @@ infrastructure. Reached. ---**
 
 ### Phase 8 — Rich features  (post-MVP)
 - **Emoji reactions** *(done, unicode)*: `Content::Reaction { target_seq,
-  emoji, remove }` rides the channel log like a normal message (advances the
-  sender chain, same encryption). `poll_channels` folds reactions out of the
+  emoji, remove }` rides the channel log like a normal message (an MLS
+  application message, same as text). `poll_channels` folds reactions out of the
   message stream into `Engine::take_reactions()`; `ChannelMessage` gained a
   `seq` so clients can key reactions to a message. `Engine` also folds every
   reaction into a standing `channel_id -> seq -> emoji -> members` map that is
@@ -447,11 +453,10 @@ infrastructure. Reached. ---**
   `SHA-256("dante/typing/dm/v1" ‖ min(idk) ‖ max(idk))`; the receiver judges
   freshness from the envelope's AEAD-bound `deposited_ms`, so the indicator
   clears a few seconds after the last keystroke even while the relay still
-  serves the signal. **Channel typing** — `Group::seal_signal` AEADs the marker
-  (8-byte timestamp ‖ `Content::Typing`) under a static per-member `signal_key`
-  distributed in the `SenderKeyBundle` and rotated on member removal, so it
-  never advances the forward-secret message chain; `Engine::send_typing_channel`
-  posts the blob to the `channel_id` topic. **Off by default is the intent**;
+  serves the signal. **Channel typing** — the marker (8-byte timestamp ‖
+  `Content::Typing`) is XChaCha20-Poly1305-sealed under a key exported from the
+  channel MLS group's current epoch, so it never touches the message log;
+  `Engine::send_typing_channel` posts the blob to the `channel_id` topic. **Off by default is the intent**;
   the `serve` client ships a
   "broadcast when I'm typing" toggle (currently defaulted on for the demo) that
   gates *sending* — a user who does not broadcast still *sees* others.
@@ -473,10 +478,9 @@ infrastructure. Reached. ---**
 - Per-crate unit tests; crypto vectors vs Signal / MLS RFC references.
 - Property tests (`proptest`) over the wire boundary: every public decoder
   (`dante-proto` `Record`/`Envelope`/codec, `dante-dm` `Content`/`Packet`/
-  state snapshots, `dante-group` `GroupMessage`/`SenderKeyBundle`/`GroupState`,
-  `dante-net` `Request`/`Response`) is total on arbitrary bytes and canonical
-  (decode∘encode is identity); the Double Ratchet and the sender-keys ratchet
-  each decrypt an arbitrarily reordered batch exactly once and reject replays.
+  state snapshots, `dante-net` `Request`/`Response`) is total on arbitrary
+  bytes and canonical (decode∘encode is identity); the Double Ratchet decrypts
+  an arbitrarily reordered batch exactly once and rejects replays.
   `cargo-fuzz` targets on the same decoders are a later add (needs nightly).
 - Integration harness: 2–3 `dante-cli` nodes + 1 `dante-relay` locally. Assert the
   full path: identity announce → DHT lookup → X3DH → ratchet exchange →

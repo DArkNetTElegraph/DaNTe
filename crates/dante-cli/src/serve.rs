@@ -84,7 +84,6 @@ enum Cmd {
     CreateChannel {
         server: String,
         name: String,
-        password: String,
         voice: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -1455,18 +1454,16 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
         Cmd::CreateChannel {
             server,
             name,
-            password,
             voice,
             reply,
         } => {
-            let pw = (!password.is_empty()).then_some(password.as_str());
             let r = match parse_fingerprint(&server) {
                 Ok(root) if voice => engine
                     .create_voice_channel(&root, &name, true)
                     .map(|id| id_b32(&id))
                     .map_err(|e| e.to_string()),
                 Ok(root) => engine
-                    .create_channel(&root, &name, true, pw)
+                    .create_channel(&root, &name, true, None)
                     .map(|id| id_b32(&id))
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
@@ -2465,9 +2462,6 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             struct Req {
                 server: String,
                 name: String,
-                /// Optional: content-protect the channel log with this password.
-                #[serde(default)]
-                password: String,
                 /// Create a voice channel instead of a text one.
                 #[serde(default)]
                 voice: bool,
@@ -2478,7 +2472,6 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::CreateChannel {
                 server: r.server,
                 name: r.name,
-                password: r.password,
                 voice: r.voice,
                 reply,
             })

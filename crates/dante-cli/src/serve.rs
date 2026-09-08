@@ -88,6 +88,12 @@ enum Cmd {
         voice: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Rename a channel (host only; refused for #general).
+    RenameChannel {
+        channel: String,
+        name: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Connect to / disconnect from a voice channel (`leave` when `join` false).
     Voice {
         channel: String,
@@ -1453,6 +1459,23 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::RenameChannel {
+            channel,
+            name,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match parse_fingerprint(channel) {
+                Ok(cid) => engine
+                    .rename_channel(&cid, &name, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            refresh_channels(engine, shared).await;
+            let _ = reply.send(r);
+        }
         Cmd::Voice {
             channel,
             join,
@@ -2407,6 +2430,23 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 name: r.name,
                 password: r.password,
                 voice: r.voice,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/channel/rename") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                name: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::RenameChannel {
+                channel: r.channel,
+                name: r.name,
                 reply,
             })
             .await

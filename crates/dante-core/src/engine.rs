@@ -2316,6 +2316,9 @@ impl Engine {
             if !self.hosted.contains_key(&ch.info.server_root) {
                 return Err(CoreError::NotServerHost);
             }
+            if ch.info.channel_name.eq_ignore_ascii_case("general") {
+                return Err(CoreError::Channel("#general cannot be deleted"));
+            }
             let me = self.my_member_id();
             let members: Vec<[u8; 32]> = ch.roster.iter().copied().filter(|m| *m != me).collect();
             (ch.info.server_root, members)
@@ -2339,6 +2342,54 @@ impl Engine {
         Ok(())
     }
 
+    /// Rename a channel in a server this client hosts. Updates the local name
+    /// and DMs every member a [`ChannelControl::Renamed`] so their display
+    /// name tracks it. `#general` (a server's first, always-there channel)
+    /// can't be renamed.
+    pub async fn rename_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        name: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let name: String = name.trim().chars().take(64).collect();
+        if name.is_empty() {
+            return Err(CoreError::Channel("channel name cannot be empty"));
+        }
+        let members = {
+            let ch = self
+                .channels
+                .get(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            if !self.hosted.contains_key(&ch.info.server_root) {
+                return Err(CoreError::NotServerHost);
+            }
+            if ch.info.channel_name.eq_ignore_ascii_case("general") {
+                return Err(CoreError::Channel("#general cannot be renamed"));
+            }
+            let me = self.my_member_id();
+            ch.roster
+                .iter()
+                .copied()
+                .filter(|m| *m != me)
+                .collect::<Vec<_>>()
+        };
+
+        self.channels.get_mut(channel_id).unwrap().info.channel_name = name.clone();
+        let msg = Content::Channel(
+            ChannelControl::Renamed {
+                channel_id: *channel_id,
+                name,
+            }
+            .encode(),
+        );
+        for m in members {
+            let _ = self.send_content(&m, msg.clone(), now_ms).await;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Tear down a server this client hosts: close every one of its channels
     /// and publish a `ServerDelist` record so it drops out of discovery.
     pub async fn delete_server(
@@ -2353,8 +2404,19 @@ impl Engine {
             .root
             .to_bytes();
         let channels: Vec<[u8; 32]> = self.hosted[server_root].channels.clone();
-        for c in channels {
-            let _ = self.delete_channel(&c, now_ms).await;
+        for c in &channels {
+            let _ = self.delete_channel(c, now_ms).await;
+        }
+        // `delete_channel` refuses #general; the whole server is going away, so
+        // drop whatever it left behind (and tell members it closed).
+        for c in &channels {
+            if let Some(ch) = self.channels.remove(c) {
+                let me = self.my_member_id();
+                let msg = Content::Channel(ChannelControl::Closed { channel_id: *c }.encode());
+                for m in ch.roster.iter().copied().filter(|m| *m != me) {
+                    let _ = self.send_content(&m, msg.clone(), now_ms).await;
+                }
+            }
         }
 
         let root = SignSecret::from_bytes(&root_secret);
@@ -3561,6 +3623,14 @@ impl Engine {
                         self.server_policies.remove(&server_root);
                     }
                     self.dirty = true;
+                }
+            }
+            ChannelControl::Renamed { channel_id, name } => {
+                if let Some(c) = self.channels.get_mut(&channel_id) {
+                    if c.info.host_id == idk_to_id(from) {
+                        c.info.channel_name = name.chars().take(64).collect();
+                        self.dirty = true;
+                    }
                 }
             }
             ChannelControl::Policy { policy } => {

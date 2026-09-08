@@ -77,6 +77,33 @@ struct MsgEdit {
     deleted: bool,
 }
 
+/// Standing edit/delete state for direct messages: `peer_idk -> msg_id -> state`.
+type DmEditMap = HashMap<[u8; 32], HashMap<[u8; 16], DmMsgEdit>>;
+
+/// Per-DM edit / delete tracking. Authorisation is structural: an edit is only
+/// applied against a `history` entry in the same conversation and direction as
+/// the original message, so only the original sender's change lands.
+#[derive(Clone, Debug, Default)]
+struct DmMsgEdit {
+    /// `Some` once the message has been edited (the current text).
+    text: Option<String>,
+    /// `true` once the message has been withdrawn.
+    deleted: bool,
+}
+
+/// A live direct-message edit/delete the UI folds into its view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmEdit {
+    /// The peer whose conversation this message is in (their Ed25519 key).
+    pub peer_idk: [u8; 32],
+    /// The message id (`store::HistoryEntry::msg_id`).
+    pub msg_id: [u8; 16],
+    /// The new text (`None` for a delete).
+    pub text: Option<String>,
+    /// `true` if the message was withdrawn.
+    pub deleted: bool,
+}
+
 /// One hit from [`Engine::search`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchHit {
@@ -173,6 +200,9 @@ pub struct ReceivedDm {
     pub from_idk: [u8; 32],
     /// The plaintext.
     pub text: String,
+    /// The message's conversation id, for a later edit / delete. All-zero if
+    /// the sender's client is too old to support editing.
+    pub msg_id: [u8; 16],
 }
 
 /// Where a typing signal belongs.
@@ -433,6 +463,12 @@ pub struct Engine {
     channel_pins: PinMap,
     /// Pins/unpins seen since the last `take_pins()` — the live UI delta.
     new_pins: Vec<ChannelPin>,
+    /// Standing edit/delete state for direct messages. Persisted; the relay
+    /// mailbox is fetched only forward of `last_fetch_since_ms`, so a restart
+    /// would otherwise lose every DM edit.
+    dm_edits: DmEditMap,
+    /// DM edits/deletes seen since the last `take_dm_edits()` — the UI delta.
+    new_dm_edits: Vec<DmEdit>,
     /// DM peers whose safety number the user confirmed out-of-band, keyed by
     /// stable `IdentityId` bytes and pinned to the peer `idk` that was verified
     /// (so a later key rotation drops back to unverified). Persisted.
@@ -521,6 +557,8 @@ impl Engine {
             new_edits: Vec::new(),
             channel_pins: HashMap::new(),
             new_pins: Vec::new(),
+            dm_edits: HashMap::new(),
+            new_dm_edits: Vec::new(),
             verified_peers: HashMap::new(),
             contacts: HashMap::new(),
             blocked: HashSet::new(),
@@ -628,6 +666,15 @@ impl Engine {
                             at_ms: sp.at_ms,
                         },
                     );
+            }
+            for de in s.dm_edits {
+                engine.dm_edits.entry(de.peer_idk).or_default().insert(
+                    de.msg_id,
+                    DmMsgEdit {
+                        text: (!de.deleted && !de.text.is_empty()).then_some(de.text),
+                        deleted: de.deleted,
+                    },
+                );
             }
             engine.verified_peers = s.verified_peers.into_iter().collect();
             engine.contacts = s
@@ -868,6 +915,22 @@ impl Engine {
                         by: p.by,
                         at_ms: p.at_ms,
                     })
+                })
+                .collect(),
+            dm_msg_ids: self.history.iter().map(|e| e.msg_id).collect(),
+            dm_edits: self
+                .dm_edits
+                .iter()
+                .flat_map(|(peer, by_id)| {
+                    by_id
+                        .iter()
+                        .filter(|(_, e)| e.text.is_some() || e.deleted)
+                        .map(move |(msg_id, e)| store::StoredDmEdit {
+                            peer_idk: *peer,
+                            msg_id: *msg_id,
+                            text: e.text.clone().unwrap_or_default(),
+                            deleted: e.deleted,
+                        })
                 })
                 .collect(),
             seen_envelopes: seen,
@@ -3155,14 +3218,168 @@ impl Engine {
     /// prekeys from the relay; thereafter ratchets forward.
     ///
     /// The peer must be present in the local ledger replica ([`Engine::sync`]).
+    /// Returns the new message's conversation id — the handle for a later
+    /// [`edit_dm`](Engine::edit_dm) / [`delete_dm`](Engine::delete_dm).
     pub async fn send_dm(
         &mut self,
         peer_id: &[u8; 32],
         text: &str,
         now_ms: u64,
+    ) -> Result<[u8; 16], CoreError> {
+        let id = random_array::<16>();
+        self.send_content(
+            peer_id,
+            Content::TextId {
+                text: text.to_owned(),
+                id,
+            },
+            now_ms,
+        )
+        .await?;
+        Ok(id)
+    }
+
+    /// Replace the text of a direct message we sent. `msg_id` is the value
+    /// [`send_dm`](Engine::send_dm) returned.
+    pub async fn edit_dm(
+        &mut self,
+        peer_id: &[u8; 32],
+        msg_id: &[u8; 16],
+        new_text: &str,
+        now_ms: u64,
     ) -> Result<(), CoreError> {
-        self.send_content(peer_id, Content::Text(text.to_owned()), now_ms)
+        self.post_dm_edit(peer_id, msg_id, Some(new_text.to_owned()), now_ms)
             .await
+    }
+
+    /// Withdraw a direct message we sent.
+    pub async fn delete_dm(
+        &mut self,
+        peer_id: &[u8; 32],
+        msg_id: &[u8; 16],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.post_dm_edit(peer_id, msg_id, None, now_ms).await
+    }
+
+    async fn post_dm_edit(
+        &mut self,
+        peer_id: &[u8; 32],
+        msg_id: &[u8; 16],
+        new_text: Option<String>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let peer_idk = self
+            .ledger
+            .idk_for_id(peer_id)
+            .ok_or(CoreError::UnknownPeer)?;
+        // We may only edit an outgoing text message of ours in this conversation.
+        let known = self.history.iter().any(|e| {
+            e.outgoing
+                && e.peer_idk == peer_idk
+                && e.msg_id == *msg_id
+                && matches!(e.kind, HistoryKind::Text(_))
+        });
+        if !known {
+            return Err(CoreError::Message(
+                "unknown message (or sent before restart)",
+            ));
+        }
+        if self
+            .dm_edits
+            .get(&peer_idk)
+            .and_then(|m| m.get(msg_id))
+            .is_some_and(|e| e.deleted)
+        {
+            return Err(CoreError::Message("that message was deleted"));
+        }
+        let content = match &new_text {
+            Some(t) => Content::DmEdit {
+                target: *msg_id,
+                text: t.clone(),
+            },
+            None => Content::DmDelete { target: *msg_id },
+        };
+        self.send_content(peer_id, content, now_ms).await?;
+        self.apply_dm_edit(peer_idk, *msg_id, new_text);
+        Ok(())
+    }
+
+    /// Fold a DM edit / delete into the standing state and queue the UI delta.
+    fn apply_dm_edit(&mut self, peer_idk: [u8; 32], msg_id: [u8; 16], new_text: Option<String>) {
+        let entry = self
+            .dm_edits
+            .entry(peer_idk)
+            .or_default()
+            .entry(msg_id)
+            .or_default();
+        if entry.deleted {
+            return;
+        }
+        match new_text {
+            Some(t) => {
+                entry.text = Some(t.clone());
+                self.new_dm_edits.push(DmEdit {
+                    peer_idk,
+                    msg_id,
+                    text: Some(t),
+                    deleted: false,
+                });
+            }
+            None => {
+                entry.text = None;
+                entry.deleted = true;
+                self.new_dm_edits.push(DmEdit {
+                    peer_idk,
+                    msg_id,
+                    text: None,
+                    deleted: true,
+                });
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// True if `msg_id` names a message the peer `from` sent us in this
+    /// conversation — the only thing an inbound `DmEdit` / `DmDelete` may touch.
+    fn dm_target_matches(&self, from: &[u8; 32], msg_id: &[u8; 16]) -> bool {
+        self.history.iter().any(|e| {
+            !e.outgoing
+                && e.peer_idk == *from
+                && e.msg_id == *msg_id
+                && matches!(e.kind, HistoryKind::Text(_))
+        })
+    }
+
+    /// Drain the DM edits/deletes seen since the last call (own and inbound).
+    pub fn take_dm_edits(&mut self) -> Vec<DmEdit> {
+        std::mem::take(&mut self.new_dm_edits)
+    }
+
+    /// The current DM edit/delete state, one [`DmEdit`] per changed message.
+    /// Used to re-seed a fresh view on startup.
+    pub fn dm_edit_snapshot(&self) -> Vec<DmEdit> {
+        let mut out = Vec::new();
+        for (peer, by_id) in &self.dm_edits {
+            for (msg_id, e) in by_id {
+                if e.deleted {
+                    out.push(DmEdit {
+                        peer_idk: *peer,
+                        msg_id: *msg_id,
+                        text: None,
+                        deleted: true,
+                    });
+                } else if let Some(t) = &e.text {
+                    out.push(DmEdit {
+                        peer_idk: *peer,
+                        msg_id: *msg_id,
+                        text: Some(t.clone()),
+                        deleted: false,
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Send a file DM: the ciphertext chunks go to the relay blob store, the
@@ -3317,7 +3534,11 @@ impl Engine {
         content: Content,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        if self.blocked.contains(peer_id) && matches!(content, Content::Text(_) | Content::File(_))
+        if self.blocked.contains(peer_id)
+            && matches!(
+                content,
+                Content::Text(_) | Content::TextId { .. } | Content::File(_)
+            )
         {
             return Err(CoreError::Blocked);
         }
@@ -3330,13 +3551,17 @@ impl Engine {
             .ledger
             .agreement_key(&peer_idk)
             .ok_or(CoreError::UnknownPeer)?;
-        let history_kind = match &content {
-            Content::Text(t) => Some(HistoryKind::Text(t.clone())),
-            Content::File(m) => Some(HistoryKind::File {
-                filename: m.filename.clone(),
-                size: m.total_size,
-            }),
-            Content::Channel(_) => None, // control traffic, not conversation
+        let (history_kind, history_id) = match &content {
+            Content::Text(t) => (Some(HistoryKind::Text(t.clone())), [0u8; 16]),
+            Content::TextId { text, id } => (Some(HistoryKind::Text(text.clone())), *id),
+            Content::File(m) => (
+                Some(HistoryKind::File {
+                    filename: m.filename.clone(),
+                    size: m.total_size,
+                }),
+                [0u8; 16],
+            ),
+            Content::Channel(_) => (None, [0u8; 16]), // control traffic, not conversation
             // Control-only payloads never become conversation history.
             Content::Typing
             | Content::Reaction { .. }
@@ -3350,7 +3575,9 @@ impl Engine {
             | Content::Edit { .. }
             | Content::Delete { .. }
             | Content::Reply { .. }
-            | Content::Pin { .. } => None,
+            | Content::Pin { .. }
+            | Content::DmEdit { .. }
+            | Content::DmDelete { .. } => (None, [0u8; 16]),
         };
         let plaintext = content.encode();
 
@@ -3387,6 +3614,7 @@ impl Engine {
                 outgoing: true,
                 ts_ms: now_ms,
                 kind,
+                msg_id: history_id,
             });
         }
         self.dirty = true;
@@ -3456,11 +3684,37 @@ impl Engine {
                         outgoing: false,
                         ts_ms: now_ms,
                         kind: HistoryKind::Text(text.clone()),
+                        msg_id: [0u8; 16],
                     });
                     out.push(Inbound::Message(ReceivedDm {
                         from_idk: from,
                         text,
+                        msg_id: [0u8; 16],
                     }));
+                }
+                Ok(Content::TextId { text, id }) => {
+                    self.history.push(HistoryEntry {
+                        peer_idk: from,
+                        outgoing: false,
+                        ts_ms: now_ms,
+                        kind: HistoryKind::Text(text.clone()),
+                        msg_id: id,
+                    });
+                    out.push(Inbound::Message(ReceivedDm {
+                        from_idk: from,
+                        text,
+                        msg_id: id,
+                    }));
+                }
+                Ok(Content::DmEdit { target, text }) => {
+                    if self.dm_target_matches(&from, &target) {
+                        self.apply_dm_edit(from, target, Some(text));
+                    }
+                }
+                Ok(Content::DmDelete { target }) => {
+                    if self.dm_target_matches(&from, &target) {
+                        self.apply_dm_edit(from, target, None);
+                    }
                 }
                 Ok(Content::File(manifest)) => match self.fetch_file(manifest).await {
                     Ok((filename, data)) => {
@@ -3472,6 +3726,7 @@ impl Engine {
                                 filename: filename.clone(),
                                 size: data.len() as u64,
                             },
+                            msg_id: [0u8; 16],
                         });
                         out.push(Inbound::File {
                             from_idk: from,

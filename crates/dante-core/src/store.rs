@@ -47,6 +47,10 @@ pub struct HistoryEntry {
     pub ts_ms: u64,
     /// The message payload.
     pub kind: HistoryKind,
+    /// The message's conversation-unique id, minted by whoever sent it, for
+    /// edit / delete. All-zero for a file, or a text message that predates the
+    /// feature (those cannot be edited).
+    pub msg_id: [u8; 16],
 }
 
 /// One line of channel history, oldest first.
@@ -76,6 +80,19 @@ pub struct StoredEdit {
     /// The edited text (empty when `deleted`).
     pub text: String,
     /// Whether the message was deleted.
+    pub deleted: bool,
+}
+
+/// A persisted direct-message edit / delete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredDmEdit {
+    /// The peer whose conversation this message is in.
+    pub peer_idk: [u8; 32],
+    /// The message id (`HistoryEntry::msg_id`).
+    pub msg_id: [u8; 16],
+    /// The edited text (empty when `deleted`).
+    pub text: String,
+    /// Whether the message was withdrawn.
     pub deleted: bool,
 }
 
@@ -155,6 +172,11 @@ pub struct PersistedState {
     pub channel_edits: Vec<StoredEdit>,
     /// Pinned channel messages.
     pub channel_pins: Vec<StoredPin>,
+    /// Message ids aligned positionally with `history` (same length, same
+    /// order). Restored back onto `HistoryEntry::msg_id`.
+    pub dm_msg_ids: Vec<[u8; 16]>,
+    /// Standing direct-message edits/deletes.
+    pub dm_edits: Vec<StoredDmEdit>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -355,6 +377,19 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for p in &s.channel_pins {
         w.fixed(&p.channel_id).u64(p.seq).fixed(&p.by).u64(p.at_ms);
     }
+
+    w.u32(s.dm_msg_ids.len() as u32);
+    for id in &s.dm_msg_ids {
+        w.fixed(id);
+    }
+
+    w.u32(s.dm_edits.len() as u32);
+    for e in &s.dm_edits {
+        w.fixed(&e.peer_idk)
+            .fixed(&e.msg_id)
+            .string(&e.text)
+            .bool(e.deleted);
+    }
     w.into_vec()
 }
 
@@ -441,6 +476,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
             outgoing,
             ts_ms,
             kind,
+            msg_id: [0u8; 16],
         });
     }
 
@@ -575,6 +611,34 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut dm_msg_ids = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        dm_msg_ids.reserve(n);
+        for _ in 0..n {
+            dm_msg_ids.push(r.fixed::<16>()?);
+        }
+    }
+
+    let mut dm_edits = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        dm_edits.reserve(n);
+        for _ in 0..n {
+            dm_edits.push(StoredDmEdit {
+                peer_idk: r.fixed::<32>()?,
+                msg_id: r.fixed::<16>()?,
+                text: r.string()?,
+                deleted: r.bool()?,
+            });
+        }
+    }
+
+    // Restore message ids onto the aligned history entries.
+    for (e, id) in history.iter_mut().zip(dm_msg_ids.iter()) {
+        e.msg_id = *id;
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -594,6 +658,8 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         blocked,
         channel_edits,
         channel_pins,
+        dm_msg_ids,
+        dm_edits,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -640,6 +706,7 @@ mod tests {
                 outgoing: true,
                 ts_ms: 42,
                 kind: HistoryKind::Text("hello".into()),
+                msg_id: [3u8; 16],
             }],
             channel_history: vec![ChannelHistoryEntry {
                 channel_id: [7u8; 32],
@@ -682,6 +749,13 @@ mod tests {
                 by: [6u8; 32],
                 at_ms: 1_700_000_123_000,
             }],
+            dm_msg_ids: vec![[3u8; 16]],
+            dm_edits: vec![StoredDmEdit {
+                peer_idk: peer,
+                msg_id: [3u8; 16],
+                text: "hello (edited)".into(),
+                deleted: false,
+            }],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -701,6 +775,9 @@ mod tests {
         assert_eq!(back.channel_reactions, state.channel_reactions);
         assert_eq!(back.channel_edits, state.channel_edits);
         assert_eq!(back.channel_pins, state.channel_pins);
+        assert_eq!(back.dm_msg_ids, state.dm_msg_ids);
+        assert_eq!(back.dm_edits, state.dm_edits);
+        assert_eq!(back.history[0].msg_id, [3u8; 16]);
         assert_eq!(back.verified_peers, state.verified_peers);
         assert_eq!(back.contacts, state.contacts);
         assert_eq!(back.blocked, state.blocked);
@@ -736,6 +813,8 @@ mod tests {
             blocked: vec![],
             channel_edits: vec![],
             channel_pins: vec![],
+            dm_msg_ids: vec![],
+            dm_edits: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

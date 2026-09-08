@@ -17,7 +17,7 @@ pub mod store;
 
 pub use channel::{ChannelInfo, ChannelMessage, ChannelReaction, RemoveOrder};
 pub use dante_identity::RevokeReason;
-pub use dante_voice::{CallEvent, CallState};
+pub use dante_voice::{CallEvent, CallState, IceServer};
 pub use engine::{
     CallUpdate, Contact, Engine, Inbound, ReceivedDm, TypingEvent, TypingScope, DM_TTL_MS,
 };

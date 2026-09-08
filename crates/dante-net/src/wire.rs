@@ -68,6 +68,22 @@ pub enum Request {
         /// The shared topic to read.
         topic: [u8; 32],
     },
+    /// Ask the relay for the ICE servers to use for calls on this network
+    /// (STUN URLs, plus short-lived TURN credentials if the relay has a TURN
+    /// secret configured).
+    GetIceConfig,
+}
+
+/// One ICE server entry (STUN or TURN). `username` / `credential` are empty
+/// for STUN.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IceCfg {
+    /// `stun:` / `turn:` / `turns:` URLs.
+    pub urls: Vec<String>,
+    /// TURN username (empty for STUN).
+    pub username: String,
+    /// TURN credential (empty for STUN).
+    pub credential: String,
 }
 
 /// A relay -> client response.
@@ -98,6 +114,8 @@ pub enum Response {
     ChannelLog(Vec<(u64, Vec<u8>)>),
     /// Reply to [`Request::FetchSignals`]: opaque payloads, oldest first.
     Signals(Vec<Vec<u8>>),
+    /// Reply to [`Request::GetIceConfig`]: the ICE servers for this network.
+    IceConfig(Vec<IceCfg>),
 }
 
 const REQ_PING: u8 = 0;
@@ -114,6 +132,7 @@ const REQ_POST_CHANNEL: u8 = 10;
 const REQ_FETCH_CHANNEL: u8 = 11;
 const REQ_POST_SIGNAL: u8 = 12;
 const REQ_FETCH_SIGNALS: u8 = 13;
+const REQ_GET_ICE: u8 = 14;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -125,6 +144,42 @@ const RES_PREKEYS: u8 = 6;
 const RES_BLOB: u8 = 7;
 const RES_CHANNEL_LOG: u8 = 8;
 const RES_SIGNALS: u8 = 9;
+const RES_ICE: u8 = 10;
+
+fn write_ice_list(w: &mut Writer, list: &[IceCfg]) {
+    w.u32(list.len() as u32);
+    for c in list {
+        w.u32(c.urls.len() as u32);
+        for u in &c.urls {
+            w.string(u);
+        }
+        w.string(&c.username).string(&c.credential);
+    }
+}
+
+fn read_ice_list(r: &mut Reader<'_>) -> Result<Vec<IceCfg>, WireError> {
+    let n = r.u32()? as usize;
+    if n > r.remaining() {
+        return Err(WireError::LengthTooLarge(n as u64));
+    }
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let un = r.u32()? as usize;
+        if un > r.remaining() {
+            return Err(WireError::LengthTooLarge(un as u64));
+        }
+        let mut urls = Vec::with_capacity(un);
+        for _ in 0..un {
+            urls.push(r.string()?);
+        }
+        out.push(IceCfg {
+            urls,
+            username: r.string()?,
+            credential: r.string()?,
+        });
+    }
+    Ok(out)
+}
 
 fn write_blob_list(w: &mut Writer, blobs: &[Vec<u8>]) {
     w.u32(blobs.len() as u32);
@@ -199,6 +254,9 @@ impl Request {
             Request::FetchSignals { topic } => {
                 w.u8(REQ_FETCH_SIGNALS).fixed(topic);
             }
+            Request::GetIceConfig => {
+                w.u8(REQ_GET_ICE);
+            }
         }
         w.into_vec()
     }
@@ -235,6 +293,7 @@ impl Request {
             REQ_FETCH_SIGNALS => Request::FetchSignals {
                 topic: r.fixed::<32>()?,
             },
+            REQ_GET_ICE => Request::GetIceConfig,
             REQ_FETCH => {
                 let n = r.u32()? as usize;
                 if n > r.remaining() {
@@ -277,6 +336,7 @@ impl Request {
             Request::FetchChannel { .. } => "FetchChannel",
             Request::PostSignal { .. } => "PostSignal",
             Request::FetchSignals { .. } => "FetchSignals",
+            Request::GetIceConfig => "GetIceConfig",
         }
     }
 }
@@ -338,6 +398,10 @@ impl Response {
                 w.u8(RES_SIGNALS);
                 write_blob_list(&mut w, blobs);
             }
+            Response::IceConfig(list) => {
+                w.u8(RES_ICE);
+                write_ice_list(&mut w, list);
+            }
         }
         w.into_vec()
     }
@@ -378,6 +442,7 @@ impl Response {
                 Response::ChannelLog(out)
             }
             RES_SIGNALS => Response::Signals(read_blob_list(&mut r)?),
+            RES_ICE => Response::IceConfig(read_ice_list(&mut r)?),
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -429,6 +494,7 @@ mod tests {
             blob: vec![7, 7, 7],
         });
         rt_req(Request::FetchSignals { topic: [6u8; 32] });
+        rt_req(Request::GetIceConfig);
     }
 
     #[test]
@@ -448,6 +514,17 @@ mod tests {
         rt_res(Response::Blob(None));
         rt_res(Response::ChannelLog(vec![(1, vec![9]), (2, vec![])]));
         rt_res(Response::Signals(vec![vec![1, 2], vec![]]));
+        rt_res(Response::IceConfig(vec![
+            IceCfg {
+                urls: vec!["stun:stun.example.org:3478".into()],
+                ..Default::default()
+            },
+            IceCfg {
+                urls: vec!["turn:turn.example.org:3478?transport=udp".into()],
+                username: "1893456000:dante".into(),
+                credential: "abc123==".into(),
+            },
+        ]));
     }
 
     #[test]

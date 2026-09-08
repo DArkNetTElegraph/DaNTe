@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Context;
 use dante_ledger::LedgerParams;
 use dante_net::transport::serve;
-use dante_relay::state::{now_ms, Limits, RelayHandler, RelayState};
+use dante_relay::state::{now_ms, IcePolicy, Limits, RelayHandler, RelayState};
 use tokio::net::TcpListener;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
@@ -21,6 +21,7 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 struct Args {
     listen: String,
     min_pow_bits: Option<u8>,
+    ice: IcePolicy,
 }
 
 #[tokio::main]
@@ -44,10 +45,17 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let handler = Arc::new(RelayHandler::new(RelayState::new(
-        params,
-        Limits::default(),
-    )));
+    let mut relay_state = RelayState::new(params, Limits::default());
+    if !args.ice.stun.is_empty() || !args.ice.turn.is_empty() {
+        tracing::info!(
+            stun = args.ice.stun.len(),
+            turn = args.ice.turn.len(),
+            turn_creds = args.ice.turn_secret.is_some(),
+            "advertising ICE servers for calls"
+        );
+    }
+    relay_state.set_ice_policy(args.ice);
+    let handler = Arc::new(RelayHandler::new(relay_state));
 
     // Background housekeeping.
     {
@@ -80,6 +88,10 @@ async fn main() -> anyhow::Result<()> {
 fn parse_args() -> Args {
     let mut listen = DEFAULT_LISTEN.to_string();
     let mut min_pow_bits = None;
+    let mut ice = IcePolicy {
+        turn_ttl_secs: 3600,
+        ..Default::default()
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -91,9 +103,28 @@ fn parse_args() -> Args {
             "--min-pow-bits" => {
                 min_pow_bits = it.next().and_then(|v| v.parse().ok());
             }
+            "--stun" => {
+                if let Some(v) = it.next() {
+                    ice.stun.push(v);
+                }
+            }
+            "--turn" => {
+                if let Some(v) = it.next() {
+                    ice.turn.push(v);
+                }
+            }
+            "--turn-secret" => {
+                ice.turn_secret = it.next().and_then(|v| hex_bytes(&v));
+            }
+            "--turn-ttl" => {
+                if let Some(n) = it.next().and_then(|v| v.parse().ok()) {
+                    ice.turn_ttl_secs = n;
+                }
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "usage: dante-relay [--listen ADDR] [--min-pow-bits N]\n  \
+                     [--stun URL ...] [--turn URL ...] [--turn-secret HEX] [--turn-ttl SECS]\n  \
                      defaults: --listen {DEFAULT_LISTEN}, PoW floor from LedgerParams::default()"
                 );
                 std::process::exit(0);
@@ -104,5 +135,16 @@ fn parse_args() -> Args {
     Args {
         listen,
         min_pow_bits,
+        ice,
     }
+}
+
+fn hex_bytes(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.is_empty() || s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok())
+        .collect()
 }

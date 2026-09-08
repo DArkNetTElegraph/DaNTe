@@ -22,7 +22,8 @@
 //! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
 //! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
 //! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`,
-//! `GET /api/calls`, `POST /api/call|call/accept|call/hangup {peer}`.
+//! `GET /api/calls`, `POST /api/call|call/accept|call/hangup {peer}`,
+//! `GET /api/ice`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -212,6 +213,8 @@ enum Cmd {
     },
     /// The active calls as a ready JSON array.
     Calls { reply: oneshot::Sender<String> },
+    /// The ICE servers the engine will use for calls, as a ready JSON array.
+    Ice { reply: oneshot::Sender<String> },
 }
 
 /// One row of the SPA's call panel.
@@ -1159,6 +1162,19 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let rows: Vec<_> = shared.calls.lock().await.values().cloned().collect();
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
         }
+        Cmd::Ice { reply } => {
+            let rows: Vec<_> = engine
+                .ice_servers()
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "urls": s.urls,
+                        "kind": if s.username.is_empty() { "stun" } else { "turn" },
+                    })
+                })
+                .collect();
+            let _ = reply.send(serde_json::Value::Array(rows).to_string());
+        }
         Cmd::Call {
             peer,
             action,
@@ -1839,6 +1855,15 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         ("GET", "/api/calls") => {
             let (tx, rx) = oneshot::channel();
             if shared.cmd.send(Cmd::Calls { reply: tx }).await.is_err() {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/ice") => {
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::Ice { reply: tx }).await.is_err() {
                 return respond(&mut stream, 500, "text/plain", b"engine gone").await;
             }
             let body = rx.await.unwrap_or_else(|_| "[]".into());

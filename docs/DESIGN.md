@@ -328,10 +328,24 @@ infrastructure. Reached. ---**
   IncomingCall` / `CallEnded`. `dante chat`: `/call` `/answer` `/hangup
   <fp>`. e2e-tested: a call connects to `CallState::Connected` purely over the
   DM path (loopback ICE, no STUN) and the hang-up propagates.
+- **NAT traversal *(done — plumbing)*:** `dante-voice::IceServer` +
+  `Call::offer_with` / `answer_with(ice)`; `Engine::set_ice_servers` /
+  `ice_servers`. The relay advertises them: `Request::GetIceConfig` →
+  `Response::IceConfig(Vec<IceCfg>)`, configured with
+  `dante-relay --stun URL … --turn URL … --turn-secret HEX [--turn-ttl SECS]`.
+  TURN credentials are **short-lived**: `username = "{expiry}:dante"`,
+  `credential = base64(HMAC-SHA256(turn-secret, username))` — the operator's
+  TURN server (coturn, …) must verify the same scheme. `Engine::connect`
+  fetches the config from its relay automatically; `dante serve` exposes it at
+  `GET /api/ice`. The relay does **not** run a TURN server itself (that's an
+  ops concern); it only mints the credentials.
+- **Call UI *(done)*:** `dante serve` `GET /api/calls`,
+  `POST /api/call|call/accept|call/hangup {peer}`; SPA has a 📞 button, a call
+  bar (ringing/calling/connecting/connected + Accept/Hang up) and a corner
+  ring toast. No browser media path — the engine owns the peer connection.
 - **Still to build:** OS audio capture/playback (cpal) + Opus encode/decode
-  pushed through a `TrackLocalStaticSample`; the `dante serve` / SPA call UI
-  (state + accept/hangup — no browser media path, the engine owns the pc);
-  STUN/TURN for peers behind NAT; screen share.
+  pushed through a `TrackLocalStaticSample`; screen share; running / bundling a
+  TURN server for zero-config deployments.
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
 - SFU role in the server relay above ~5 participants; full mesh below.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

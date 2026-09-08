@@ -1112,10 +1112,12 @@ async fn engine_task(
                                 }
                             }
                             Inbound::File { from_idk, filename, data } => {
-                                let safe = filename.rsplit(['/', '\\']).next().unwrap_or("file")
-                                    .replace(['/', '\\', '\0'], "_");
-                                let saved = format!("dante-recv-{safe}");
-                                let _ = std::fs::write(&saved, &data);
+                                // Held in memory and served back over
+                                // /api/recv-file; deliberately NOT written to
+                                // disk. This is a privacy tool — an incoming
+                                // file must not silently land as plaintext in
+                                // the working directory, where it outlives the
+                                // session and is trivially recoverable.
                                 let mime = sniff_mime(&data).to_owned();
                                 let id = to_hex(&dante_crypto::hash::sha256(&data))[..16].to_owned();
                                 {
@@ -1131,7 +1133,7 @@ async fn engine_task(
                                 let from = short_fp(&from_idk);
                                 last_msg_ms.insert(from.clone(), now);
                                 Item::File {
-                                    seq, from, filename, size: data.len(), saved,
+                                    seq, from, filename, size: data.len(), saved: String::new(),
                                     url: format!("/api/recv-file?id={id}"), mime,
                                 }
                             }

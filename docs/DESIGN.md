@@ -113,13 +113,16 @@ each publish and `receive_all` re-publishes after accepting a first-contact,
 so the relay stays stocked. If a client is offline while its published pool
 drains, first contact falls back to OTP-less X3DH until it next publishes.
 
-**`dante serve` is a throwaway.** It is a hand-rolled HTTP server + a
-single-file vanilla-JS page, built only so the engine has a clickable client
-that is verifiable headlessly. Inbound items arrive over a Server-Sent-Events
-stream (`GET /api/stream?since=N` — a server-side tail of the inbox, ~150 ms
-latency); a slow `GET /api/messages` poll stays as the fallback when the stream
-drops. A real client (Tauri, or a WebSocket rewrite) still replaces the visual
-design. Do not invest in its look.
+**`dante serve` is the interim client.** A hand-rolled HTTP server + a
+single-file vanilla-JS page (no build step), so the engine has a real client
+that is also verifiable headlessly; the Tauri shell loads the same page. Inbound
+items arrive over a Server-Sent-Events stream (`GET /api/stream?since=N` — a
+server-side tail of the inbox, ~150 ms latency); a slow `GET /api/messages` poll
+is the fallback when the stream drops. The stylesheet is token-driven
+(`:root` custom properties, an elevation/`--radius`/`--shadow` scale, a modern
+system font stack, `color-mix()` tints) and theme-aware — dark by default, with
+a light palette under `prefers-color-scheme` and `[data-theme]`, and a
+`prefers-reduced-motion` opt-out.
 
 ## Decisions (locked)
 

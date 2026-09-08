@@ -2297,13 +2297,31 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
 
     match (method, path) {
         ("GET", "/") => {
-            respond(
-                &mut stream,
-                200,
-                "text/html; charset=utf-8",
-                INDEX_HTML.as_bytes(),
-            )
-            .await
+            // Serve the SPA with a per-load nonce so its single inline <script>
+            // runs under `script-src 'nonce-…'` instead of 'unsafe-inline'. An
+            // injected inline script or `<img onerror=…>` then has no valid
+            // nonce and is refused — defence in depth behind the input-side
+            // escaping. (API/SSE responses keep the const CSP; they carry no
+            // document that executes script.)
+            let nonce = to_hex(&dante_crypto::random_array::<16>());
+            let html = INDEX_HTML.replace("__DANTE_CSP_NONCE__", &nonce);
+            let csp = format!(
+                "Content-Security-Policy: default-src 'none'; script-src 'nonce-{nonce}'; \
+                 style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; \
+                 media-src 'self' blob:; base-uri 'none'; form-action 'none'; \
+                 frame-ancestors 'none'\r\n\
+                 X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
+                 X-Frame-Options: DENY\r\n"
+            );
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                 Content-Length: {}\r\n{csp}Connection: close\r\n\r\n",
+                html.len()
+            );
+            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(html.as_bytes()).await?;
+            stream.flush().await?;
+            Ok(())
         }
 
         ("GET", "/api/me") => {
@@ -3557,10 +3575,11 @@ fn request_is_local(head: &str, method: &str, authorities: &[String]) -> bool {
     true
 }
 
-/// Security headers sent on every response. The page is one self-contained file
-/// with inline script/style and only same-origin fetches (incl. the `/api/stream`
-/// EventSource) — lock everything else down so an injected string can't pull in
-/// an external script or exfiltrate to another origin.
+/// Security headers for API and SSE responses. Only same-origin fetches are
+/// allowed and everything else is locked down. These responses are not
+/// documents, so their `script-src` never governs execution — the SPA document
+/// itself (`GET /`) is served with a stricter, per-load `script-src 'nonce-…'`
+/// CSP built inline in that handler, which is what actually gates inline script.
 const SEC: &str = "Content-Security-Policy: default-src 'none'; \
      script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
      connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; base-uri 'none'; \

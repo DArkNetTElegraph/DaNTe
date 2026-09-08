@@ -343,9 +343,22 @@ infrastructure. Reached. ---**
   `POST /api/call|call/accept|call/hangup {peer}`; SPA has a 📞 button, a call
   bar (ringing/calling/connecting/connected + Accept/Hang up) and a corner
   ring toast. No browser media path — the engine owns the peer connection.
-- **Still to build:** OS audio capture/playback (cpal) + Opus encode/decode
-  pushed through a `TrackLocalStaticSample`; screen share; running / bundling a
-  TURN server for zero-config deployments.
+- **Audio track *(done — transport)*:** `dante-voice` registers the default
+  codecs (Opus, PT 111, 48 kHz) and adds a `TrackLocalStaticSample` to every
+  call. `Call::push_audio(opus, ms)` writes one frame; `on_track` →
+  `CallEvent::RemoteAudio(payload)`. `Engine::send_call_audio` /
+  `take_call_audio` (frames folded by `poll_calls`). e2e-tested: Opus-shaped
+  payloads round-trip through SRTP on the negotiated `m=audio` line, in the
+  `dante-voice` loopback test and the `dante-core` call test.
+- **Mic/speaker *(done — `crates/dante-audio`, detached)*:** `OpusCodec`
+  (`opus` → libopus), `Capture` / `Playback` (`cpal`), and a documented bridge
+  loop (`Capture::try_frame` → `encode` → `send_call_audio`; `take_call_audio`
+  → `decode` → `Playback::play`). Its own `[workspace]` — `opus`/`cpal` link
+  system libs the CI container lacks; the Opus round-trip test runs on a real
+  host. The desktop client wires this in; `dante serve` has no browser media
+  path so its call UI stays state-only.
+- **Still to build:** wiring `dante-audio` into a client (Tauri); screen
+  share; bundling / running a TURN server for zero-config deployments.
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
 - SFU role in the server relay above ~5 participants; full mesh below.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

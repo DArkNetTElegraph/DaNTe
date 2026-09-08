@@ -753,6 +753,8 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
+ "rtc",
+ "rtc-media",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

@@ -1,0 +1,21 @@
+# Detached from the workspace: `opus` links libopus (needs pkg-config +
+# libopus-dev) and `cpal` links the platform audio stack (ALSA on Linux,
+# CoreAudio, WASAPI) — neither is present in the CI/dev container, so
+# `cargo build --workspace` at the repo root must skip this crate. Build it
+# from a real host:  cd crates/dante-audio && cargo test
+[workspace]
+
+[package]
+name = "dante-audio"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+description = "Opus codec + mic/speaker glue that bridges the OS to dante_core call audio."
+publish = false
+
+[dependencies]
+opus = "0.3"
+cpal = "0.15"
+thiserror = "1"
+crossbeam-channel = "0.5"

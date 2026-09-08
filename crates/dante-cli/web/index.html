@@ -256,6 +256,19 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .msg-line.file { color: var(--link); }
 .msg-line.deleted { color: var(--text-faint); font-style: italic; }
 .edited-tag { color: var(--text-faint); font-size: 11px; }
+#search-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.5);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+.search-box { width: min(560px, 92vw); background: var(--bg-pane); border: 1px solid var(--divider);
+  border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.5); overflow: hidden; }
+.search-box > input { width: 100%; border: 0; border-bottom: 1px solid var(--divider); background: var(--bg-input);
+  color: var(--text); font-size: 15px; padding: 14px 16px; outline: none; }
+.search-results { max-height: 56vh; overflow-y: auto; }
+.search-hit { padding: 10px 16px; border-bottom: 1px solid var(--divider); cursor: pointer; }
+.search-hit:hover { background: var(--bg-active); }
+.sh-where { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
+.sh-text { font-size: 13px; color: var(--text); margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+.sh-text mark { background: var(--orange); color: #1a1200; border-radius: 2px; }
+.search-empty { padding: 16px; color: var(--text-faint); font-size: 13px; text-align: center; }
 .mention { background: color-mix(in srgb, var(--cornflower-blue) 22%, transparent); color: var(--cornflower-blue);
   border-radius: 4px; padding: 0 3px; font-weight: 600; }
 .mention.mention-me { background: color-mix(in srgb, var(--orange) 28%, transparent); color: var(--orange); }
@@ -426,6 +439,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <button class="icon-btn" id="btn-emoji" title="Custom emoji" hidden>😀</button>
       <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
       <button class="icon-btn" id="btn-link" title="Create invite link" hidden>🔗</button>
+      <button class="icon-btn" id="btn-search" title="Search messages (Ctrl+K)">🔍</button>
       <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
       <input type="file" id="emoji-file" accept="image/*" hidden>
     </header>
@@ -1782,6 +1796,61 @@ $("#btn-members").onclick = () => {
 };
 $("#me-fp").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Fingerprint copied."); };
 $("#me-gear").onclick = () => ui.say("Recovery phrase (keep it secret):\n\n" + store.me.words);
+$("#btn-search").onclick = openSearch;
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openSearch(); }
+});
+
+/* ---------- message search ---------------------------------------- */
+let searchTimer = null;
+function openSearch() {
+  if ($("#search-overlay")) return;
+  const ov = el("div"); ov.id = "search-overlay";
+  const box = el("div", "search-box");
+  const inp = el("input"); inp.placeholder = "Search your messages…"; inp.autocomplete = "off";
+  const results = el("div", "search-results");
+  box.append(inp, results);
+  ov.appendChild(box);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape" && $("#search-overlay")) { ov.remove(); document.removeEventListener("keydown", esc); }
+  });
+  document.body.appendChild(ov);
+  inp.focus();
+  inp.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    const q = inp.value.trim();
+    if (q.length < 2) { results.innerHTML = ""; return; }
+    searchTimer = setTimeout(async () => {
+      try {
+        const hits = await api.get("/api/search?q=" + encodeURIComponent(q));
+        results.innerHTML = "";
+        if (!hits.length) { results.appendChild(el("div", "search-empty", "No matches.")); return; }
+        for (const h of hits) {
+          const row = el("div", "search-hit");
+          const where = h.channel ? ("#" + (h.scope_name || short(h.scope))) : ("@ " + (dmLabel(h.scope) || short(h.scope)));
+          row.appendChild(Object.assign(el("div", "sh-where"), { textContent: where + "  ·  " + (h.from === "you" ? "you" : short(h.from)) }));
+          row.appendChild(Object.assign(el("div", "sh-text"), { innerHTML: highlight(h.text, q) }));
+          row.onclick = () => {
+            ov.remove();
+            if (h.channel) {
+              const ch = store.channels.find(c => c.id === h.scope);
+              if (ch) selectTarget(ch.server, "#" + h.scope);
+            } else {
+              selectTarget("@dm", h.scope);
+            }
+          };
+          results.appendChild(row);
+        }
+      } catch (e) { results.innerHTML = ""; results.appendChild(el("div", "search-empty", "Search failed.")); }
+    }, 180);
+  });
+}
+function highlight(text, q) {
+  const i = text.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return esc(text.slice(0, 200));
+  return esc(text.slice(0, i)) + "<mark>" + esc(text.slice(i, i + q.length)) + "</mark>" + esc(text.slice(i + q.length, i + q.length + 160));
+}
 
 /* ---------- onboarding ---------------------------------------- */
 function obErr(m) { $("#ob-err").textContent = m || ""; }

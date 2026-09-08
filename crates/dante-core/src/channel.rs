@@ -126,6 +126,13 @@ pub enum ChannelControl {
         /// The channel being closed.
         channel_id: [u8; 32],
     },
+    /// The host renamed the channel; recipients update their display name.
+    Renamed {
+        /// The channel being renamed.
+        channel_id: [u8; 32],
+        /// The new display name.
+        name: String,
+    },
 }
 
 impl ChannelControl {
@@ -157,6 +164,9 @@ impl ChannelControl {
             }
             ChannelControl::Closed { channel_id } => {
                 w.u8(8).fixed(channel_id);
+            }
+            ChannelControl::Renamed { channel_id, name } => {
+                w.u8(9).fixed(channel_id).string(name);
             }
         }
         w.into_vec()
@@ -194,6 +204,10 @@ impl ChannelControl {
             },
             8 => ChannelControl::Closed {
                 channel_id: r.fixed::<32>()?,
+            },
+            9 => ChannelControl::Renamed {
+                channel_id: r.fixed::<32>()?,
+                name: r.string()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -361,10 +375,14 @@ mod tests {
             ChannelControl::Closed {
                 channel_id: [8u8; 32],
             },
+            ChannelControl::Renamed {
+                channel_id: [8u8; 32],
+                name: "off-topic".into(),
+            },
         ] {
             assert_eq!(ChannelControl::decode(&c.encode()).unwrap(), c);
         }
-        assert!(ChannelControl::decode(&[9]).is_err());
+        assert!(ChannelControl::decode(&[10]).is_err());
     }
 
     #[test]

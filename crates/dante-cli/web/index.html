@@ -328,6 +328,26 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
   background: var(--bg-raised); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; }
 .voice-mic-btn.off { background: var(--danger, #d83c3e); color: #fff; border-color: transparent; }
 
+/* right-click context menus (replace the browser's) */
+.ctx-menu {
+  position: fixed; z-index: 9999; min-width: 172px; max-width: 260px;
+  padding: 5px; border-radius: var(--radius, 11px);
+  background: var(--bg-raised, #221d43); border: 1px solid var(--border-strong, var(--divider));
+  box-shadow: var(--shadow-lg, 0 12px 40px rgba(0,0,0,.5));
+  font-size: 13px; animation: pop-in .1s ease;
+}
+.ctx-menu button {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 7px 10px; border: 0; border-radius: var(--radius-sm, 8px);
+  background: transparent; color: var(--text); text-align: left; cursor: pointer;
+  font: inherit;
+}
+.ctx-menu button:hover { background: var(--bg-hover); }
+.ctx-menu button.danger { color: var(--danger, #d83c3e); }
+.ctx-menu button.danger:hover { background: var(--danger, #d83c3e); color: #fff; }
+.ctx-menu button:disabled { opacity: .4; cursor: default; }
+.ctx-menu .sep { height: 1px; margin: 5px 4px; background: var(--divider); }
+
 /* user panel */
 #user-panel {
   flex: 0 0 auto;
@@ -754,6 +774,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
       <button class="icon-btn" id="btn-link" title="Create invite link" hidden>🔗</button>
       <button class="icon-btn" id="btn-pins" title="Pinned messages" hidden>📌</button>
+      <button class="icon-btn" id="btn-more" title="More actions" hidden>⋯</button>
       <button class="icon-btn" id="btn-search" title="Search messages (Ctrl+K)">🔍</button>
       <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
       <input type="file" id="emoji-file" accept="image/*" hidden>
@@ -799,6 +820,91 @@ const $  = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const initials = s => (s || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
 const short = s => (s && s.includes("-")) ? s.split("-").slice(0, 2).join("-") : (s || "");
+
+/* ---------- context menus (our own, not the browser's) ----------------- */
+let ctxEl = null;
+function ctxClose() { if (ctxEl) { ctxEl.remove(); ctxEl = null; } }
+// items: array of { label, run, danger, disabled, icon } or the string "sep".
+function ctxShow(x, y, items) {
+  ctxClose();
+  const menu = el("div", "ctx-menu");
+  for (const it of items) {
+    if (it === "sep") { menu.appendChild(el("div", "sep")); continue; }
+    const b = el("button", it.danger ? "danger" : null);
+    if (it.icon) b.appendChild(Object.assign(el("span"), { textContent: it.icon }));
+    b.appendChild(Object.assign(el("span"), { textContent: it.label }));
+    b.disabled = !!it.disabled;
+    b.onclick = () => { ctxClose(); try { it.run(); } catch (e) { ui && ui.sys && ui.sys(String(e)); } };
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = Math.min(x, innerWidth - r.width - 8) + "px";
+  menu.style.top = Math.min(y, innerHeight - r.height - 8) + "px";
+  ctxEl = menu;
+}
+function ctxAnchor(elm, items) {
+  const r = elm.getBoundingClientRect();
+  ctxShow(r.right - 4, r.bottom + 4, items);
+}
+addEventListener("click", e => { if (ctxEl && !ctxEl.contains(e.target)) ctxClose(); });
+addEventListener("keydown", e => { if (e.key === "Escape") ctxClose(); });
+addEventListener("resize", ctxClose);
+addEventListener("scroll", ctxClose, true);
+
+// One global right-click handler: suppress the native menu everywhere inside
+// the app and offer a context-appropriate one instead.
+addEventListener("contextmenu", e => {
+  const app = e.target.closest && e.target.closest("#app");
+  if (!app) return;                                  // onboarding etc. — leave it
+  const editable = e.target.closest("input, textarea, [contenteditable]");
+  const sel = String(getSelection());
+  const chanRow = e.target.closest(".chan-row");
+  const msgGroup = e.target.closest(".msg-group");
+
+  if (chanRow && chanRow._ctx) { e.preventDefault(); ctxShow(e.clientX, e.clientY, chanRow._ctx()); return; }
+  if (msgGroup && msgGroup._ctx) { e.preventDefault(); ctxShow(e.clientX, e.clientY, msgGroup._ctx()); return; }
+
+  if (editable) {
+    e.preventDefault();
+    const t = e.target;
+    ctxShow(e.clientX, e.clientY, [
+      { label: "Cut", icon: "✂️", disabled: !sel, run: async () => { await navigator.clipboard.writeText(sel); document.execCommand("delete"); } },
+      { label: "Copy", icon: "⧉", disabled: !sel, run: () => navigator.clipboard.writeText(sel) },
+      { label: "Paste", icon: "📋", run: async () => { const txt = await navigator.clipboard.readText(); insertAtCaret(t, txt); } },
+      "sep",
+      { label: "Select all", run: () => t.select && t.select() },
+    ]);
+    return;
+  }
+  e.preventDefault();
+  if (sel) ctxShow(e.clientX, e.clientY, [{ label: "Copy", icon: "⧉", run: () => navigator.clipboard.writeText(sel) }]);
+});
+function insertAtCaret(t, text) {
+  const s = t.selectionStart ?? t.value.length, e = t.selectionEnd ?? t.value.length;
+  t.value = t.value.slice(0, s) + text + t.value.slice(e);
+  t.selectionStart = t.selectionEnd = s + text.length;
+  t.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+// Collapse the chat-header icon row: keep a few, fold the rest under ⋯.
+function collapseHeader() {
+  const head = document.querySelector(".chat-head");
+  if (!head) return;
+  const keep = new Set(["btn-more", "btn-search", "btn-members", "btn-call", "btn-groupcall"]);
+  const items = [];
+  for (const b of head.querySelectorAll(".icon-btn")) {
+    if (keep.has(b.id) || b.hidden) continue;
+    const handler = b.onclick;
+    b.hidden = true;
+    if (!handler) continue;
+    const label = (b.title || b.textContent || "").replace(/\s*[—-].*$/, "").trim();
+    items.push({ icon: b.textContent, label: label || b.id, run: () => handler.call(b) });
+  }
+  const more = $("#btn-more");
+  more.hidden = items.length === 0;
+  more.onclick = () => ctxAnchor(more, items);
+}
 
 /* messaging yourself is a local-only "Private Note" — no relay round-trip,
    so it never comes back and doubles. */
@@ -1190,6 +1296,7 @@ function renderPane() {
     if (store.mentions.has(t)) row.appendChild(Object.assign(el("span", "tag mention-badge"), { textContent: "@" }));
     unreadBadge(row, t);
     row.onclick = () => selectTarget(server, t);
+    row._ctx = () => channelCtxItems(c, server, t);
     list.appendChild(row);
   }
 
@@ -1205,6 +1312,7 @@ function renderPane() {
       row.appendChild(el("span", "name", c.name));
       if (room.joined || voiceRtc.channelId === c.id) row.appendChild(Object.assign(el("span", "tag"), { textContent: "●" }));
       row.onclick = () => selectTarget(server, t);
+      row._ctx = () => channelCtxItems(c, server, t);
       list.appendChild(row);
       if (room.participants.length) {
         const pl = el("div", "voice-members");
@@ -1218,6 +1326,50 @@ function renderPane() {
       }
     }
   }
+}
+
+// Right-click menu for a channel row.
+function channelCtxItems(c, server, t) {
+  const isGeneral = (c.name || "").toLowerCase() === "general";
+  const iOwn = c.root && store.policies[c.root] && store.policies[c.root].owner === store.me.fingerprint;
+  const muted = store.isMuted(t);
+  const items = [
+    { label: "Open", icon: c.voice ? "🔊" : "#", run: () => selectTarget(server, t) },
+    { label: muted ? "Unmute" : "Mute", icon: muted ? "🔔" : "🔕", run: () => { store.toggleMute(t); render(); } },
+  ];
+  if (iOwn && !isGeneral) {
+    items.push("sep");
+    items.push({ label: "Rename…", icon: "✏️", run: () => renameChannelFlow(c, t) });
+    items.push({ label: "Delete channel", icon: "🗑", danger: true, run: () => deleteChannelFlow(c, t) });
+  } else if (!iOwn) {
+    items.push("sep");
+    items.push({ label: "Leave channel", icon: "🚪", danger: true, run: () => leaveChannelFlow(c, t) });
+  }
+  items.push("sep");
+  items.push({ label: "Copy channel ID", icon: "⧉", run: () => navigator.clipboard.writeText(c.id) });
+  return items;
+}
+async function renameChannelFlow(c, t) {
+  const name = await ui.ask("Rename #" + c.name + " to:", c.name);
+  if (!name || name.trim() === c.name) return;
+  try { await api.post("/api/channel/rename", { channel: t, name: name.trim() }); await refreshChannels(); }
+  catch (e) { ui.say("Rename failed: " + e.message); }
+}
+async function deleteChannelFlow(c, t) {
+  if (!await ui.confirm("Delete #" + c.name + " for everyone? This cannot be undone.")) return;
+  try {
+    await api.post("/api/channel/delete", { channel: t });
+    await refreshChannels();
+    if (curTarget() === t) selectTarget("@dm", null);
+  } catch (e) { ui.say("Delete failed: " + e.message); }
+}
+async function leaveChannelFlow(c, t) {
+  if (!await ui.confirm("Leave " + c.name + "? You'll need a new invite to rejoin.")) return;
+  try {
+    await api.post("/api/leave", { channel: t });
+    await refreshChannels();
+    if (curTarget() === t) selectTarget("@dm", null);
+  } catch (e) { ui.say("Leave failed: " + e.message); }
 }
 
 // Append an unread-count badge (or nothing) to a sidebar row.
@@ -1307,17 +1459,19 @@ function renderChat() {
     };
     const root = store.rootOf(store.view.server);
     const iOwn = root && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
-    if (iOwn) {
+    const chName = store.channelName(target.slice(1));
+    const isGeneral = (chName || "").toLowerCase() === "general";
+    if (iOwn && !isGeneral) {
       delChanBtn.hidden = false;
       delChanBtn.onclick = async () => {
-        if (!await ui.confirm("Delete #" + store.channelName(target.slice(1)) + " for everyone? This cannot be undone.")) return;
+        if (!await ui.confirm("Delete #" + chName + " for everyone? This cannot be undone.")) return;
         try { await api.post("/api/channel/delete", { channel: target }); await refreshChannels(); selectTarget("@dm", null); }
         catch (e) { ui.sys("delete failed: " + e.message); }
       };
-    } else {
+    } else if (!iOwn) {
       leaveBtn.hidden = false;
       leaveBtn.onclick = async () => {
-        if (!await ui.confirm("Leave " + store.channelName(target.slice(1)) + "? You'll need a new invite to rejoin.")) return;
+        if (!await ui.confirm("Leave " + chName + "? You'll need a new invite to rejoin.")) return;
         try { await api.post("/api/leave", { channel: target }); await refreshChannels(); selectTarget("@dm", null); }
         catch (e) { ui.sys("leave failed: " + e.message); }
       };
@@ -1442,6 +1596,10 @@ function renderChat() {
       addDmActions(g.body, target, m, bodyText);
     }
     if (m.ref_seq) g.node._refSeq = m.ref_seq;
+    if (!deleted) {
+      const bt = bodyText;
+      g.node._ctx = () => msgCtxItems(m, target, bt);
+    }
     log.appendChild(g.node);
     lastAuthor = m.from;
   }
@@ -1550,6 +1708,48 @@ function addMsgActions(body, channelTarget, m) {
     bar.append(edit, del);
   }
   body.appendChild(bar);
+}
+
+// Right-click menu for a message group (channel or DM).
+function msgCtxItems(m, target, bodyText) {
+  const isChan = target.startsWith("#");
+  const mine = m.from === "you";
+  const items = [];
+  if (isChan && m.ref_seq) {
+    items.push({ label: "Reply", icon: "↩", run: () => {
+      store._replyTo = { target, seq: m.ref_seq, from: m.from, text: m.text };
+      renderReplyBar(); $("#text").focus();
+    }});
+  }
+  items.push({ label: "Copy text", icon: "⧉", run: () => navigator.clipboard.writeText(bodyText || m.text || "") });
+  items.push({ label: "Forward…", icon: "↪", run: () => openForwardPicker(isChan ? m : { ...m, text: bodyText }, target) });
+  if (isChan && m.ref_seq) {
+    const isPinned = store.pins[target] && store.pins[target][m.ref_seq];
+    items.push({ label: isPinned ? "Unpin" : "Pin", icon: "📌", run: async () => {
+      try { await api.post("/api/pin", { channel: target, seq: m.ref_seq, pinned: !isPinned }); }
+      catch (e) { ui.say("Pin failed: " + e.message); }
+    }});
+  }
+  if (mine && ((isChan && m.ref_seq) || (!isChan && m.msg_id))) {
+    items.push("sep");
+    items.push({ label: "Edit…", icon: "✎", run: async () => {
+      const cur = isChan ? m.text : ((store.dmEdits[m.msg_id] && store.dmEdits[m.msg_id].text) || m.text);
+      const t = await ui.ask("Edit message", cur);
+      if (t == null || t === cur) return;
+      try {
+        if (isChan) await api.post("/api/edit", { channel: target, seq: m.ref_seq, text: t });
+        else { await api.editDm(target, m.msg_id, t); store.dmEdits[m.msg_id] = { text: t, deleted: false }; renderChat(); }
+      } catch (e) { ui.say("Edit failed: " + e.message); }
+    }});
+    items.push({ label: "Delete", icon: "🗑", danger: true, run: async () => {
+      if (!await ui.confirm("Delete this message for everyone?")) return;
+      try {
+        if (isChan) await api.post("/api/edit", { channel: target, seq: m.ref_seq, text: "" });
+        else { await api.editDm(target, m.msg_id, ""); store.dmEdits[m.msg_id] = { text: "", deleted: true }; renderChat(); }
+      } catch (e) { ui.say("Delete failed: " + e.message); }
+    }});
+  }
+  return items;
 }
 
 // Forward / edit / delete affordances on direct messages.
@@ -1873,7 +2073,7 @@ async function removeMemberFlow(channelTarget, memberFp) {
 
 function renderTyping() { $("#typing").textContent = store.typingText || ""; }
 
-function render() { renderRail(); renderPane(); renderChat(); renderMembers(); renderTyping(); renderGroupCallToast(); updateTitle(); }
+function render() { renderRail(); renderPane(); renderChat(); collapseHeader(); renderMembers(); renderTyping(); renderGroupCallToast(); updateTitle(); }
 
 function updateTitle() {
   const n = store.totalUnread();
@@ -1935,12 +2135,12 @@ function notify(title, body) {
 async function createServerFlow() {
   const f = await ui.form("Create a server", [
     { name: "name", label: "Server name", placeholder: "The Lodge" },
-    { name: "chan", label: "First channel", value: "general" },
+    { name: "pw", label: "Join password (optional)", placeholder: "leave blank for an open server", password: true },
   ], { ok: "Create" });
   if (!f || !f.name) return;
   try {
-    const { ok: root } = await api.createServer(f.name);
-    await api.createChannel(root, f.chan || "general");
+    // The server always starts with a #general text channel (server-side).
+    const { ok: root } = await api.post("/api/server", { name: f.name, password: f.pw || "" });
     await refreshChannels();
     const c = store.channelsOf(f.name)[0];
     selectTarget(f.name, c ? "#" + c.id : null);
@@ -2002,12 +2202,15 @@ async function redeemFlow() {
 async function joinPwFlow(server) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root.");
-  const pw = await ui.ask("Set a join password for this server (blank = disable):") ?? null;
-  if (pw === null) return;
+  const f = await ui.form("Join password", [
+    { name: "current", label: "Current password (required if one is already set)", password: true },
+    { name: "pw", label: "New password (blank = remove it)", password: true },
+  ], { ok: "Save" });
+  if (!f) return;
   try {
-    await api.post("/api/joinpw", { server: root, password: pw });
-    ui.sys(pw ? "Join password set." : "Join password disabled.");
-  } catch (e) { ui.say("Could not set (host only): " + e.message); }
+    await api.post("/api/joinpw", { server: root, password: f.pw || "", current: f.current || "" });
+    ui.sys(f.pw ? "Join password updated." : "Join password removed.");
+  } catch (e) { ui.say("Could not change it: " + e.message); }
 }
 async function addDmFlow() {
   const fp = await ui.ask("Their fingerprint (base32) or 24 words:");

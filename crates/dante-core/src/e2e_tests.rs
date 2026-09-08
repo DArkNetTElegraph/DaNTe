@@ -1703,20 +1703,26 @@ async fn host_deletes_a_channel_then_the_server() {
     settle!();
     assert_eq!(alice.channels().len(), 2);
 
-    // Delete one channel.
-    host.delete_channel(&a, now).await.unwrap();
-    assert!(!host.channels().iter().any(|c| c.channel_id == a));
+    // #general is the always-there default and can't be deleted.
+    assert!(matches!(
+        host.delete_channel(&a, now).await,
+        Err(crate::CoreError::Channel(_))
+    ));
+
+    // Delete the other channel.
+    host.delete_channel(&b, now).await.unwrap();
+    assert!(!host.channels().iter().any(|c| c.channel_id == b));
     settle!();
     assert_eq!(
         alice.channels().len(),
         1,
         "alice dropped the deleted channel"
     );
-    assert_eq!(alice.channels()[0].channel_id, b);
+    assert_eq!(alice.channels()[0].channel_id, a);
 
     // A non-host cannot delete.
     assert!(matches!(
-        alice.delete_channel(&b, now).await,
+        alice.delete_channel(&a, now).await,
         Err(crate::CoreError::NotServerHost)
     ));
 

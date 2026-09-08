@@ -393,7 +393,8 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /vchannel <root> <name>  /vc join|leave #<chan>  \
          /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
-         /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
+         /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off> [current]  \
+         /renamechannel #<chan> <name>  \
          /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
          /react #<chan> <seq> <emoji> [-]  /pin|/unpin #<chan> <seq>  /pins #<chan>  \
          /editdm <fp> <msg-id> <text>  /deldm <fp> <msg-id>  /forward <#chan|fp> <origin> <text>  \
@@ -759,10 +760,14 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
             },
             "server" => match a {
                 Some(name) => match engine.create_server(name, now_ms()).await {
-                    Ok(root) => println!(
-                        "server \"{name}\" created; root {}",
-                        IdentityId::from_bytes(root).to_base32()
-                    ),
+                    Ok(root) => {
+                        // Every server starts with an always-there #general.
+                        let _ = engine.create_channel(&root, "general", true, None);
+                        println!(
+                            "server \"{name}\" created with #general; root {}",
+                            IdentityId::from_bytes(root).to_base32()
+                        );
+                    }
                     Err(e) => println!("create failed: {e}"),
                 },
                 None => println!("usage: /server <name>"),
@@ -1295,6 +1300,19 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     }
                 }
                 None => println!("usage: /delchannel #<channel-id>"),
+            },
+            "renamechannel" => match (a, b) {
+                (Some(chan), Some(name)) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match parse_fingerprint(chan) {
+                        Ok(cid) => match engine.rename_channel(&cid, name, now_ms()).await {
+                            Ok(()) => println!("channel renamed to #{name}"),
+                            Err(e) => println!("failed: {e}"),
+                        },
+                        Err(e) => println!("bad channel id: {e}"),
+                    }
+                }
+                _ => println!("usage: /renamechannel #<channel-id> <new-name>"),
             },
             "delserver" => match a {
                 Some(root) => match parse_fingerprint(root) {

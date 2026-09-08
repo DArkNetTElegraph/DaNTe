@@ -117,6 +117,16 @@ pub enum Content {
         /// The `id` of the [`TextId`](Content::TextId) message being deleted.
         target: [u8; 16],
     },
+    /// A message forwarded into a channel from elsewhere. Otherwise an ordinary
+    /// channel message (editable / deletable / pinnable), but it also carries a
+    /// label of where it came from so the UI can mark it.
+    Forward {
+        /// A human label of the original author (fingerprint or petname), filled
+        /// in by the forwarder's client — display only, not authenticated.
+        origin: String,
+        /// The forwarded text.
+        text: String,
+    },
 }
 
 impl Content {
@@ -185,6 +195,9 @@ impl Content {
             Content::DmDelete { target } => {
                 w.u8(19).fixed(target);
             }
+            Content::Forward { origin, text } => {
+                w.u8(20).string(origin).string(text);
+            }
         }
         w.into_vec()
     }
@@ -242,6 +255,10 @@ impl Content {
             },
             19 => Content::DmDelete {
                 target: r.fixed::<16>()?,
+            },
+            20 => Content::Forward {
+                origin: r.string()?,
+                text: r.string()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -342,6 +359,10 @@ mod tests {
                 target_seq: 5,
                 unpin: true,
             },
+            Content::Forward {
+                origin: "ABCD-1234".into(),
+                text: "look at this".into(),
+            },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }
@@ -366,6 +387,6 @@ mod tests {
 
     #[test]
     fn bad_tag_rejected() {
-        assert!(Content::decode(&[20]).is_err());
+        assert!(Content::decode(&[21]).is_err());
     }
 }

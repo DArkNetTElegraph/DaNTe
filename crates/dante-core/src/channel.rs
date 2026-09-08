@@ -215,6 +215,9 @@ pub struct ChannelMessage {
     pub seq: u64,
     /// If this message is a reply, the `seq` of the message it replies to.
     pub reply_to: Option<u64>,
+    /// If this message was forwarded in, a display label of its origin
+    /// (fingerprint or petname). Not authenticated — set by the forwarder.
+    pub forwarded_from: Option<String>,
 }
 
 /// A decrypted emoji reaction to a channel message.

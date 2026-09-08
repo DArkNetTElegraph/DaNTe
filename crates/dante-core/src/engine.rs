@@ -2482,6 +2482,29 @@ impl Engine {
         .await
     }
 
+    /// Forward a message into a channel. `origin` is a display label of the
+    /// original author (fingerprint or petname). The result is an ordinary
+    /// channel message — editable, deletable, pinnable — tagged as forwarded.
+    /// Returns the new message's relay-log `seq`.
+    pub async fn forward_to_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        origin: &str,
+        text: &str,
+        now_ms: u64,
+    ) -> Result<u64, CoreError> {
+        self.send_channel_content(
+            channel_id,
+            Content::Forward {
+                origin: origin.to_owned(),
+                text: text.to_owned(),
+            },
+            text,
+            now_ms,
+        )
+        .await
+    }
+
     async fn send_channel_content(
         &mut self,
         channel_id: &[u8; 32],
@@ -2889,10 +2912,17 @@ impl Engine {
                             continue;
                         }
                         match unpad_channel(&plaintext).map(Content::decode) {
-                            Some(Ok(c @ (Content::Text(_) | Content::Reply { .. }))) => {
-                                let (text, reply_to) = match c {
-                                    Content::Text(t) => (t, None),
-                                    Content::Reply { target_seq, text } => (text, Some(target_seq)),
+                            Some(Ok(
+                                c @ (Content::Text(_)
+                                | Content::Reply { .. }
+                                | Content::Forward { .. }),
+                            )) => {
+                                let (text, reply_to, forwarded_from) = match c {
+                                    Content::Text(t) => (t, None, None),
+                                    Content::Reply { target_seq, text } => {
+                                        (text, Some(target_seq), None)
+                                    }
+                                    Content::Forward { origin, text } => (text, None, Some(origin)),
                                     _ => unreachable!(),
                                 };
                                 self.channel_edits
@@ -2918,6 +2948,7 @@ impl Engine {
                                     text,
                                     seq,
                                     reply_to,
+                                    forwarded_from,
                                 });
                             }
                             Some(Ok(Content::Reaction {
@@ -3577,7 +3608,8 @@ impl Engine {
             | Content::Reply { .. }
             | Content::Pin { .. }
             | Content::DmEdit { .. }
-            | Content::DmDelete { .. } => (None, [0u8; 16]),
+            | Content::DmDelete { .. }
+            | Content::Forward { .. } => (None, [0u8; 16]),
         };
         let plaintext = content.encode();
 
@@ -3852,14 +3884,16 @@ impl Engine {
                         out.push(Inbound::GroupCallMembersChanged { channel_id });
                     }
                 }
-                // Typing / reactions / edits are channel-scoped, never by DM.
+                // Typing / reactions / edits / forwards are channel-scoped,
+                // never delivered by DM.
                 Ok(
                     Content::Typing
                     | Content::Reaction { .. }
                     | Content::Edit { .. }
                     | Content::Delete { .. }
                     | Content::Reply { .. }
-                    | Content::Pin { .. },
+                    | Content::Pin { .. }
+                    | Content::Forward { .. },
                 ) => {}
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }

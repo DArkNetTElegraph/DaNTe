@@ -508,6 +508,17 @@ infrastructure. Reached. ---**
   substring over stored DM + channel text, newest first. `serve`
   `GET /api/search?q=`; the SPA's 🔍 button / Ctrl+K opens an overlay with
   debounced live results that jump to the DM or channel.
+- **Message forwarding** *(done)*: `Content::Forward { origin, text }` (tag 20)
+  rides the channel MLS log like an ordinary message — editable / deletable /
+  pinnable — but carries an unauthenticated display label of the original
+  author. `ChannelMessage` / serve `Item::Channel` gained `forwarded_from`;
+  `Engine::forward_to_channel`. A DM forward has no protocol change: it is a
+  normal text DM whose body is prefixed `↪ Forwarded from <label>\n…`, which
+  the SPA/CLI strip and render as a chip. `serve` `POST /api/forward
+  {to,origin,text}` routes to either. SPA: an ↪ hover action on any message
+  opens a destination picker (channels + DMs). CLI `/forward <#chan|fp>
+  <origin> <text>`. The channel `forwarded_from` isn't persisted, so the chip
+  is lost after a restart (same class of caveat as reactions/edits).
 - **Unread counts + per-conversation mute** *(done, client-side)*: the SPA
   tracks an unread *count* per DM / channel (was a binary dot), shows it as a
   badge on the sidebar row, and reflects the total in the browser tab title.

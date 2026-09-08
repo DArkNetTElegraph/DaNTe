@@ -344,7 +344,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
          /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
          /react #<chan> <seq> <emoji> [-]  /pin|/unpin #<chan> <seq>  /pins #<chan>  \
-         /editdm <fp> <msg-id> <text>  /deldm <fp> <msg-id>  \
+         /editdm <fp> <msg-id> <text>  /deldm <fp> <msg-id>  /forward <#chan|fp> <origin> <text>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -361,11 +361,13 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                 let _ = engine.sync(now).await;
                 match engine.poll_channels(now).await {
                     Ok(msgs) => for m in msgs {
-                        println!("[#{} {}] <{}> {}",
+                        let fwd = m.forwarded_from.as_deref()
+                            .map(|o| format!("[\u{21aa} fwd from {o}] ")).unwrap_or_default();
+                        println!("[#{} {}] <{}> {}{}",
                             IdentityId::from_bytes(m.channel_id).to_base32().split('-').next().unwrap_or(""),
                             m.seq,
                             IdentityId::from_bytes(m.sender).to_base32().split('-').next().unwrap_or(""),
-                            m.text);
+                            fwd, m.text);
                     }
                     Err(e) => eprintln!("channel poll error: {e}"),
                 }
@@ -891,6 +893,41 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     "usage: /{cmd} <fp> <msg-id>{}",
                     if cmd == "editdm" { " <new text>" } else { "" }
                 ),
+            },
+            "forward" => match (a, b) {
+                (Some(dest), Some(rest)) => {
+                    let (origin, text) = match rest.split_once(char::is_whitespace) {
+                        Some((o, t)) if !t.is_empty() => (o, t),
+                        _ => {
+                            println!("usage: /forward <#chan|fp> <origin> <text>");
+                            return Ok(false);
+                        }
+                    };
+                    if let Some(chan) = dest.strip_prefix('#') {
+                        match parse_fingerprint(chan) {
+                            Ok(cid) => match engine
+                                .forward_to_channel(&cid, origin, text, now_ms())
+                                .await
+                            {
+                                Ok(_) => println!("forwarded"),
+                                Err(e) => println!("forward failed: {e}"),
+                            },
+                            Err(e) => println!("bad channel: {e}"),
+                        }
+                    } else {
+                        match parse_fingerprint(dest) {
+                            Ok(pid) => {
+                                let body = format!("\u{21aa} Forwarded from {origin}\n{text}");
+                                match engine.send_dm(&pid, &body, now_ms()).await {
+                                    Ok(_) => println!("forwarded"),
+                                    Err(e) => println!("forward failed: {e}"),
+                                }
+                            }
+                            Err(e) => println!("bad fingerprint: {e}"),
+                        }
+                    }
+                }
+                _ => println!("usage: /forward <#chan|fp> <origin> <text>"),
             },
             "pins" => match a {
                 Some(chan) => {

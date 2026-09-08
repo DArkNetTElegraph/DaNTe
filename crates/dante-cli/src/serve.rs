@@ -18,6 +18,7 @@
 //! `POST /api/react {channel,seq,emoji,remove}`,
 //! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
 //! `POST /api/dm/edit {peer,msg_id,text}` (empty text deletes),
+//! `POST /api/forward {to,origin,text}`,
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
 //! `POST /api/emoji/remove {server,name}`,
@@ -93,6 +94,14 @@ enum Cmd {
         peer: String,
         /// Hex of the message's edit id.
         msg_id: String,
+        text: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Forward a message (text + origin label) into a channel or DM.
+    Forward {
+        /// `#<channel-id>` or a peer fingerprint.
+        to: String,
+        origin: String,
         text: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -340,6 +349,9 @@ enum Item {
         /// If this is a reply, the ref_seq of the message it replies to.
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to: Option<u64>,
+        /// If forwarded in, a display label of the original author.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        forwarded_from: Option<String>,
     },
     /// An edit or delete of an earlier channel message, folded by the SPA.
     ChannelEdit {
@@ -716,6 +728,7 @@ async fn engine_task(
                 text: e.text.clone(),
                 ref_seq: 0,
                 reply_to: None,
+                forwarded_from: None,
             });
         }
     }
@@ -822,6 +835,7 @@ async fn engine_task(
                             text: m.text,
                             ref_seq: m.seq,
                             reply_to: m.reply_to,
+                            forwarded_from: m.forwarded_from,
                         });
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }
                     }
@@ -958,6 +972,7 @@ async fn engine_task(
                                     text: "\u{1f4de} group call membership changed".into(),
                                     ref_seq: 0,
                                     reply_to: None,
+                                    forwarded_from: None,
                                 }
                             }
                         };
@@ -1125,6 +1140,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                             text,
                             ref_seq: channel_seq.unwrap_or(0),
                             reply_to: send_reply_to,
+                            forwarded_from: None,
                         });
                     }
                 }
@@ -1172,6 +1188,48 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 }
                 _ => Err("bad peer or message id".to_string()),
             };
+            let _ = reply.send(r);
+        }
+        Cmd::Forward {
+            to,
+            origin,
+            text,
+            reply,
+        } => {
+            let mut chan_echo: Option<([u8; 32], u64)> = None;
+            let r = match parse_target(&to) {
+                Ok((true, cid)) => match engine
+                    .forward_to_channel(&cid, &origin, &text, now_ms())
+                    .await
+                {
+                    Ok(seq) => {
+                        chan_echo = Some((cid, seq));
+                        Ok("ok".to_string())
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+                Ok((false, id)) => {
+                    let body = format!("\u{21aa} Forwarded from {origin}\n{text}");
+                    engine
+                        .send_dm(&id, &body, now_ms())
+                        .await
+                        .map(|mid| to_hex(&mid))
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e),
+            };
+            if let Some((cid, seq)) = chan_echo {
+                shared.inbox.lock().await.push_back(Item::Channel {
+                    seq: shared.next(),
+                    channel: id_b32(&cid),
+                    channel_name: String::new(),
+                    from: "you".into(),
+                    text: text.clone(),
+                    ref_seq: seq,
+                    reply_to: None,
+                    forwarded_from: Some(origin.clone()),
+                });
+            }
             let _ = reply.send(r);
         }
         Cmd::Pin {
@@ -2042,6 +2100,25 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::DmEdit {
                 peer: r.peer,
                 msg_id: r.msg_id,
+                text: r.text,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/forward") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                to: String,
+                origin: String,
+                text: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Forward {
+                to: r.to,
+                origin: r.origin,
                 text: r.text,
                 reply,
             })

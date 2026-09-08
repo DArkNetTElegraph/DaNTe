@@ -23,7 +23,8 @@
 //! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
 //! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`,
 //! `GET /api/calls`, `POST /api/call|call/accept|call/hangup {peer}`,
-//! `GET /api/ice`.
+//! `GET /api/ice`, `GET /api/call/audio?peer=`,
+//! `POST /api/call/audio {peer,frame_hex,ms}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -215,6 +216,19 @@ enum Cmd {
     Calls { reply: oneshot::Sender<String> },
     /// The ICE servers the engine will use for calls, as a ready JSON array.
     Ice { reply: oneshot::Sender<String> },
+    /// Push one Opus frame onto an active call's audio track.
+    CallAudioSend {
+        peer: String,
+        frame: Vec<u8>,
+        ms: u32,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Drain the Opus frames received on a call, as a ready JSON object
+    /// `{"frames":["<hex>",…]}`.
+    CallAudioRecv {
+        peer: String,
+        reply: oneshot::Sender<String>,
+    },
 }
 
 /// One row of the SPA's call panel.
@@ -1175,6 +1189,33 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 .collect();
             let _ = reply.send(serde_json::Value::Array(rows).to_string());
         }
+        Cmd::CallAudioSend {
+            peer,
+            frame,
+            ms,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&peer) {
+                Ok(id) => engine
+                    .send_call_audio(&id, &frame, ms)
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::CallAudioRecv { peer, reply } => {
+            let frames = match parse_fingerprint(&peer) {
+                Ok(id) => engine
+                    .take_call_audio(&id)
+                    .iter()
+                    .map(|f| to_hex(f))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let _ = reply.send(serde_json::json!({ "frames": frames }).to_string());
+        }
         Cmd::Call {
             peer,
             action,
@@ -1868,6 +1909,51 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             }
             let body = rx.await.unwrap_or_else(|_| "[]".into());
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/call/audio") => {
+            let peer = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("peer="))
+                .unwrap_or("")
+                .to_string();
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::CallAudioRecv { peer, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "{\"frames\":[]}".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/call/audio") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+                frame_hex: String,
+                #[serde(default = "twenty")]
+                ms: u32,
+            }
+            fn twenty() -> u32 {
+                20
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let Some(frame) = hex_bytes(&r.frame_hex) else {
+                return respond(&mut stream, 400, "text/plain", b"bad frame_hex").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::CallAudioSend {
+                peer: r.peer,
+                frame,
+                ms: r.ms,
+                reply,
+            })
+            .await
         }
 
         ("POST", "/api/call") | ("POST", "/api/call/accept") | ("POST", "/api/call/hangup") => {

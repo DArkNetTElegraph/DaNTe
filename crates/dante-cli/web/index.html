@@ -1687,6 +1687,9 @@ function renderGroupCallToast() {
 /* ---------- polling ---------------------------------------------- */
 function ingest(items) {
   for (const it of items) {
+    // Skip anything already applied — the SSE stream and the fallback poll can
+    // both deliver the same item, and the folding below isn't idempotent.
+    if (it.seq > 0 && it.seq <= store.seen) continue;
     store.seen = Math.max(store.seen, it.seq);
     it._at = Date.now();
     if (it.kind === "channeledit") {
@@ -1739,6 +1742,26 @@ async function poll() {
     const items = await api.messages(store.seen);
     if (items.length) { ingest(items); render(); }
   } catch (_) {}
+}
+
+// Server-Sent Events: near-instant delivery. `poll()` stays as a slow fallback
+// for when the stream is down. On error we close and reopen with the *current*
+// cursor rather than let the browser replay from a stale `since=` (which would
+// double messages, since `ingest` isn't dedup-idempotent).
+let es = null;
+function openStream() {
+  try { if (es) es.close(); } catch (_) {}
+  try {
+    es = new EventSource("/api/stream?since=" + store.seen);
+    es.onmessage = ev => {
+      try { ingest([JSON.parse(ev.data)]); render(); } catch (_) {}
+    };
+    es.onerror = () => {
+      try { es.close(); } catch (_) {}
+      es = null;
+      setTimeout(openStream, 2000);
+    };
+  } catch (_) { es = null; }
 }
 async function pollTyping() {
   try {
@@ -2197,12 +2220,13 @@ async function init() {
   selectTarget(store.view.server, store.view.target);
 
   poll();
+  openStream();
   refreshPolicies();
   refreshContacts();
   refreshBlocked();
   refreshCalls();
   refreshGroupCalls();
-  setInterval(poll, 700);
+  setInterval(poll, 3000);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
   setInterval(refreshReactions, 1500);

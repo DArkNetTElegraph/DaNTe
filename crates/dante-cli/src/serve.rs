@@ -2,7 +2,8 @@
 //!
 //! Single user, localhost only. A minimal hand-rolled HTTP/1.1 handler serves
 //! the embedded SPA and a JSON API:
-//! `GET /api/me`, `GET /api/messages?since=N`, `GET /api/channels`,
+//! `GET /api/me`, `GET /api/messages?since=N`, `GET /api/stream?since=N` (SSE),
+//! `GET /api/channels`,
 //! `POST /api/send {to,text}` (`to` may be a fingerprint or `#<channel-id>`),
 //! `POST /api/server {name}`, `POST /api/channel {server,name}`,
 //! `POST /api/invite {channel,peer}`, `POST /api/invite-link
@@ -1983,6 +1984,8 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 
+        ("GET", "/api/stream") => sse_stream(&mut stream, &shared, query).await,
+
         ("POST", "/api/send") => {
             #[derive(serde::Deserialize)]
             struct Req {
@@ -2828,6 +2831,75 @@ async fn dispatch(
     }
 }
 
+/// Security headers sent on every response. The page is one self-contained file
+/// with inline script/style and only same-origin fetches (incl. the `/api/stream`
+/// EventSource) — lock everything else down so an injected string can't pull in
+/// an external script or exfiltrate to another origin.
+const SEC: &str = "Content-Security-Policy: default-src 'none'; \
+     script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+     connect-src 'self'; img-src 'self' data:; base-uri 'none'; \
+     form-action 'none'; frame-ancestors 'none'\r\n\
+     X-Content-Type-Options: nosniff\r\n\
+     Referrer-Policy: no-referrer\r\n\
+     X-Frame-Options: DENY\r\n";
+
+/// Server-Sent Events: hold the connection open and push every new inbox item
+/// as it appears, so the SPA sees messages in ~150 ms instead of waiting for its
+/// next poll. This is a server-side tail of `shared.inbox` (no changes to the
+/// dozens of push sites); the SPA keeps its slow poll as a fallback for when the
+/// stream drops. Returns when the client disconnects (a write fails).
+async fn sse_stream(stream: &mut TcpStream, shared: &Shared, query: &str) -> Result<()> {
+    let mut cursor: u64 = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("since="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n{SEC}Connection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(b": open\n\n").await?;
+    stream.flush().await?;
+
+    let mut ticker = tokio::time::interval(Duration::from_millis(150));
+    let mut idle: u32 = 0;
+    loop {
+        ticker.tick().await;
+        let batch: Vec<String> = {
+            let inbox = shared.inbox.lock().await;
+            let fresh: Vec<&Item> = inbox.iter().filter(|it| it.seq() > cursor).collect();
+            if let Some(last) = fresh.last() {
+                cursor = last.seq();
+            }
+            fresh
+                .iter()
+                .map(|it| serde_json::to_string(it).unwrap_or_default())
+                .collect()
+        };
+        if batch.is_empty() {
+            idle += 1;
+            if idle >= 100 {
+                // ~15 s keep-alive so intermediaries don't reap an idle stream.
+                idle = 0;
+                stream.write_all(b": ping\n\n").await?;
+                stream.flush().await?;
+            }
+            continue;
+        }
+        idle = 0;
+        let mut out = String::with_capacity(batch.len() * 96);
+        for j in batch {
+            out.push_str("data: ");
+            out.push_str(&j);
+            out.push_str("\n\n");
+        }
+        stream.write_all(out.as_bytes()).await?;
+        stream.flush().await?;
+    }
+}
+
 async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) -> Result<()> {
     let reason = match code {
         200 => "OK",
@@ -2839,16 +2911,6 @@ async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) ->
         502 => "Bad Gateway",
         _ => "Status",
     };
-    // The page is one self-contained file with inline script/style and only
-    // same-origin fetches — lock everything else down so an injected string
-    // can't pull in an external script or exfiltrate to another origin.
-    const SEC: &str = "Content-Security-Policy: default-src 'none'; \
-         script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
-         connect-src 'self'; img-src 'self' data:; base-uri 'none'; \
-         form-action 'none'; frame-ancestors 'none'\r\n\
-         X-Content-Type-Options: nosniff\r\n\
-         Referrer-Policy: no-referrer\r\n\
-         X-Frame-Options: DENY\r\n";
     let head = format!(
         "HTTP/1.1 {code} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{SEC}Connection: close\r\n\r\n",
         body.len()

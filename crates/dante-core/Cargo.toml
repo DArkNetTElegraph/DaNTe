@@ -17,9 +17,15 @@ dante-net.workspace = true
 dante-dm.workspace = true
 dante-mls.workspace = true
 dante-voice.workspace = true
+dante-p2p = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+[features]
+# Opt-in libp2p support: a Kademlia DHT used as a decentralised key-directory
+# fallback alongside the relay. Off by default; pulls the libp2p dependency tree.
+p2p = ["dep:dante-p2p"]
 
 [dev-dependencies]
 dante-relay = { path = "../dante-relay", version = "0.0.1" }

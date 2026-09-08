@@ -12,6 +12,11 @@
 //! comma-separated list of `host:port` endpoints; the client uses the first
 //! reachable one and fails over to the rest if the connection drops.
 //!
+//! Built with `--features p2p`, `chat` and `serve` also accept `--p2p` (bring up
+//! a libp2p node listening on `/ip4/0.0.0.0/tcp/0`), `--p2p-listen <multiaddr>`
+//! and `--bootstrap <multiaddr,...>`. The DHT is then a decentralised
+//! key-directory fallback for the relay.
+//!
 //! In `chat`, lines starting with `/` are commands:
 //! `/to <fingerprint>`, `/file <path>`, `/whoami`, `/peer`, `/quit`.
 
@@ -159,7 +164,9 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
                 .with_context(|| format!("reading {}", keystore_path.display()))?;
             let identity = keystore::open(&bytes, pass.as_bytes())?;
             eprintln!("connecting to relay {relay} (proof of work: {bits} bits) ...");
-            Some(Engine::connect(identity, &relay, params, pow, store_path.clone()).await?)
+            let mut e = Engine::connect(identity, &relay, params, pow, store_path.clone()).await?;
+            maybe_enable_p2p(&mut e, flags).await;
+            Some(e)
         }
         _ => None,
     };
@@ -209,7 +216,51 @@ async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
     };
 
     eprintln!("connecting to relay {relay} (proof of work: {bits} bits) ...");
-    Ok(Engine::connect(identity, &relay, params, difficulty, store_path).await?)
+    let mut engine = Engine::connect(identity, &relay, params, difficulty, store_path).await?;
+    maybe_enable_p2p(&mut engine, flags).await;
+    Ok(engine)
+}
+
+/// Bring up an optional libp2p node when `--p2p` (listen on `/ip4/0.0.0.0/tcp/0`)
+/// or `--p2p-listen <multiaddr>` is passed; `--bootstrap a,b,c` gives peer
+/// multiaddrs to dial. Best-effort — a failure just logs and leaves the engine
+/// on the relay alone.
+#[cfg(feature = "p2p")]
+async fn maybe_enable_p2p(engine: &mut Engine, flags: &HashMap<String, String>) {
+    let listen = flags.get("p2p-listen").map(String::as_str);
+    if listen.is_none() && !flags.contains_key("p2p") {
+        return;
+    }
+    let listen = listen.unwrap_or("/ip4/0.0.0.0/tcp/0");
+    let boot: Vec<String> = flags
+        .get("bootstrap")
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    match engine.enable_p2p(listen, &boot).await {
+        Ok(addrs) => {
+            eprintln!(
+                "p2p node up (peer id {})",
+                engine.p2p_peer_id().unwrap_or_default()
+            );
+            for a in addrs {
+                eprintln!("  p2p dial addr: {a}");
+            }
+        }
+        Err(e) => eprintln!("p2p disabled: {e}"),
+    }
+}
+
+#[cfg(not(feature = "p2p"))]
+async fn maybe_enable_p2p(_engine: &mut Engine, flags: &HashMap<String, String>) {
+    if flags.contains_key("p2p") || flags.contains_key("p2p-listen") {
+        eprintln!("--p2p ignored: this binary was built without the `p2p` feature (rebuild with `--features p2p`)");
+    }
 }
 
 async fn cmd_revoke(flags: &HashMap<String, String>) -> Result<()> {

@@ -101,10 +101,10 @@ achievable with no project-run infrastructure.
   and the coalescing rule (>3 concurrent → "several people are typing…").
 
 **Not built yet:** private-channel access control beyond the secret
-`channel_id` + password wrapper. libp2p/DHT + multi-relay gossip
-(Phase 3 deferred — a working prototype lives in the detached `crates/dante-p2p`,
-not yet wired into `Engine`); screen share + an SFrame layer over the group-call key
-(Phase 7); rich features — emoji/stickers/soundboards, bots, embeds (Phase 8);
+`channel_id` + password wrapper. Gossipsub fan-out of the ledger + channel
+logs (the libp2p DHT is wired in as an opt-in key-directory fallback — feature
+`p2p`; see Phase 3); screen share + an SFrame layer over the group-call key
+(Phase 7); rich features — stickers/soundboards, bots, embeds (Phase 8);
 the Tauri desktop native layer.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
@@ -202,25 +202,32 @@ DaNTe/
   `--relay` list; the first entry is what invite links and `ServerRegister.
   entry_relays` advertise. Not yet: health-based reordering, or learning new
   endpoints from `entry_relays`.
-- **Deferred:** libp2p (QUIC + Noise + Yamux), Kademlia DHT for peer/prekey
-  lookup, gossipsub for multi-relay ledger fan-out. The request/response
-  protocol is designed to run unchanged over that overlay; until then a client
-  syncs the key directory by pulling records from the relay(s) it connects to.
-- **Prototype (`crates/dante-p2p`, detached crate):** a minimal `Node` over a
-  libp2p Swarm — TCP + Noise + Yamux, Kademlia (memory store, DaNTe-private
-  `/dante/kad/1.0.0` protocol, server mode) for `put_record`/`get_record`, and
-  gossipsub for `publish`/`subscribe`; identify feeds addresses into the kad
-  routing table; ping for liveness. Driven by a background Tokio task behind a
-  command channel + `Event` stream. In-process-swarm tests cover two nodes
-  gossiping and a DHT record put on one node being resolved by a peer. Kept
-  **out of the root workspace** on purpose: the libp2p tree's `licenses`/`bans`
-  are clean under our `deny.toml`, but `advisories` still flags `paste`
-  (RUSTSEC-2024-0436, unmaintained, no upgrade, via the `netlink`/`if-watch`
-  stack that `libp2p-tcp` needs on Linux). The `dns` feature is left off to
-  avoid `hickory-proto` 0.25's DoS advisory. Folding this in waits on those
-  clearing (or an explicit `advisories.ignore` entry) and on wiring it into
-  `Engine` (DHT for the key directory, gossipsub for ledger + channel logs;
-  the sealed-sender mailbox stays on `dante-relay`).
+- **`crates/dante-p2p`** — a `Node` over a libp2p Swarm: TCP + Noise + Yamux,
+  Kademlia (memory store, DaNTe-private `/dante/kad/1.0.0` protocol, server
+  mode) for `put_record`/`get_record`, gossipsub for `publish`/`subscribe`,
+  identify feeding addresses into the kad routing table, ping for liveness.
+  Driven by a background Tokio task behind a command channel + `Event` stream.
+  It is a **workspace member but not a default one** (`default-members` omits
+  it), so a bare `cargo build` / `cargo test` never pulls the libp2p tree;
+  `--workspace` and `-p dante-p2p` do. `deny.toml` carries an
+  `advisories.ignore` for `paste` (RUSTSEC-2024-0436, unmaintained, build-time
+  proc-macro from the `netlink`/`if-watch` stack `libp2p-tcp` needs on Linux);
+  `licenses`/`bans` are clean. The `dns` feature is left off to avoid
+  `hickory-proto` 0.25's DoS advisory (bootstrap peers are IP multiaddrs).
+- **DHT key-directory fallback** *(done, opt-in — `dante-core` feature `p2p`)*:
+  `Identity::p2p_node_seed()` derives a stable libp2p node key from the signing
+  secret through a hash (the `PeerId` doesn't leak the identity key).
+  `Engine::enable_p2p(listen, bootstrap)` spawns the node, dials the bootstrap
+  multiaddrs and runs a Kademlia bootstrap round; `publish_prekeys` then
+  mirrors the bundle onto the DHT under `"dante/prekey/v1:" ‖ IdentityId`, and
+  `send_content`'s first-contact path (`fetch_prekey_bundle`) falls back to a
+  DHT `get_record` when the relay has no bundle. The relay stays primary and
+  remains the only sealed-sender mailbox. `dante chat` / `dante serve` (built
+  `--features p2p`) take `--p2p` / `--p2p-listen <multiaddr>` /
+  `--bootstrap <a,b>`. e2e: `the_dht_serves_as_a_prekey_directory_fallback`
+  (two engines, one resolves the other's bundle purely over the DHT).
+- **Still deferred:** gossipsub fan-out of the ledger and channel logs;
+  learning relay endpoints from `entry_relays`; health-based relay reordering.
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

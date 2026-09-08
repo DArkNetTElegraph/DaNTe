@@ -80,4 +80,9 @@ pub enum CoreError {
     /// Setting up or driving a WebRTC call failed.
     #[error("voice: {0}")]
     Voice(String),
+
+    /// A libp2p / DHT operation failed (only with the `p2p` feature).
+    #[cfg(feature = "p2p")]
+    #[error("p2p: {0}")]
+    P2p(String),
 }

@@ -13,6 +13,25 @@ members = [
     "crates/dante-core",
     "crates/dante-cli",
     "crates/dante-voice",
+    "crates/dante-p2p",
+]
+# dante-p2p pulls the large libp2p tree and is only reachable through the
+# optional `p2p` feature of dante-core / dante-cli. Keep it out of the default
+# `cargo build` / `cargo test` set; build it explicitly (`-p dante-p2p`) or with
+# `--workspace`.
+default-members = [
+    "crates/dante-crypto",
+    "crates/dante-identity",
+    "crates/dante-ledger",
+    "crates/dante-proto",
+    "crates/dante-net",
+    "crates/dante-relay",
+    "crates/dante-dm",
+    "crates/dante-group",
+    "crates/dante-mls",
+    "crates/dante-core",
+    "crates/dante-cli",
+    "crates/dante-voice",
 ]
 
 [workspace.package]
@@ -37,6 +56,7 @@ dante-group = { path = "crates/dante-group", version = "0.0.1" }
 dante-mls = { path = "crates/dante-mls", version = "0.0.1" }
 dante-core = { path = "crates/dante-core", version = "0.0.1" }
 dante-voice = { path = "crates/dante-voice", version = "0.0.1" }
+dante-p2p = { path = "crates/dante-p2p", version = "0.0.1" }
 
 # Shared third-party deps (kept minimal; phases add their own)
 thiserror = "2"

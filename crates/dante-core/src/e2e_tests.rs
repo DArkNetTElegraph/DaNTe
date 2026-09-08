@@ -786,6 +786,63 @@ async fn a_channel_reply_carries_its_target_seq() {
     assert!(alice.search("nothing-matches-xyz", 10).is_empty());
 }
 
+#[cfg(feature = "p2p")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_dht_serves_as_a_prekey_directory_fallback() {
+    use dante_dm::PreKeyBundle;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_idk = alice.identity().sign_public().to_bytes();
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    // Alice brings up a libp2p node; Bob bootstraps to it.
+    let alice_addrs = alice
+        .enable_p2p("/ip4/127.0.0.1/tcp/0", &[])
+        .await
+        .expect("alice p2p");
+    assert!(!alice_addrs.is_empty(), "alice has a dialable address");
+    bob.enable_p2p("/ip4/127.0.0.1/tcp/0", &alice_addrs)
+        .await
+        .expect("bob p2p");
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap(); // relay + DHT
+    }
+    alice.sync(now).await.unwrap();
+    bob.sync(now).await.unwrap();
+
+    // Bob resolves Alice's bundle straight from the DHT (retry: Kad needs a
+    // moment to replicate the record to Bob).
+    let mut blob = None;
+    for _ in 0..25 {
+        if let Some(b) = bob.dht_prekey(&alice_id).await {
+            blob = Some(b);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let blob = blob.expect("alice's prekey bundle resolved via the DHT");
+    let bundle = PreKeyBundle::decode(&blob).expect("valid bundle");
+    assert_eq!(bundle.idk_pub, alice_idk);
+    assert_eq!(bundle.identity_id, alice_id);
+    bundle.verify().expect("bundle signature");
+
+    // The relay path is untouched: a normal DM still flows.
+    bob.send_dm(&alice_id, "over the relay still", now)
+        .await
+        .unwrap();
+    assert_eq!(
+        alice.receive(now).await.unwrap()[0].text,
+        "over the relay still"
+    );
+    let _ = bob_id;
+}
+
 #[tokio::test]
 async fn a_direct_message_can_be_edited_and_deleted_by_its_sender() {
     let now = now_ms();

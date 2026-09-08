@@ -94,6 +94,15 @@ impl Identity {
         &self.ratchet_db_key
     }
 
+    /// A stable 32-byte seed for this identity's libp2p node key. Derived from
+    /// the signing secret through a hash so the resulting `PeerId` cannot be
+    /// linked back to the DaNTe identity key by an observer, yet stays the same
+    /// across restarts (a stable DHT identity). The raw signing secret never
+    /// leaves this crate.
+    pub fn p2p_node_seed(&self) -> [u8; 32] {
+        dante_crypto::hash::sha256_parts(&[b"dante/p2p-node-seed/v1", &self.idk.to_bytes()])
+    }
+
     // --- accessors used only within this crate to persist the identity ---
 
     pub(crate) fn idk_secret(&self) -> [u8; 32] {

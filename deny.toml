@@ -11,6 +11,13 @@ ignore = [
     # surface. The advisory states no safe upgrade exists; it will drop out
     # when the libcrux stack moves off hax-lib. Reassess on OpenMLS bumps.
     "RUSTSEC-2026-0173",
+    # paste is unmaintained (not vulnerable, no CVE). It is a build-time
+    # proc-macro helper pulled by netlink-packet-core <- if-watch <- libp2p-tcp,
+    # which libp2p needs to watch interface changes on Linux. Only reachable
+    # when a downstream crate enables its `p2p` feature (default off); it emits
+    # no runtime code. No safe upgrade exists. Drop when the netlink stack moves
+    # to `pastey`, or if we vendor a different TCP transport for libp2p.
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

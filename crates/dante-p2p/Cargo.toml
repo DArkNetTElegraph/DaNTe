@@ -1,19 +1,18 @@
-# Detached from the root workspace on purpose (like crates/dante-audio and
-# apps/dante-desktop): rust-libp2p pulls a very large dependency tree that the
-# root `cargo deny` gate would need vetting for. This is groundwork for the
-# decentralized transport (Phase 3) and is not yet wired into dante-core.
+# Part of the workspace, but only built when a downstream crate turns on its
+# `p2p` feature (dante-core / dante-cli). A default `cargo build` does not pull
+# the libp2p tree. See docs/DESIGN.md Phase 3.
 #
-#   cd crates/dante-p2p && cargo test
-[workspace]
-
+# `deny.toml` carries an `advisories.ignore` for RUSTSEC-2024-0436 (`paste`,
+# unmaintained) which the libp2p-tcp -> if-watch -> netlink stack drags in on
+# Linux; it is a build-time proc-macro with no runtime surface.
 [package]
 name = "dante-p2p"
-version = "0.0.1"
-edition = "2021"
-rust-version = "1.85"
-license = "AGPL-3.0-or-later"
-repository = "https://github.com/DArkNetTElegraph/DaNTe"
-authors = ["The DaNTe contributors"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 description = "libp2p transport for DaNTe: Kademlia key directory + gossipsub for the ledger and channel logs."
 
 [dependencies]
@@ -24,10 +23,10 @@ libp2p = { version = "0.56", features = [
     "tokio", "tcp", "noise", "yamux",
     "kad", "gossipsub", "identify", "ping", "macros",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true }
 futures = "0.3"
-thiserror = "2"
-tracing = "0.1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

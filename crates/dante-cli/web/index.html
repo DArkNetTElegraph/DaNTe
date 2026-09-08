@@ -358,7 +358,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .msg-line.file { color: var(--link); }
 .msg-line.deleted { color: var(--text-faint); font-style: italic; }
 .edited-tag { color: var(--text-faint); font-size: 11px; }
-#settings-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55);
+#settings-overlay, #server-settings-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55);
   display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; overflow-y: auto; }
 .settings-box { width: min(520px, 92vw); background: var(--bg-pane); border: 1px solid var(--divider);
   border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.5); padding: 18px 20px 22px; margin-bottom: 8vh; }
@@ -603,7 +603,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 #rail, #pane { border-right: 1px solid var(--divider); }
 
 /* Overlay scrims: a blurred, theme-tinted wash instead of flat black. */
-#settings-overlay, #search-overlay, #pins-overlay, #fwd-overlay, #modal-layer {
+#settings-overlay, #server-settings-overlay, #search-overlay, #pins-overlay, #fwd-overlay, #modal-layer {
   background: color-mix(in srgb, var(--bg-app) 55%, transparent);
   backdrop-filter: blur(10px) saturate(1.3);
   -webkit-backdrop-filter: blur(10px) saturate(1.3);
@@ -1131,21 +1131,12 @@ function renderPane() {
   const server = store.view.server;
   $("#pane-title").textContent = server;
 
-  const mk = (glyph, title, fn) => { const b = el("button", "icon-btn", glyph); b.title = title; b.onclick = fn; return b; };
-  actions.appendChild(mk("#＋", "Create channel", () => createChannelFlow(server)));
-  actions.appendChild(mk("🛡", "Roles", () => rolesFlow(server)));
-  actions.appendChild(mk("🔑", "Set a join password", () => joinPwFlow(server)));
-  actions.appendChild(mk("🧭", "List on public discovery", () => publishFlow(server)));
-  const akDays = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
-  actions.appendChild(mk("⏲", akDays ? `Auto-kick after ${akDays}d — click to change` : "Auto-kick inactive members", () => autoKickFlow(server)));
-  const srvRoot = store.rootOf(server);
-  if (srvRoot && store.policies[srvRoot] && store.policies[srvRoot].owner === store.me.fingerprint) {
-    actions.appendChild(mk("🗑", "Delete this server", async () => {
-      if (!await ui.confirm('Delete the server "' + server + '" and all its channels for everyone? This cannot be undone.')) return;
-      try { await api.post("/api/server/delete", { server: srvRoot }); await refreshChannels(); selectTarget("@dm", null); }
-      catch (e) { ui.sys("delete failed: " + e.message); }
-    }));
-  }
+  // One entry point — the full set of server-management actions lives in the
+  // Server settings overlay, not crammed next to the name.
+  const gear = el("button", "icon-btn", "⚙");
+  gear.title = "Server settings";
+  gear.onclick = () => openServerSettings(server);
+  actions.appendChild(gear);
 
   const lbl = el("div", "group-label");
   lbl.appendChild(el("span", null, "Text Channels"));
@@ -2422,6 +2413,78 @@ function openSettings() {
   };
   dz.appendChild(revoke);
   box.appendChild(dz);
+
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+}
+
+/* ---- Server settings: everything that used to be icons by the name ------ */
+function openServerSettings(server) {
+  if ($("#server-settings-overlay")) return;
+  const root = store.rootOf(server);
+  const p = root ? store.policies[root] : null;
+  const isOwner = !!(p && p.owner === store.me.fingerprint);
+  const akDays = (store.channelsOf(server)[0] || {}).auto_kick_days || 0;
+
+  const ov = el("div"); ov.id = "server-settings-overlay";
+  const box = el("div", "settings-box");
+  const close = () => ov.remove();
+  ov.onclick = e => { if (e.target === ov) close(); };
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape" && $("#server-settings-overlay")) { close(); document.removeEventListener("keydown", esc); }
+  });
+
+  box.appendChild(Object.assign(el("h3"), { textContent: "⚙  " + server }));
+  box.appendChild(Object.assign(el("div", "set-mono"), {
+    textContent: isOwner ? "You host this server." : "Hosted by someone else — role, password, discovery and delete are host-only.",
+  }));
+
+  const sec = title => {
+    const s = el("div", "set-sec");
+    s.appendChild(Object.assign(el("div", "set-h"), { textContent: title }));
+    box.appendChild(s);
+    return s;
+  };
+  const note = (s, text) => s.appendChild(Object.assign(el("div", "set-mono"), { textContent: text }));
+  const act = (s, label, run) => {
+    const b = el("button", "set-wide", label);
+    b.onclick = async () => { close(); await run(); };
+    s.appendChild(b);
+  };
+
+  const chSec = sec("Channels");
+  const chans = store.channelsOf(server);
+  note(chSec, chans.length ? chans.length + " channel(s): " + chans.map(c => "#" + c.name).join(", ") : "No channels yet.");
+  act(chSec, "Create a channel…", () => createChannelFlow(server));
+
+  const rSec = sec("Roles & permissions");
+  note(rSec, p && p.roles && p.roles.length
+    ? p.roles.length + " role(s): " + p.roles.map(r => r.name).join(", ")
+    : "No custom roles — everyone can send.");
+  act(rSec, "Manage roles…", () => rolesFlow(server));
+
+  const aSec = sec("Access");
+  act(aSec, "Set or change the join password…", () => joinPwFlow(server));
+  act(aSec, akDays ? `Auto-remove inactive members (now: ${akDays} day${akDays === 1 ? "" : "s"})…` : "Auto-remove inactive members…", () => autoKickFlow(server));
+
+  const dSec = sec("Discovery");
+  note(dSec, "List this server in the public directory so anyone can request to join.");
+  act(dSec, "Public listing…", () => publishFlow(server));
+
+  if (isOwner) {
+    const dz = el("div", "set-sec danger");
+    dz.appendChild(Object.assign(el("div", "set-h"), { textContent: "Danger zone" }));
+    note(dz, "Deletes every channel for every member. Cannot be undone.");
+    const del = el("button", "set-wide danger-btn", "Delete this server…");
+    del.onclick = async () => {
+      close();
+      if (!await ui.confirm('Delete "' + server + '" and all its channels for everyone? This cannot be undone.', { ok: "Delete", danger: true })) return;
+      try { await api.post("/api/server/delete", { server: root }); await refreshChannels(); selectTarget("@dm", null); }
+      catch (e) { ui.say("Delete failed: " + e.message); }
+    };
+    dz.appendChild(del);
+    box.appendChild(dz);
+  }
 
   ov.appendChild(box);
   document.body.appendChild(ov);

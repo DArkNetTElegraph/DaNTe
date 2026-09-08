@@ -2768,12 +2768,7 @@ impl Engine {
         image: &[u8],
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        if name.is_empty()
-            || name.len() > roles::EMOJI_NAME_MAX
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        {
+        if !roles::valid_emoji_name(name) {
             return Err(CoreError::Channel("bad emoji name"));
         }
         if image.is_empty() || image.len() > 1024 * 1024 {

@@ -84,7 +84,9 @@ impl Mailbox {
         }
         let size = env_size(&env);
         if size > MAX_ENVELOPE_BYTES {
-            return Err(NetError::RejectedEnvelope("envelope exceeds the size limit"));
+            return Err(NetError::RejectedEnvelope(
+                "envelope exceeds the size limit",
+            ));
         }
         if self.bytes.saturating_add(size) > MAX_MAILBOX_BYTES {
             return Err(NetError::RejectedEnvelope("mailbox is full"));

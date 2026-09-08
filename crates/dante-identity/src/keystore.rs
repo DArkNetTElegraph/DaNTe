@@ -267,7 +267,10 @@ mod tests {
             cbor_from_slice(&seal_with_params(&id, b"pw", FAST).unwrap()).unwrap();
         file.kdf.m_cost_kib = u32::MAX;
         let bytes = cbor_to_vec(&file).unwrap();
-        assert!(matches!(open(&bytes, b"pw"), Err(IdentityError::KeystoreOpen)));
+        assert!(matches!(
+            open(&bytes, b"pw"),
+            Err(IdentityError::KeystoreOpen)
+        ));
     }
 
     #[test]

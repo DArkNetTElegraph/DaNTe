@@ -5,12 +5,13 @@
 //! all the MVP needs. A DHT / gossip overlay for multi-relay decentralisation
 //! is a later phase.
 
-use std::{net::IpAddr, sync::Arc};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
 };
 
 use crate::{
@@ -20,6 +21,17 @@ use crate::{
 
 /// Largest frame this transport will read or write.
 pub const MAX_FRAME: u32 = 8 * 1024 * 1024;
+
+/// Max concurrent inbound connections a relay will service at once. Beyond this
+/// new connections are dropped rather than piled on, so a flood of half-open
+/// sockets can't exhaust file descriptors or task memory.
+pub const MAX_CONNECTIONS: usize = 1024;
+
+/// A connection must produce its next complete request frame within this. It
+/// bounds a slowloris hold (a length prefix followed by a trickle of body, or an
+/// idle socket parked forever); a client with nothing to send simply reconnects
+/// when it next needs the relay.
+const CONN_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, body: &[u8]) -> Result<(), NetError> {
     let len = u32::try_from(body.len()).map_err(|_| NetError::FrameTooLarge(u32::MAX))?;
@@ -176,11 +188,19 @@ pub async fn serve<H: RequestHandler>(
     listener: TcpListener,
     handler: Arc<H>,
 ) -> Result<(), NetError> {
+    let conn_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         let (stream, peer) = listener.accept().await?;
         stream.set_nodelay(true).ok();
+        // Hard-cap concurrency: at the limit, drop the newcomer instead of
+        // queuing it, so a connection flood can't grow tasks/fds without bound.
+        let Ok(permit) = Arc::clone(&conn_limit).try_acquire_owned() else {
+            tracing::debug!(%peer, "connection limit reached, dropping");
+            continue;
+        };
         let handler = Arc::clone(&handler);
         tokio::spawn(async move {
+            let _permit = permit; // released when the connection ends
             if let Err(e) = serve_conn(stream, peer.ip(), handler).await {
                 tracing::debug!(%peer, error = %e, "connection ended");
             }
@@ -194,10 +214,12 @@ async fn serve_conn<H: RequestHandler>(
     handler: Arc<H>,
 ) -> Result<(), NetError> {
     loop {
-        let body = match read_frame(&mut stream).await {
-            Ok(b) => b,
-            Err(NetError::Closed) => return Ok(()),
-            Err(e) => return Err(e),
+        let body = match tokio::time::timeout(CONN_READ_TIMEOUT, read_frame(&mut stream)).await {
+            Ok(Ok(b)) => b,
+            Ok(Err(NetError::Closed)) => return Ok(()),
+            Ok(Err(e)) => return Err(e),
+            // Idle or dribbling past the deadline: drop the connection quietly.
+            Err(_) => return Ok(()),
         };
         let response = match Request::decode(&body) {
             Ok(req) => handler.handle(req, peer_ip).await,

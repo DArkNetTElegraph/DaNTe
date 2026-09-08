@@ -837,6 +837,57 @@ async fn a_direct_message_can_be_edited_and_deleted_by_its_sender() {
 }
 
 #[tokio::test]
+async fn a_message_can_be_forwarded_into_a_channel() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    for _ in 0..6 {
+        for e in [&mut host, &mut alice] {
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
+        }
+    }
+
+    host.send_channel(&chan, "keep this", now).await.unwrap();
+    assert_eq!(alice.poll_channels(now).await.unwrap()[0].text, "keep this");
+
+    // Alice forwards it back into the channel, tagged with its origin.
+    let seq = alice
+        .forward_to_channel(&chan, "the-host", "keep this", now)
+        .await
+        .unwrap();
+    let got = host.poll_channels(now).await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text, "keep this");
+    assert_eq!(got[0].forwarded_from.as_deref(), Some("the-host"));
+    assert_eq!(got[0].reply_to, None);
+
+    // A forward is an ordinary message: its author can still edit it.
+    let _ = alice.take_edits();
+    alice
+        .edit_channel_message(&chan, seq, "keep this!!", now)
+        .await
+        .unwrap();
+    host.poll_channels(now).await.unwrap();
+    let edits = host.take_edits();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].text.as_deref(), Some("keep this!!"));
+}
+
+#[tokio::test]
 async fn the_host_can_pin_and_unpin_a_channel_message() {
     let now = now_ms();
     let relay = spawn_relay().await;

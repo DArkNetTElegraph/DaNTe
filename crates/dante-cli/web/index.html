@@ -317,6 +317,9 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .msg-actions button:hover { color: var(--text); border-color: var(--cornflower-blue); }
 .sys { color: var(--text-faint); font-style: italic; padding: 4px 0; font-size: 13px; }
 .pin-tag { color: var(--orange); font-size: 11px; font-weight: 600; margin-bottom: 1px; }
+.fwd-tag { color: var(--text-faint); font-size: 11px; font-style: italic; margin-bottom: 1px; }
+#fwd-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.5);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
 .msg-actions button.on { color: var(--orange); border-color: var(--orange); }
 #pins-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.5);
   display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
@@ -610,6 +613,7 @@ const api = {
   typing()    { return this.get("/api/typing"); },
   send(to, text, replyTo) { return this.post("/api/send", replyTo ? { to, text, reply_to: replyTo } : { to, text }); },
   editDm(peer, msgId, text) { return this.post("/api/dm/edit", { peer, msg_id: msgId, text }); },
+  forward(to, origin, text) { return this.post("/api/forward", { to, origin, text }); },
   createServer(name)      { return this.post("/api/server", { name }); },
   createChannel(server, name, password) { return this.post("/api/channel", { server, name, password: password || "" }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
@@ -1088,15 +1092,29 @@ function renderChat() {
       g.body.appendChild(Object.assign(el("div", "pin-tag"), { textContent: "📌 pinned" }));
     }
     const dmEd = (!target.startsWith("#") && m.msg_id) ? store.dmEdits[m.msg_id] : null;
+    const deleted = m._deleted || (dmEd && dmEd.deleted);
+    let bodyText = dmEd ? dmEd.text : m.text;
+    let fwdOrigin = null;
+    if (!deleted) {
+      if (target.startsWith("#") && m.forwarded_from) {
+        fwdOrigin = m.forwarded_from;
+      } else if (!target.startsWith("#") && bodyText.startsWith(FWD_PREFIX)) {
+        const nl = bodyText.indexOf("\n");
+        fwdOrigin = bodyText.slice(FWD_PREFIX.length, nl < 0 ? undefined : nl);
+        bodyText = nl < 0 ? "" : bodyText.slice(nl + 1);
+      }
+    }
+    if (fwdOrigin) g.body.appendChild(Object.assign(el("div", "fwd-tag"),
+      { textContent: "↪ Forwarded from " + fwdOrigin }));
     const line = el("div", "msg-line");
-    if (m._deleted || (dmEd && dmEd.deleted)) {
+    if (deleted) {
       line.className = "msg-line deleted";
       line.textContent = "(message deleted)";
     } else if (target.startsWith("#")) {
-      line.innerHTML = richText(m.text);
+      line.innerHTML = richText(bodyText);
       if (m._edited) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
     } else {
-      line.textContent = dmEd ? dmEd.text : m.text;
+      line.textContent = bodyText;
       if (dmEd) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
     }
     g.body.appendChild(line);
@@ -1104,8 +1122,8 @@ function renderChat() {
       addMsgActions(g.body, target, m);
       renderReactions(g.body, target, m.ref_seq);
     }
-    if (!target.startsWith("#") && m.from === "you" && m.msg_id && !(dmEd && dmEd.deleted)) {
-      addDmActions(g.body, target, m);
+    if (!target.startsWith("#") && !deleted && !isSelf(target)) {
+      addDmActions(g.body, target, m, bodyText);
     }
     if (m.ref_seq) g.node._refSeq = m.ref_seq;
     log.appendChild(g.node);
@@ -1118,8 +1136,9 @@ function renderChat() {
 }
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
+const FWD_PREFIX = "↪ Forwarded from ";
 
-// Reply / edit / delete affordances on channel messages.
+// Reply / forward / edit / delete affordances on channel messages.
 function addMsgActions(body, channelTarget, m) {
   if (!m.ref_seq) return;
   const bar = el("div", "msg-actions");
@@ -1130,6 +1149,9 @@ function addMsgActions(body, channelTarget, m) {
     $("#text").focus();
   };
   bar.appendChild(reply);
+  const fwd = el("button", null, "↪"); fwd.title = "Forward";
+  fwd.onclick = () => openForwardPicker(m, channelTarget);
+  bar.appendChild(fwd);
   const isPinned = store.pins[channelTarget] && store.pins[channelTarget][m.ref_seq];
   const pin = el("button", isPinned ? "on" : null, "📌");
   pin.title = isPinned ? "Unpin" : "Pin";
@@ -1157,26 +1179,79 @@ function addMsgActions(body, channelTarget, m) {
   body.appendChild(bar);
 }
 
-// Edit / delete affordances on our own direct messages.
-function addDmActions(body, peer, m) {
-  if (!m.msg_id) return;
+// Forward / edit / delete affordances on direct messages.
+function addDmActions(body, peer, m, bodyText) {
   const bar = el("div", "msg-actions");
-  const cur = () => (store.dmEdits[m.msg_id] && store.dmEdits[m.msg_id].text) || m.text;
-  const edit = el("button", null, "✎"); edit.title = "Edit";
-  edit.onclick = async () => {
-    const t = await ui.ask("Edit message", cur());
-    if (t == null || t === cur()) return;
-    try { await api.editDm(peer, m.msg_id, t); store.dmEdits[m.msg_id] = { text: t, deleted: false }; renderChat(); }
-    catch (e) { ui.say("Edit failed: " + e.message); }
-  };
-  const del = el("button", null, "🗑"); del.title = "Delete";
-  del.onclick = async () => {
-    if (!await ui.confirm("Delete this message for everyone?")) return;
-    try { await api.editDm(peer, m.msg_id, ""); store.dmEdits[m.msg_id] = { text: "", deleted: true }; renderChat(); }
-    catch (e) { ui.say("Delete failed: " + e.message); }
-  };
-  bar.append(edit, del);
+  const fwd = el("button", null, "↪"); fwd.title = "Forward";
+  fwd.onclick = () => openForwardPicker({ ...m, text: bodyText }, peer);
+  bar.appendChild(fwd);
+  if (m.from === "you" && m.msg_id) {
+    const cur = () => (store.dmEdits[m.msg_id] && store.dmEdits[m.msg_id].text) || m.text;
+    const edit = el("button", null, "✎"); edit.title = "Edit";
+    edit.onclick = async () => {
+      const t = await ui.ask("Edit message", cur());
+      if (t == null || t === cur()) return;
+      try { await api.editDm(peer, m.msg_id, t); store.dmEdits[m.msg_id] = { text: t, deleted: false }; renderChat(); }
+      catch (e) { ui.say("Edit failed: " + e.message); }
+    };
+    const del = el("button", null, "🗑"); del.title = "Delete";
+    del.onclick = async () => {
+      if (!await ui.confirm("Delete this message for everyone?")) return;
+      try { await api.editDm(peer, m.msg_id, ""); store.dmEdits[m.msg_id] = { text: "", deleted: true }; renderChat(); }
+      catch (e) { ui.say("Delete failed: " + e.message); }
+    };
+    bar.append(edit, del);
+  }
   body.appendChild(bar);
+}
+
+// Pick a destination conversation and forward `m` there.
+function openForwardPicker(m, srcTarget) {
+  if ($("#fwd-overlay")) return;
+  const text = (m.text || "").replace(new RegExp("^" + FWD_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ".*\\n?"), "");
+  if (!text) return;
+  const origin = m.from === "you" ? "you" : (dmLabel(m.from) || short(m.from) || "someone");
+
+  const ov = el("div"); ov.id = "fwd-overlay";
+  const box = el("div", "pins-box");
+  box.appendChild(el("h3", null, "↪ Forward to…"));
+  box.appendChild(Object.assign(el("div", "pins-empty"), {
+    textContent: (text.length > 80 ? text.slice(0, 80) + "…" : text), style: "text-align:left;color:var(--text)"
+  }));
+  const list = el("div", "pins-list");
+  box.appendChild(list);
+  ov.appendChild(box);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape" && $("#fwd-overlay")) { ov.remove(); document.removeEventListener("keydown", esc); }
+  });
+  document.body.appendChild(ov);
+
+  const dests = [];
+  for (const s of store.servers())
+    for (const c of store.channelsOf(s)) dests.push({ to: "#" + c.id, label: "#" + c.name + "  ·  " + s });
+  for (const c of store.contacts) if (!isSelf(c.fp)) dests.push({ to: c.fp, label: dmLabel(c.fp) });
+  for (const d of store.dms) if (!isSelf(d.fp) && !dests.some(x => x.to === d.fp)) dests.push({ to: d.fp, label: dmLabel(d.fp) });
+
+  for (const d of dests) {
+    if (d.to === srcTarget) continue;
+    const row = el("div", "pin-row");
+    row.textContent = d.label;
+    row.onclick = async () => {
+      ov.remove();
+      try {
+        const res = await api.forward(d.to, origin, text);
+        if (!d.to.startsWith("#")) {
+          const mid = res && typeof res.ok === "string" && /^[0-9a-f]{32}$/.test(res.ok) ? res.ok : undefined;
+          store.messages.push({ kind: "message", from: "you", text: FWD_PREFIX + origin + "\n" + text, _target: d.to, _at: Date.now(), seq: -1, msg_id: mid });
+        }
+        ui.sys("Forwarded to " + d.label);
+        render();
+      } catch (e) { ui.say("Forward failed: " + e.message); }
+    };
+    list.appendChild(row);
+  }
+  if (!list.children.length) list.appendChild(el("div", "pins-empty", "No other conversation to forward to."));
 }
 
 function renderReplyBar() {

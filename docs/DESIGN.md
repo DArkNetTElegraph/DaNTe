@@ -145,6 +145,24 @@ achievable with no project-run infrastructure.
   chrome uses inline monochrome stroke icons (`ICONS`/`svgIcon`/`paintIcons`,
   `data-icon` attrs); emoji now appear only in message content, reactions, and
   the picker.
+- **Security hardening *(done — PR #6, 2026-09-09)*:** an audit landed 12 fixes.
+  Criticals: the `dante serve` local HTTP API had no CSRF/Origin/Host check (a
+  cross-origin `text/plain` POST could overwrite the keystore or revoke the
+  identity) — now a loopback `Host` allowlist on every request plus a
+  cross-site refusal (`Origin` / `Sec-Fetch-Site`) on mutating requests
+  (`request_is_local` in serve.rs); and `pow::verify` reproduced Argon2 at
+  attacker-chosen `m_cost_kib`/`t_cost` (relay/client OOM) — now clamped to
+  `MAX_VERIFY_M_COST_KIB` / `MAX_VERIFY_T_COST`. Also: stored XSS via a
+  custom-emoji shortcode (rejected in `ServerPolicy::decode`, picker builds
+  `<img>` via DOM props), a future-dated / uncapped mailbox, relay
+  prekey/channel/key-package store caps + read-endpoint rate limits, wire
+  list-decoder prealloc caps, relay connection cap + slow-read timeout, TURN
+  secret from `DANTE_TURN_SECRET`, per-load `script-src 'nonce-…'` CSP on the
+  SPA document, received files no longer written to disk as plaintext, keystore
+  plaintext zeroized + hostile file-KDF params clamped. **Left for a decision:**
+  `ServerRegister` still has no PoW and never evicts (protocol change); a PoW
+  cost-*downgrade* floor (F2) should be `LedgerParams`-driven when a real
+  network floor is chosen.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 

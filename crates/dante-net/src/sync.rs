@@ -226,6 +226,30 @@ pub async fn get_ice_config(client: &mut Client) -> Result<Vec<IceCfg>, NetError
     }
 }
 
+/// Tell the relay this client's dialable libp2p multiaddrs, so it can offer them
+/// to other clients as DHT bootstrap peers. Fire-and-forget.
+pub async fn announce_p2p(client: &mut Client, addrs: &[String]) -> Result<(), NetError> {
+    match client
+        .request(&Request::AnnounceP2p(addrs.to_vec()))
+        .await?
+    {
+        Response::Ok => Ok(()),
+        // Tolerate an older relay that doesn't know the request.
+        Response::Error(_) => Ok(()),
+        _ => Err(NetError::UnexpectedResponse("AnnounceP2p")),
+    }
+}
+
+/// Ask the relay for libp2p bootstrap multiaddrs. Empty (not an error) if the
+/// relay has none or is too old to answer.
+pub async fn get_p2p_peers(client: &mut Client) -> Result<Vec<String>, NetError> {
+    match client.request(&Request::GetP2pPeers).await? {
+        Response::P2pPeers(list) => Ok(list),
+        Response::Error(_) => Ok(Vec::new()),
+        _ => Err(NetError::UnexpectedResponse("GetP2pPeers")),
+    }
+}
+
 /// Fetch and decode mailbox envelopes for `hints` since `since_ms`.
 pub async fn fetch(
     client: &mut Client,

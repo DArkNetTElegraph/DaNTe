@@ -799,13 +799,15 @@ async fn the_dht_serves_as_a_prekey_directory_fallback() {
     let alice_id = *alice.identity().id().as_bytes();
     let bob_id = *bob.identity().id().as_bytes();
 
-    // Alice brings up a libp2p node; Bob bootstraps to it.
+    // Alice brings up a libp2p node and (inside enable_p2p) registers her
+    // address with the relay. Bob passes NO explicit bootstrap — he discovers
+    // Alice through the relay's GetP2pPeers.
     let alice_addrs = alice
         .enable_p2p("/ip4/127.0.0.1/tcp/0", &[])
         .await
         .expect("alice p2p");
     assert!(!alice_addrs.is_empty(), "alice has a dialable address");
-    bob.enable_p2p("/ip4/127.0.0.1/tcp/0", &alice_addrs)
+    bob.enable_p2p("/ip4/127.0.0.1/tcp/0", &[])
         .await
         .expect("bob p2p");
 

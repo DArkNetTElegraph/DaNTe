@@ -506,6 +506,9 @@ pub struct Engine {
     /// unless [`enable_p2p`](Engine::enable_p2p) ran. Feature `p2p`.
     #[cfg(feature = "p2p")]
     p2p: Option<crate::p2p::P2p>,
+    /// When we last re-advertised our p2p addresses to the relay.
+    #[cfg(feature = "p2p")]
+    last_p2p_announce_ms: u64,
     pow: Difficulty,
     /// Position in the relay's ordered record log that the next [`sync`] should
     /// resume from. Tracked separately from `ledger.len()` because records can
@@ -583,6 +586,8 @@ impl Engine {
             relay_addrs,
             #[cfg(feature = "p2p")]
             p2p: None,
+            #[cfg(feature = "p2p")]
+            last_p2p_announce_ms: 0,
             pow,
             relay_ledger_cursor: 0,
             last_fetch_since_ms: 0,
@@ -1025,6 +1030,17 @@ impl Engine {
     /// [`sync`](Engine::sync) remains the authoritative path. Feature `p2p`.
     #[cfg(feature = "p2p")]
     pub async fn poll_p2p(&mut self, now_ms: u64) -> u64 {
+        if self.p2p.is_none() {
+            return 0;
+        }
+        // Keep our bootstrap advertisement fresh on the relay (~10 min).
+        if now_ms.saturating_sub(self.last_p2p_announce_ms) > 600_000 {
+            let addrs = self.p2p_dial_addrs();
+            if !addrs.is_empty() {
+                let _ = sync::announce_p2p(&mut self.client, &addrs).await;
+            }
+            self.last_p2p_announce_ms = now_ms;
+        }
         let blobs = match self.p2p.as_mut() {
             Some(p2p) => p2p.drain_ledger_records(),
             None => return 0,
@@ -1611,11 +1627,24 @@ impl Engine {
         listen: &str,
         bootstrap: &[String],
     ) -> Result<Vec<String>, CoreError> {
-        let p2p = crate::p2p::P2p::start(&self.identity.p2p_node_seed(), listen, bootstrap).await?;
+        // Merge the caller's bootstrap list with peers the relay knows about.
+        let mut boot: Vec<String> = bootstrap.to_vec();
+        if let Ok(from_relay) = sync::get_p2p_peers(&mut self.client).await {
+            for p in from_relay {
+                if !boot.contains(&p) {
+                    boot.push(p);
+                }
+            }
+        }
+
+        let p2p = crate::p2p::P2p::start(&self.identity.p2p_node_seed(), listen, &boot).await?;
         // Seed the DHT with our current bundle right away.
         let bundle = self.prekeys.bundle(&self.identity).encode();
         p2p.put_prekey(&self.my_member_id(), &bundle).await;
         let addrs = p2p.dial_addrs();
+        // Let the relay hand our address to other clients as a bootstrap peer.
+        // `poll_p2p` refreshes this periodically.
+        let _ = sync::announce_p2p(&mut self.client, &addrs).await;
         self.p2p = Some(p2p);
         Ok(addrs)
     }

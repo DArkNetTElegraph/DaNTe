@@ -27,6 +27,8 @@ struct Args {
     turn_listen: Option<String>,
     /// Public IP the TURN server advertises as its relayed address.
     turn_public_ip: Option<String>,
+    /// libp2p bootstrap multiaddrs handed to `p2p`-enabled clients.
+    p2p_bootstrap: Vec<String>,
 }
 
 #[tokio::main]
@@ -98,6 +100,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     relay_state.set_ice_policy(args.ice);
+    if !args.p2p_bootstrap.is_empty() {
+        tracing::info!(
+            count = args.p2p_bootstrap.len(),
+            "offering libp2p bootstrap peers"
+        );
+        relay_state.set_p2p_bootstrap(args.p2p_bootstrap);
+    }
     let handler = Arc::new(RelayHandler::new(relay_state));
 
     // Background housekeeping.
@@ -137,6 +146,7 @@ fn parse_args() -> Args {
     };
     let mut turn_listen = None;
     let mut turn_public_ip = None;
+    let mut p2p_bootstrap = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -172,11 +182,22 @@ fn parse_args() -> Args {
             "--turn-public-ip" => {
                 turn_public_ip = it.next();
             }
+            "--p2p-bootstrap" => {
+                if let Some(v) = it.next() {
+                    p2p_bootstrap.extend(
+                        v.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "usage: dante-relay [--listen ADDR] [--min-pow-bits N]\n  \
                      [--stun URL ...] [--turn URL ...] [--turn-secret STR] [--turn-ttl SECS]\n  \
                      [--turn-listen HOST:PORT] [--turn-public-ip IP]  (run an in-process TURN server)\n  \
+                     [--p2p-bootstrap MULTIADDR,...]  (libp2p bootstrap peers offered to p2p clients)\n  \
                      defaults: --listen {DEFAULT_LISTEN}, PoW floor from LedgerParams::default()"
                 );
                 std::process::exit(0);
@@ -190,5 +211,6 @@ fn parse_args() -> Args {
         ice,
         turn_listen,
         turn_public_ip,
+        p2p_bootstrap,
     }
 }

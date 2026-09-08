@@ -226,6 +226,15 @@ DaNTe/
   `--features p2p`) take `--p2p` / `--p2p-listen <multiaddr>` /
   `--bootstrap <a,b>`. e2e: `the_dht_serves_as_a_prekey_directory_fallback`
   (two engines, one resolves the other's bundle purely over the DHT).
+- **Relay-assisted bootstrap** *(done, opt-in — feature `p2p`)*: no manual
+  multiaddr exchange needed. `Request::AnnounceP2p(Vec<String>)` /
+  `Request::GetP2pPeers` → `Response::P2pPeers`: `enable_p2p` asks its relay for
+  known libp2p bootstrap addresses (operator-seeded via
+  `dante-relay --p2p-bootstrap`, plus recently self-reported by other clients —
+  bounded to 64, 1-hour TTL) and dials them, then reports its own dialable
+  addresses back; `poll_p2p` refreshes that every ~10 min. So a `--p2p` client
+  finds the mesh through the relay it already talks to. e2e: the DHT-fallback
+  test now has the second engine discover the first purely via `GetP2pPeers`.
 - **Ledger gossip** *(done, opt-in — feature `p2p`)*: `announce` /
   `prove_liveness` / `revoke_identity` also publish the encoded record to the
   `dante/ledger/v1` gossipsub topic; `Engine::poll_p2p(now)` (driven each tick

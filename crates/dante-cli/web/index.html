@@ -310,6 +310,19 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
   border-radius: 5px; padding: 1px 5px; font-size: 11px; cursor: pointer; }
 .msg-actions button:hover { color: var(--text); border-color: var(--cornflower-blue); }
 .sys { color: var(--text-faint); font-style: italic; padding: 4px 0; font-size: 13px; }
+.pin-tag { color: var(--orange); font-size: 11px; font-weight: 600; margin-bottom: 1px; }
+.msg-actions button.on { color: var(--orange); border-color: var(--orange); }
+#pins-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.5);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+.pins-box { width: min(560px, 92vw); background: var(--bg-pane); border: 1px solid var(--divider);
+  border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.5); overflow: hidden; }
+.pins-box h3 { margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--divider); font-size: 14px; }
+.pins-list { max-height: 56vh; overflow-y: auto; }
+.pin-row { padding: 10px 16px; border-bottom: 1px solid var(--divider); cursor: pointer; }
+.pin-row:hover { background: var(--bg-active); }
+.pin-row .pr-meta { font-size: 11px; color: var(--text-faint); }
+.pin-row .pr-text { font-size: 13px; color: var(--text); margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+.pins-empty { padding: 16px; color: var(--text-faint); font-size: 13px; text-align: center; }
 .reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .react-chip { border: 1px solid var(--divider); background: var(--bg-input); color: var(--text-muted); border-radius: 10px; padding: 1px 7px; font-size: 12px; cursor: pointer; line-height: 1.5; }
 .react-chip:hover { border-color: var(--cornflower-blue); color: var(--text); }
@@ -458,6 +471,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <button class="icon-btn" id="btn-emoji" title="Custom emoji" hidden>😀</button>
       <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
       <button class="icon-btn" id="btn-link" title="Create invite link" hidden>🔗</button>
+      <button class="icon-btn" id="btn-pins" title="Pinned messages" hidden>📌</button>
       <button class="icon-btn" id="btn-search" title="Search messages (Ctrl+K)">🔍</button>
       <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
       <input type="file" id="emoji-file" accept="image/*" hidden>
@@ -528,6 +542,7 @@ const store = {
   typingText: "",
   policies: {},                       // server root -> policy JSON
   reactions: {},                      // ref_seq -> [{emoji,count,by}]
+  pins: {},                           // "#channel" -> { ref_seq: {by, at_ms} }
   safety: {},                         // dm fp -> {number,verified,available}
   emojis: {},                         // server root -> { shortcode: hexhash }
   contacts: [],                       // [{fp,petname,verified,added_ms}]
@@ -900,6 +915,8 @@ function renderChat() {
   leaveBtn.hidden = true;
   const delChanBtn = $("#btn-delchan");
   delChanBtn.hidden = true;
+  const pinsBtn = $("#btn-pins");
+  pinsBtn.hidden = true;
   const callBtn = $("#btn-call");
   callBtn.hidden = true;
   const gcallBtn = $("#btn-groupcall");
@@ -924,6 +941,8 @@ function renderChat() {
     linkBtn.onclick = () => inviteLinkFlow(target);
     emojiBtn.hidden = false;
     emojiBtn.onclick = () => emojiFlow(store.rootOf(store.view.server));
+    pinsBtn.hidden = false;
+    pinsBtn.onclick = () => openPins(target);
     const gc = groupCallFor(target.slice(1));
     gcallBtn.hidden = false;
     gcallBtn.classList.toggle("active", !!(gc && gc.joined));
@@ -1028,6 +1047,10 @@ function renderChat() {
       }
       g.body.appendChild(q);
     }
+    const pinned = target.startsWith("#") && store.pins[target] && store.pins[target][m.ref_seq];
+    if (pinned && !m._deleted) {
+      g.body.appendChild(Object.assign(el("div", "pin-tag"), { textContent: "📌 pinned" }));
+    }
     const line = el("div", "msg-line");
     if (m._deleted) {
       line.className = "msg-line deleted";
@@ -1043,6 +1066,7 @@ function renderChat() {
       addMsgActions(g.body, target, m);
       renderReactions(g.body, target, m.ref_seq);
     }
+    if (m.ref_seq) g.node._refSeq = m.ref_seq;
     log.appendChild(g.node);
     lastAuthor = m.from;
   }
@@ -1065,6 +1089,14 @@ function addMsgActions(body, channelTarget, m) {
     $("#text").focus();
   };
   bar.appendChild(reply);
+  const isPinned = store.pins[channelTarget] && store.pins[channelTarget][m.ref_seq];
+  const pin = el("button", isPinned ? "on" : null, "📌");
+  pin.title = isPinned ? "Unpin" : "Pin";
+  pin.onclick = async () => {
+    try { await api.post("/api/pin", { channel: channelTarget, seq: m.ref_seq, pinned: !isPinned }); }
+    catch (e) { ui.say("Pin failed: " + e.message); }
+  };
+  bar.appendChild(pin);
   if (m.from === "you") {
     const edit = el("button", null, "✎"); edit.title = "Edit";
     edit.onclick = async () => {
@@ -1638,6 +1670,13 @@ function ingest(items) {
       }
       continue;
     }
+    if (it.kind === "channelpin") {
+      const tgt = "#" + it.channel;
+      const bag = store.pins[tgt] || (store.pins[tgt] = {});
+      if (it.pinned) bag[it.ref_seq] = { by: it.by, at_ms: it.at_ms };
+      else delete bag[it.ref_seq];
+      continue;
+    }
     if (it.kind === "channel") {
       it._target = "#" + it.channel;
       if (!it.from) it.from = "you";
@@ -1971,6 +2010,62 @@ function highlight(text, q) {
   const i = text.toLowerCase().indexOf(q.toLowerCase());
   if (i < 0) return esc(text.slice(0, 200));
   return esc(text.slice(0, i)) + "<mark>" + esc(text.slice(i, i + q.length)) + "</mark>" + esc(text.slice(i + q.length, i + q.length + 160));
+}
+
+/* ---------- pinned messages ------------------------------------- */
+function openPins(target) {
+  if ($("#pins-overlay")) return;
+  const ov = el("div"); ov.id = "pins-overlay";
+  const box = el("div", "pins-box");
+  box.appendChild(el("h3", null, "📌 Pinned in #" + store.channelName(target.slice(1))));
+  const list = el("div", "pins-list");
+  box.appendChild(list);
+  ov.appendChild(box);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape" && $("#pins-overlay")) { ov.remove(); document.removeEventListener("keydown", esc); }
+  });
+  document.body.appendChild(ov);
+
+  const bag = store.pins[target] || {};
+  const seqs = Object.keys(bag).map(Number).sort((a, b) => a - b);
+  if (!seqs.length) { list.appendChild(el("div", "pins-empty", "Nothing pinned yet.")); return; }
+  for (const rs of seqs) {
+    const info = bag[rs];
+    const msg = store.messages.find(m => m.kind === "channel" && m._target === target && m.ref_seq === rs);
+    const row = el("div", "pin-row");
+    const who = msg ? (msg.from === "you" ? "you" : short(msg.from)) : "";
+    row.appendChild(Object.assign(el("div", "pr-meta"), {
+      textContent: (who ? who + "  ·  " : "") + "pinned by " + short(info.by) + "  ·  " + relTime(info.at_ms),
+    }));
+    row.appendChild(Object.assign(el("div", "pr-text"), {
+      innerHTML: msg ? (msg._deleted ? "<i>(message deleted)</i>" : richText(msg.text)) : "<i>message not loaded</i>",
+    }));
+    row.onclick = () => { ov.remove(); if (msg) flashMessage(target, rs); };
+    list.appendChild(row);
+  }
+}
+
+function relTime(ms) {
+  if (!ms) return "";
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+function flashMessage(target, refSeq) {
+  if (curTarget() !== target) {
+    const ch = store.channels.find(c => "#" + c.id === target);
+    if (ch) selectTarget(ch.server, target);
+  }
+  setTimeout(() => {
+    const log = $("#log");
+    for (const g of log.querySelectorAll(".msg-group")) {
+      if (g._refSeq === refSeq) { g.scrollIntoView({ block: "center" }); g.style.transition = "background .3s"; g.style.background = "var(--bg-active)"; setTimeout(() => g.style.background = "", 900); break; }
+    }
+  }, 80);
 }
 
 /* ---------- onboarding ---------------------------------------- */

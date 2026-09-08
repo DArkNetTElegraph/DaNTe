@@ -15,6 +15,7 @@
 //! `GET /api/discover`, `POST /api/discover {server,on,summary,tags}`,
 //! `POST /api/discover/join {server,password}`, `GET /api/reactions`,
 //! `POST /api/react {channel,seq,emoji,remove}`,
+//! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
 //! `POST /api/emoji/remove {server,name}`,
@@ -157,6 +158,18 @@ enum Cmd {
         emoji: String,
         remove: bool,
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Pin (or, with `pinned:false`, unpin) a channel message.
+    Pin {
+        channel: String,
+        seq: u64,
+        pinned: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// A channel's pinned messages as a ready JSON array.
+    Pins {
+        channel: [u8; 32],
+        reply: oneshot::Sender<String>,
     },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
@@ -322,6 +335,18 @@ enum Item {
         text: String,
         deleted: bool,
     },
+    /// A pin or unpin of an earlier channel message, folded by the SPA.
+    ChannelPin {
+        seq: u64,
+        channel: String,
+        /// The relay-log seq of the message being (un)pinned.
+        ref_seq: u64,
+        /// Who pinned it (fingerprint).
+        by: String,
+        /// Unix ms when it was pinned.
+        at_ms: u64,
+        pinned: bool,
+    },
 }
 
 impl Item {
@@ -330,7 +355,8 @@ impl Item {
             Item::Message { seq, .. }
             | Item::File { seq, .. }
             | Item::Channel { seq, .. }
-            | Item::ChannelEdit { seq, .. } => *seq,
+            | Item::ChannelEdit { seq, .. }
+            | Item::ChannelPin { seq, .. } => *seq,
         }
     }
 }
@@ -674,6 +700,16 @@ async fn engine_task(
                 deleted: e.deleted,
             });
         }
+        for p in engine.pin_snapshot() {
+            inbox.push_back(Item::ChannelPin {
+                seq: engine_shared.next(),
+                channel: id_b32(&p.channel_id),
+                ref_seq: p.target_seq,
+                by: short_id(&p.by),
+                at_ms: p.at_ms,
+                pinned: p.pinned,
+            });
+        }
     }
 
     eprintln!("announcing to the relay ...");
@@ -771,6 +807,24 @@ async fn engine_task(
                                 ref_seq: e.target_seq,
                                 text: e.text.unwrap_or_default(),
                                 deleted: e.deleted,
+                            });
+                            while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                        }
+                    }
+                }
+
+                {
+                    let pins = engine.take_pins();
+                    if !pins.is_empty() {
+                        let mut inbox = engine_shared.inbox.lock().await;
+                        for p in pins {
+                            inbox.push_back(Item::ChannelPin {
+                                seq: engine_shared.next(),
+                                channel: id_b32(&p.channel_id),
+                                ref_seq: p.target_seq,
+                                by: short_id(&p.by),
+                                at_ms: p.at_ms,
+                                pinned: p.pinned,
                             });
                             while inbox.len() > INBOX_CAP { inbox.pop_front(); }
                         }
@@ -1027,6 +1081,40 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(r);
+        }
+        Cmd::Pin {
+            channel,
+            seq,
+            pinned,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel).to_string();
+            let r = match parse_fingerprint(&channel) {
+                Ok(cid) => {
+                    let res = if pinned {
+                        engine.pin_channel_message(&cid, seq, now_ms()).await
+                    } else {
+                        engine.unpin_channel_message(&cid, seq, now_ms()).await
+                    };
+                    res.map(|_| "ok".into()).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::Pins { channel, reply } => {
+            let pins: Vec<serde_json::Value> = engine
+                .pinned_messages(&channel)
+                .into_iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "ref_seq": p.target_seq,
+                        "by": short_id(&p.by),
+                        "at_ms": p.at_ms,
+                    })
+                })
+                .collect();
+            let _ = reply.send(serde_json::to_string(&pins).unwrap_or_else(|_| "[]".into()));
         }
         Cmd::CreateServer { name, reply } => {
             let r = engine
@@ -1977,6 +2065,53 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 target_seq: r.seq,
                 emoji: r.emoji,
                 remove: r.remove,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/pins") => {
+            let channel = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("channel="))
+                .unwrap_or("");
+            let body = match parse_fingerprint(channel) {
+                Ok(cid) => {
+                    let (tx, rx) = oneshot::channel();
+                    if shared
+                        .cmd
+                        .send(Cmd::Pins {
+                            channel: cid,
+                            reply: tx,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+                    }
+                    rx.await.unwrap_or_else(|_| "[]".into())
+                }
+                Err(_) => "[]".into(),
+            };
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/pin") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                seq: u64,
+                /// `true` to pin, `false` to unpin.
+                #[serde(default)]
+                pinned: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Pin {
+                channel: r.channel,
+                seq: r.seq,
+                pinned: r.pinned,
                 reply,
             })
             .await

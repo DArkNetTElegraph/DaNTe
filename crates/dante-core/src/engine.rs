@@ -98,6 +98,33 @@ pub struct SearchHit {
     pub ts_ms: u64,
 }
 
+/// Standing pinned-message state: `channel_id -> seq -> pin`.
+type PinMap = HashMap<[u8; 32], HashMap<u64, PinInfo>>;
+
+/// A pinned channel message.
+#[derive(Clone, Copy, Debug)]
+struct PinInfo {
+    /// Who pinned it (the channel host or the message's author).
+    by: [u8; 32],
+    /// When it was pinned (Unix ms).
+    at_ms: u64,
+}
+
+/// A pin / unpin the UI folds into its view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelPin {
+    /// The channel the message is in.
+    pub channel_id: [u8; 32],
+    /// The relay-log `seq` of the pinned message.
+    pub target_seq: u64,
+    /// Who pinned it.
+    pub by: [u8; 32],
+    /// When it was pinned (Unix ms).
+    pub at_ms: u64,
+    /// `true` for a pin, `false` for an unpin.
+    pub pinned: bool,
+}
+
 /// A live edit/delete the UI folds into its view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelEdit {
@@ -401,6 +428,11 @@ pub struct Engine {
     channel_edits: EditMap,
     /// Edits/deletes seen since the last `take_edits()` — the live UI delta.
     new_edits: Vec<ChannelEdit>,
+    /// Standing pinned-message state. Persisted for the same reason as
+    /// `channel_reactions` (the log is only re-polled from `last_seq`).
+    channel_pins: PinMap,
+    /// Pins/unpins seen since the last `take_pins()` — the live UI delta.
+    new_pins: Vec<ChannelPin>,
     /// DM peers whose safety number the user confirmed out-of-band, keyed by
     /// stable `IdentityId` bytes and pinned to the peer `idk` that was verified
     /// (so a later key rotation drops back to unverified). Persisted.
@@ -487,6 +519,8 @@ impl Engine {
             channel_reactions: HashMap::new(),
             channel_edits: HashMap::new(),
             new_edits: Vec::new(),
+            channel_pins: HashMap::new(),
+            new_pins: Vec::new(),
             verified_peers: HashMap::new(),
             contacts: HashMap::new(),
             blocked: HashSet::new(),
@@ -579,6 +613,19 @@ impl Engine {
                             author: se.author,
                             text: (!se.deleted && !se.text.is_empty()).then_some(se.text),
                             deleted: se.deleted,
+                        },
+                    );
+            }
+            for sp in s.channel_pins {
+                engine
+                    .channel_pins
+                    .entry(sp.channel_id)
+                    .or_default()
+                    .insert(
+                        sp.seq,
+                        PinInfo {
+                            by: sp.by,
+                            at_ms: sp.at_ms,
                         },
                     );
             }
@@ -809,6 +856,18 @@ impl Engine {
                             text: e.text.clone().unwrap_or_default(),
                             deleted: e.deleted,
                         })
+                })
+                .collect(),
+            channel_pins: self
+                .channel_pins
+                .iter()
+                .flat_map(|(cid, by_seq)| {
+                    by_seq.iter().map(move |(seq, p)| store::StoredPin {
+                        channel_id: *cid,
+                        seq: *seq,
+                        by: p.by,
+                        at_ms: p.at_ms,
+                    })
                 })
                 .collect(),
             seen_envelopes: seen,
@@ -2547,6 +2606,160 @@ impl Engine {
         out
     }
 
+    /// Pin one of a channel's messages. Allowed for the channel host or the
+    /// message's original author. `target_seq` is a value [`send_channel`]
+    /// returned or a `seq` seen on an inbound [`ChannelMessage`].
+    pub async fn pin_channel_message(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.post_channel_pin(channel_id, target_seq, false, now_ms)
+            .await
+    }
+
+    /// Remove a pin. Same permissions as [`pin_channel_message`].
+    pub async fn unpin_channel_message(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.post_channel_pin(channel_id, target_seq, true, now_ms)
+            .await
+    }
+
+    async fn post_channel_pin(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        unpin: bool,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let me = self.my_member_id();
+        if !self.may_pin(channel_id, target_seq, &me) {
+            return Err(CoreError::Channel(
+                "only the channel host or the message author can pin",
+            ));
+        }
+        if unpin == !self.is_pinned(channel_id, target_seq) {
+            // Nothing to do (already in the requested state); still cheap to
+            // broadcast, but skip the redundant log entry.
+            return Ok(());
+        }
+        let ct = {
+            let ch = self
+                .channels
+                .get_mut(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            ch.mls
+                .encrypt(&pad_channel(&Content::Pin { target_seq, unpin }.encode()))
+                .map_err(mls_err)?
+        };
+        let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
+        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        self.apply_channel_pin(*channel_id, target_seq, me, unpin, now_ms);
+        Ok(())
+    }
+
+    /// Whether `who` may pin/unpin `target_seq` in `channel_id`.
+    fn may_pin(&self, channel_id: &[u8; 32], target_seq: u64, who: &[u8; 32]) -> bool {
+        let is_host = self
+            .channels
+            .get(channel_id)
+            .is_some_and(|c| c.info.host_id == *who);
+        let is_author = self
+            .channel_edits
+            .get(channel_id)
+            .and_then(|m| m.get(&target_seq))
+            .is_some_and(|e| e.author == *who);
+        is_host || is_author
+    }
+
+    fn is_pinned(&self, channel_id: &[u8; 32], target_seq: u64) -> bool {
+        self.channel_pins
+            .get(channel_id)
+            .is_some_and(|m| m.contains_key(&target_seq))
+    }
+
+    /// Fold one pin / unpin into the standing map and queue the UI delta.
+    /// No-op unless `by` is the host or the message author.
+    fn apply_channel_pin(
+        &mut self,
+        channel_id: [u8; 32],
+        target_seq: u64,
+        by: [u8; 32],
+        unpin: bool,
+        at_ms: u64,
+    ) {
+        if !self.may_pin(&channel_id, target_seq, &by) {
+            return;
+        }
+        let by_seq = self.channel_pins.entry(channel_id).or_default();
+        if unpin {
+            if by_seq.remove(&target_seq).is_none() {
+                return;
+            }
+            if by_seq.is_empty() {
+                self.channel_pins.remove(&channel_id);
+            }
+        } else {
+            by_seq.insert(target_seq, PinInfo { by, at_ms });
+        }
+        self.new_pins.push(ChannelPin {
+            channel_id,
+            target_seq,
+            by,
+            at_ms,
+            pinned: !unpin,
+        });
+        self.dirty = true;
+    }
+
+    /// Drain the pins/unpins seen since the last call (own and inbound).
+    pub fn take_pins(&mut self) -> Vec<ChannelPin> {
+        std::mem::take(&mut self.new_pins)
+    }
+
+    /// Every currently pinned message, as a `pinned: true` [`ChannelPin`] each.
+    /// Used to seed a fresh view on startup.
+    pub fn pin_snapshot(&self) -> Vec<ChannelPin> {
+        let mut out = Vec::new();
+        for (cid, by_seq) in &self.channel_pins {
+            for (seq, p) in by_seq {
+                out.push(ChannelPin {
+                    channel_id: *cid,
+                    target_seq: *seq,
+                    by: p.by,
+                    at_ms: p.at_ms,
+                    pinned: true,
+                });
+            }
+        }
+        out
+    }
+
+    /// The pinned messages of one channel, oldest `seq` first.
+    pub fn pinned_messages(&self, channel_id: &[u8; 32]) -> Vec<ChannelPin> {
+        let mut out: Vec<ChannelPin> = self
+            .channel_pins
+            .get(channel_id)
+            .into_iter()
+            .flat_map(|m| {
+                m.iter().map(|(seq, p)| ChannelPin {
+                    channel_id: *channel_id,
+                    target_seq: *seq,
+                    by: p.by,
+                    at_ms: p.at_ms,
+                    pinned: true,
+                })
+            })
+            .collect();
+        out.sort_by_key(|p| p.target_seq);
+        out
+    }
+
     fn push_channel_history(&mut self, e: ChannelHistoryEntry) {
         self.channel_history.push(e);
         if self.channel_history.len() > CHANNEL_HISTORY_CAP {
@@ -2565,6 +2778,7 @@ impl Engine {
         let mut new_reacts: Vec<PendingReaction> = Vec::new();
         #[allow(clippy::type_complexity)]
         let mut pending_edits: Vec<([u8; 32], u64, [u8; 32], Option<String>)> = Vec::new();
+        let mut pending_pins: Vec<([u8; 32], u64, [u8; 32], bool)> = Vec::new();
         let mut evicted: Vec<[u8; 32]> = Vec::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
@@ -2656,6 +2870,9 @@ impl Engine {
                             Some(Ok(Content::Delete { target_seq })) => {
                                 pending_edits.push((id, target_seq, sender, None));
                             }
+                            Some(Ok(Content::Pin { target_seq, unpin })) => {
+                                pending_pins.push((id, target_seq, sender, unpin));
+                            }
                             _ => {}
                         }
                     }
@@ -2672,6 +2889,9 @@ impl Engine {
         }
         for (cid, tseq, by, new_text) in pending_edits {
             self.apply_channel_edit(cid, tseq, by, new_text);
+        }
+        for (cid, tseq, by, unpin) in pending_pins {
+            self.apply_channel_pin(cid, tseq, by, unpin, now_ms);
         }
         if !out.is_empty() {
             for e in new_history {
@@ -3129,7 +3349,8 @@ impl Engine {
             | Content::GroupCallLeave { .. }
             | Content::Edit { .. }
             | Content::Delete { .. }
-            | Content::Reply { .. } => None,
+            | Content::Reply { .. }
+            | Content::Pin { .. } => None,
         };
         let plaintext = content.encode();
 
@@ -3382,7 +3603,8 @@ impl Engine {
                     | Content::Reaction { .. }
                     | Content::Edit { .. }
                     | Content::Delete { .. }
-                    | Content::Reply { .. },
+                    | Content::Reply { .. }
+                    | Content::Pin { .. },
                 ) => {}
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }

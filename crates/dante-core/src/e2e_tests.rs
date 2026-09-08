@@ -786,6 +786,69 @@ async fn a_channel_reply_carries_its_target_seq() {
 }
 
 #[tokio::test]
+async fn the_host_can_pin_and_unpin_a_channel_message() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    for _ in 0..6 {
+        for e in [&mut host, &mut alice] {
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
+        }
+    }
+
+    // Alice posts; the host pins it.
+    let seq = alice
+        .send_channel(&chan, "read the rules", now)
+        .await
+        .unwrap();
+    host.poll_channels(now).await.unwrap();
+    let _ = host.take_pins();
+    host.pin_channel_message(&chan, seq, now).await.unwrap();
+
+    let pins = host.take_pins();
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0].target_seq, seq);
+    assert!(pins[0].pinned);
+    assert_eq!(host.pinned_messages(&chan).len(), 1);
+
+    // Alice sees the pin land through the log.
+    alice.poll_channels(now).await.unwrap();
+    let seen = alice.take_pins();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].pinned && seen[0].target_seq == seq);
+    assert_eq!(alice.pinned_messages(&chan).len(), 1);
+
+    // A non-host non-author cannot pin.
+    let other_seq = host.send_channel(&chan, "another one", now).await.unwrap();
+    alice.poll_channels(now).await.unwrap();
+    assert!(alice
+        .pin_channel_message(&chan, other_seq, now)
+        .await
+        .is_err());
+
+    // The host unpins; both sides converge to empty.
+    host.unpin_channel_message(&chan, seq, now).await.unwrap();
+    assert!(host.pinned_messages(&chan).is_empty());
+    alice.poll_channels(now).await.unwrap();
+    assert!(alice.pinned_messages(&chan).is_empty());
+    assert!(alice.take_pins().iter().any(|p| !p.pinned));
+}
+
+#[tokio::test]
 async fn three_channel_members_all_key_each_other() {
     let now = now_ms();
     let relay = spawn_relay().await;

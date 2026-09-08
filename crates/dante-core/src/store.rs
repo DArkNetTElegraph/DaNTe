@@ -79,6 +79,19 @@ pub struct StoredEdit {
     pub deleted: bool,
 }
 
+/// A persisted pinned channel message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredPin {
+    /// The channel the message is in.
+    pub channel_id: [u8; 32],
+    /// The message's relay-log seq.
+    pub seq: u64,
+    /// Who pinned it (host or the message author).
+    pub by: [u8; 32],
+    /// When it was pinned (Unix ms).
+    pub at_ms: u64,
+}
+
 /// A persisted channel membership.
 pub struct StoredChannel {
     /// Channel description.
@@ -140,6 +153,8 @@ pub struct PersistedState {
     pub blocked: Vec<[u8; 32]>,
     /// Standing channel message edits/deletes.
     pub channel_edits: Vec<StoredEdit>,
+    /// Pinned channel messages.
+    pub channel_pins: Vec<StoredPin>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -334,6 +349,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
             .fixed(&e.author)
             .string(&e.text)
             .bool(e.deleted);
+    }
+
+    w.u32(s.channel_pins.len() as u32);
+    for p in &s.channel_pins {
+        w.fixed(&p.channel_id).u64(p.seq).fixed(&p.by).u64(p.at_ms);
     }
     w.into_vec()
 }
@@ -541,6 +561,20 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut channel_pins = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        channel_pins.reserve(n);
+        for _ in 0..n {
+            channel_pins.push(StoredPin {
+                channel_id: r.fixed::<32>()?,
+                seq: r.u64()?,
+                by: r.fixed::<32>()?,
+                at_ms: r.u64()?,
+            });
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -559,6 +593,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         contacts,
         blocked,
         channel_edits,
+        channel_pins,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -641,6 +676,12 @@ mod tests {
                     deleted: true,
                 },
             ],
+            channel_pins: vec![StoredPin {
+                channel_id: [7u8; 32],
+                seq: 12,
+                by: [6u8; 32],
+                at_ms: 1_700_000_123_000,
+            }],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -659,6 +700,7 @@ mod tests {
         assert_eq!(back.server_join_pw, state.server_join_pw);
         assert_eq!(back.channel_reactions, state.channel_reactions);
         assert_eq!(back.channel_edits, state.channel_edits);
+        assert_eq!(back.channel_pins, state.channel_pins);
         assert_eq!(back.verified_peers, state.verified_peers);
         assert_eq!(back.contacts, state.contacts);
         assert_eq!(back.blocked, state.blocked);
@@ -693,6 +735,7 @@ mod tests {
             contacts: vec![],
             blocked: vec![],
             channel_edits: vec![],
+            channel_pins: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

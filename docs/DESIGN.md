@@ -32,14 +32,17 @@ achievable with no project-run infrastructure.
 - **Groups** (`dante-group`): sender-keys channel ratchet (FS within a chain,
   removed-member lockout, insider-forgery resistance; **no PCS** — MLS migration
   planned).
-- **MLS groundwork** (`crates/dante-mls`, detached): thin OpenMLS (RFC 9420)
-  wrapper — `Member::{create, publish_key_package, add, remove, encrypt,
-  process}` plus `Member::call_key`, the per-epoch group-call media key every
-  member derives identically and that rotates on each membership change. Not
-  yet wired into `dante-core`; state is in-memory only. Detached from the
-  workspace because OpenMLS's current release trips four RUSTSEC advisories in
-  its `hpke-rs`/`libcrux` SHA-3 stack (unused by our SHA-256 ciphersuite) —
-  see the crate README.
+- **MLS groundwork** (`crates/dante-mls`): thin OpenMLS 0.9 (RFC 9420) wrapper
+  — `Member::{create, publish_key_package, add, remove, encrypt, process}`,
+  `Member::call_key` (the per-epoch group-call media key every member derives
+  identically and that rotates on each membership change), and
+  `Member::{export, import}` (whole-member byte blob for DaNTe's encrypted
+  local state, so a call / channel survives a restart). A normal workspace
+  member — `rust-version = 1.91` per-crate (OpenMLS's floor), one build-time
+  advisory (`RUSTSEC-2026-0173`, unmaintained proc-macro) allow-listed in
+  `deny.toml`. Not yet driven by `dante-core`: still needs a relay MLS
+  KeyPackage directory, an `Engine` group-call state machine, and the N-party
+  media mesh.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 

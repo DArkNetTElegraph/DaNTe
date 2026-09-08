@@ -76,4 +76,8 @@ pub enum CoreError {
     /// The target identity is on this client's block list.
     #[error("that identity is blocked")]
     Blocked,
+
+    /// Setting up or driving a WebRTC call failed.
+    #[error("voice: {0}")]
+    Voice(String),
 }

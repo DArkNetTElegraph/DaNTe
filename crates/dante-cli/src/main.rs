@@ -373,10 +373,22 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                         Err(e) => eprintln!("could not save received file: {e}"),
                                     }
                                 }
+                                dante_core::Inbound::IncomingCall { from_idk } => {
+                                    println!("\u{1f4de} {} is calling — /answer or /hangup <their fingerprint>",
+                                        short_fp(&from_idk));
+                                }
+                                dante_core::Inbound::CallEnded { from_idk } => {
+                                    println!("\u{1f4de} call with {} ended", short_fp(&from_idk));
+                                }
                             }
                         }
                     }
                     Err(e) => eprintln!("receive error: {e}"),
+                }
+                for u in engine.poll_calls(now).await.unwrap_or_default() {
+                    println!("\u{1f4de} call {} -> {:?}",
+                        IdentityId::from_bytes(u.peer).to_base32().split('-').next().unwrap_or(""),
+                        u.state);
                 }
             }
             line = lines.next_line() => {
@@ -529,6 +541,23 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     println!("  {}", IdentityId::from_bytes(id).to_base32());
                 }
             }
+            "call" | "answer" | "hangup" => match a {
+                Some(fp) => match parse_fingerprint(fp) {
+                    Ok(id) => {
+                        let r = match cmd {
+                            "call" => engine.start_call(&id, now_ms()).await,
+                            "answer" => engine.accept_call(&id, now_ms()).await,
+                            _ => engine.hangup(&id, now_ms()).await,
+                        };
+                        match r {
+                            Ok(()) => println!("\u{1f4de} {cmd} ok"),
+                            Err(e) => println!("{cmd} failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad fingerprint: {e}"),
+                },
+                None => println!("usage: /{cmd} <fingerprint>"),
+            },
             "block" | "unblock" => match a {
                 Some(fp) => match parse_fingerprint(fp) {
                     Ok(id) => {

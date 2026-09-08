@@ -26,6 +26,7 @@ use dante_ledger::{
 };
 use dante_net::{sync, transport::Client};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
+use dante_voice::{Call, CallEvent, CallState};
 
 use crate::{
     channel::{ChannelControl, ChannelInfo, ChannelMessage},
@@ -134,6 +135,30 @@ pub enum Inbound {
         /// The decrypted file bytes.
         data: Vec<u8>,
     },
+    /// The peer is calling. Answer with [`Engine::accept_call`] or decline with
+    /// [`Engine::hangup`].
+    IncomingCall {
+        /// Caller's Ed25519 identity key.
+        from_idk: [u8; 32],
+    },
+    /// The peer hung up / declined.
+    CallEnded {
+        /// The other party's Ed25519 identity key.
+        from_idk: [u8; 32],
+    },
+}
+
+/// A call state transition surfaced by [`Engine::poll_calls`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallUpdate {
+    /// The peer's `IdentityId` bytes.
+    pub peer: [u8; 32],
+    /// The new state.
+    pub state: CallState,
+}
+
+fn voice_err(e: dante_voice::VoiceError) -> CoreError {
+    CoreError::Voice(e.to_string())
 }
 
 /// One channel this client belongs to.
@@ -231,6 +256,12 @@ pub struct Engine {
     /// messages and typing signals are dropped on receipt, and the client
     /// refuses to DM them. Persisted.
     blocked: HashSet<[u8; 32]>,
+    /// Active 1:1 calls, keyed by peer `IdentityId` bytes. Ephemeral.
+    calls: HashMap<[u8; 32], Call>,
+    /// Received call offers awaiting an accept/decline, `peer -> offer SDP`.
+    pending_call_offers: HashMap<[u8; 32], String>,
+    /// Last-seen connection state per active call.
+    call_states: HashMap<[u8; 32], CallState>,
     /// Relay endpoints this engine may use, preference order. The first is the
     /// one embedded in invite links and server-discovery records; the whole
     /// list is the client's failover set.
@@ -289,6 +320,9 @@ impl Engine {
             verified_peers: HashMap::new(),
             contacts: HashMap::new(),
             blocked: HashSet::new(),
+            calls: HashMap::new(),
+            pending_call_offers: HashMap::new(),
+            call_states: HashMap::new(),
             relay_addrs,
             pow,
             last_fetch_since_ms: 0,
@@ -678,6 +712,94 @@ impl Engine {
         let mut v: Vec<_> = self.blocked.iter().copied().collect();
         v.sort_unstable();
         v
+    }
+
+    // ---- 1:1 voice calls ------------------------------------------------------
+    //
+    // Signalling rides sealed-sender ratchet DMs (`Content::Call*`); the media
+    // path is WebRTC / DTLS-SRTP established peer-to-peer. Because the SDP (which
+    // carries the DTLS fingerprint) travels inside a sender-authenticated
+    // message, a relay cannot MITM the media. Group calls await MLS.
+
+    /// Place a call to `peer_id`: build the WebRTC offer and DM it. Drive the
+    /// handshake afterwards with [`Engine::receive_all`] + [`Engine::poll_calls`].
+    pub async fn start_call(&mut self, peer_id: &[u8; 32], now_ms: u64) -> Result<(), CoreError> {
+        if self.blocked.contains(peer_id) {
+            return Err(CoreError::Blocked);
+        }
+        if self.calls.contains_key(peer_id) {
+            return Err(CoreError::Voice(
+                "a call with this peer is already active".into(),
+            ));
+        }
+        let (call, offer) = Call::offer().await.map_err(voice_err)?;
+        self.calls.insert(*peer_id, call);
+        self.call_states.insert(*peer_id, CallState::New);
+        self.send_content(peer_id, Content::CallOffer(offer), now_ms)
+            .await
+    }
+
+    /// Accept a call announced by [`Inbound::IncomingCall`]: build the answer
+    /// and DM it back.
+    pub async fn accept_call(&mut self, peer_id: &[u8; 32], now_ms: u64) -> Result<(), CoreError> {
+        let offer = self
+            .pending_call_offers
+            .remove(peer_id)
+            .ok_or(CoreError::Voice("no pending call from that peer".into()))?;
+        let (call, answer) = Call::answer(&offer).await.map_err(voice_err)?;
+        self.calls.insert(*peer_id, call);
+        self.call_states.insert(*peer_id, CallState::New);
+        self.send_content(peer_id, Content::CallAnswer(answer), now_ms)
+            .await
+    }
+
+    /// Hang up (or decline) the call with `peer_id`. Best-effort — always
+    /// clears local state.
+    pub async fn hangup(&mut self, peer_id: &[u8; 32], now_ms: u64) -> Result<(), CoreError> {
+        self.pending_call_offers.remove(peer_id);
+        self.call_states.remove(peer_id);
+        if let Some(call) = self.calls.remove(peer_id) {
+            call.close().await;
+        }
+        let _ = self.send_content(peer_id, Content::CallEnd, now_ms).await;
+        Ok(())
+    }
+
+    /// Pump every active call: relay locally-gathered ICE candidates to the peer
+    /// (as `Content::CallIce` DMs) and return the connection-state transitions
+    /// seen since the last call.
+    pub async fn poll_calls(&mut self, now_ms: u64) -> Result<Vec<CallUpdate>, CoreError> {
+        let peers: Vec<[u8; 32]> = self.calls.keys().copied().collect();
+        let mut ice: Vec<([u8; 32], String)> = Vec::new();
+        let mut updates: Vec<CallUpdate> = Vec::new();
+        for peer in peers {
+            while let Some(ev) = self.calls.get_mut(&peer).and_then(Call::try_event) {
+                match ev {
+                    CallEvent::LocalIce(c) => ice.push((peer, c)),
+                    CallEvent::State(state) => {
+                        self.call_states.insert(peer, state);
+                        updates.push(CallUpdate { peer, state });
+                    }
+                    CallEvent::CtlOpen | CallEvent::Ctl(_) => {}
+                }
+            }
+        }
+        for (peer, cand) in ice {
+            let _ = self
+                .send_content(&peer, Content::CallIce(cand), now_ms)
+                .await;
+        }
+        Ok(updates)
+    }
+
+    /// Current state of the call with `peer_id`, if any.
+    pub fn call_state(&self, peer_id: &[u8; 32]) -> Option<CallState> {
+        self.call_states.get(peer_id).copied()
+    }
+
+    /// Whether a call with `peer_id` is active (connecting or connected).
+    pub fn in_call(&self, peer_id: &[u8; 32]) -> bool {
+        self.calls.contains_key(peer_id)
     }
 
     /// Whether `peer_id` is verified **and** still on the key that was verified.
@@ -2249,7 +2371,13 @@ impl Engine {
                 size: m.total_size,
             }),
             Content::Channel(_) => None, // control traffic, not conversation
-            Content::Typing | Content::Reaction { .. } => None, // never sent via DM
+            // Control-only payloads never become conversation history.
+            Content::Typing
+            | Content::Reaction { .. }
+            | Content::CallOffer(_)
+            | Content::CallAnswer(_)
+            | Content::CallIce(_)
+            | Content::CallEnd => None,
         };
         let plaintext = content.encode();
 
@@ -2301,7 +2429,7 @@ impl Engine {
             .into_iter()
             .filter_map(|i| match i {
                 Inbound::Message(m) => Some(m),
-                Inbound::File { .. } => None,
+                _ => None,
             })
             .collect())
     }
@@ -2384,6 +2512,32 @@ impl Engine {
                     if let Err(e) = self.handle_channel_control(&from, &blob, now_ms).await {
                         tracing::debug!(error = %e, "dropping channel-control message");
                     }
+                }
+                Ok(Content::CallOffer(sdp)) => {
+                    let id = idk_to_id(&from);
+                    self.pending_call_offers.insert(id, sdp);
+                    out.push(Inbound::IncomingCall { from_idk: from });
+                }
+                Ok(Content::CallAnswer(sdp)) => {
+                    if let Some(call) = self.calls.get(&idk_to_id(&from)) {
+                        if let Err(e) = call.set_answer(&sdp).await {
+                            tracing::debug!(error = %e, "bad call answer");
+                        }
+                    }
+                }
+                Ok(Content::CallIce(cand)) => {
+                    if let Some(call) = self.calls.get(&idk_to_id(&from)) {
+                        let _ = call.add_ice(&cand).await;
+                    }
+                }
+                Ok(Content::CallEnd) => {
+                    let id = idk_to_id(&from);
+                    self.pending_call_offers.remove(&id);
+                    self.call_states.remove(&id);
+                    if let Some(call) = self.calls.remove(&id) {
+                        call.close().await;
+                    }
+                    out.push(Inbound::CallEnded { from_idk: from });
                 }
                 // Typing / reactions are channel-scoped and never arrive by DM.
                 Ok(Content::Typing | Content::Reaction { .. }) => {}

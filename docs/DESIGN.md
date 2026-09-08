@@ -115,10 +115,11 @@ drains, first contact falls back to OTP-less X3DH until it next publishes.
 
 **`dante serve` is a throwaway.** It is a hand-rolled HTTP server + a
 single-file vanilla-JS page, built only so the engine has a clickable client
-that is verifiable headlessly. It polls `/api/messages` every 2 s, so inbound
-messages land with up to ~2 s of latency — a real client (Tauri, or a rewrite
-with a push transport / SSE / WebSocket) replaces both the transport and the
-visual design. Do not invest in its look.
+that is verifiable headlessly. Inbound items arrive over a Server-Sent-Events
+stream (`GET /api/stream?since=N` — a server-side tail of the inbox, ~150 ms
+latency); a slow `GET /api/messages` poll stays as the fallback when the stream
+drops. A real client (Tauri, or a WebSocket rewrite) still replaces the visual
+design. Do not invest in its look.
 
 ## Decisions (locked)
 

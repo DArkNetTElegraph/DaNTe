@@ -547,6 +547,10 @@ pub struct Engine {
     relay_ledger_cursor: u64,
     last_fetch_since_ms: u64,
     last_announce_ms: u64,
+    /// The `display_hint` we last announced with, so `my_username` works before
+    /// the announce round-trips back through `sync`. Not persisted (the ledger
+    /// replica carries it once synced).
+    announced_name: Option<String>,
     store_path: Option<PathBuf>,
     dirty: bool,
 }
@@ -622,6 +626,7 @@ impl Engine {
             relay_ledger_cursor: 0,
             last_fetch_since_ms: 0,
             last_announce_ms: 0,
+            announced_name: None,
             store_path,
             dirty: false,
         };
@@ -1013,8 +1018,35 @@ impl Engine {
         sync::submit_record(&mut self.client, &rec).await?;
         self.gossip_record(&rec).await;
         self.last_announce_ms = now_ms;
+        if !display_hint.is_empty() {
+            self.announced_name = Some(display_hint.to_owned());
+        }
         self.dirty = true;
         Ok(())
+    }
+
+    /// Our own self-chosen username (`display_hint` from our `IdentityAnnounce`),
+    /// or `None` if we announced without one.
+    pub fn my_username(&self) -> Option<String> {
+        self.announced_name.clone().or_else(|| {
+            self.ledger
+                .display_name_by_id(&self.my_member_id())
+                .map(str::to_owned)
+        })
+    }
+
+    /// The self-asserted username for another identity, by its `IdentityId`
+    /// bytes (fingerprint). Non-unique and unverified — display only.
+    pub fn username_of(&self, identity_id: &[u8; 32]) -> Option<String> {
+        self.ledger
+            .display_name_by_id(identity_id)
+            .map(str::to_owned)
+    }
+
+    /// Every identity we know a self-asserted username for, as
+    /// `(IdentityId bytes, name)` — for a client's display-name cache.
+    pub fn known_usernames(&self) -> Vec<([u8; 32], String)> {
+        self.ledger.usernames()
     }
 
     /// Publish a fresh liveness proof.

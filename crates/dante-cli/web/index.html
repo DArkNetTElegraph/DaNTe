@@ -357,14 +357,19 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
   border-top: 1px solid var(--divider);
 }
 #user-panel .who { flex: 1; min-width: 0; }
+/* #me-fp holds the chosen username now — the main nickname. */
 #user-panel .fp {
-  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--text-muted);
+  font-size: 13px; font-weight: 650; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* #me-sub holds the block-id underneath, smaller and monospace. */
+#user-panel .sub {
+  font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-faint);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   cursor: pointer;
 }
-#user-panel .fp:hover { color: var(--link); }
-#user-panel .sub { font-size: 11px; color: var(--text-faint); }
+#user-panel .sub:hover { color: var(--link); }
 
 .avatar {
   flex: 0 0 auto;
@@ -529,7 +534,12 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
   color: var(--text-muted); font-size: 14px;
 }
 .member-row .avatar { width: 26px; height: 26px; font-size: 10px; }
-.member-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-row .member-id {
+  display: block;
+  font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-faint);
+}
 .member-row.you .name { color: var(--accent-warm); }
 .member-row .kick { margin-left: 2px; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; font-size: 14px; line-height: 1; visibility: hidden; }
 .member-row:hover .kick { visibility: visible; }
@@ -912,7 +922,21 @@ const isSelf  = fp => !!fp && store.me.fingerprint &&
   (fp === store.me.fingerprint || short(fp) === short(store.me.fingerprint));
 const petname = fp => { const c = store.contacts.find(c => c.fp === fp); return c && c.petname ? c.petname : null; };
 const isBlocked = fp => store.blocked.includes(fp);
-const dmLabel = fp => isSelf(fp) ? "Private Note" : (petname(fp) || short(fp));
+// Self-asserted username from the ledger (keyed by full fp, tolerant of short).
+const username = fp => {
+  if (!fp) return null;
+  if (store.usernames[fp]) return store.usernames[fp];
+  const s = short(fp);
+  for (const k in store.usernames) if (short(k) === s) return store.usernames[k];
+  return null;
+};
+// Display name for a peer: your petname wins, then their chosen username,
+// then the raw block-id prefix.
+const dmLabel = fp => isSelf(fp)
+  ? "Private Note"
+  : (petname(fp) || username(fp) || short(fp));
+// Like dmLabel but "you" stays "you" for message authors.
+const authorLabel = fp => fp === "you" ? "you" : (petname(fp) || username(fp) || short(fp));
 
 const LS = {
   get(k, d) { try { const v = localStorage.getItem("dante." + k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
@@ -921,7 +945,8 @@ const LS = {
 
 /* ---------- store ------------------------------------------------------- */
 const store = {
-  me: { fingerprint: "", words: "" },
+  me: { fingerprint: "", words: "", username: "" },
+  usernames: {},                      // fp -> self-asserted username (ledger)
   channels: [],                       // [{id,name,server}]
   dms: LS.get("dms", []),             // [{fp}]
   messages: [],                       // flat inbox, each tagged with _target
@@ -1941,13 +1966,14 @@ async function verifyFlow(fp) {
 
 function groupShell(m, sameAuthor) {
   const node = el("div", "msg-group");
-  const av = el("div", "avatar", initials(m.from === "you" ? store.me.fingerprint : m.from));
+  const name = m.from === "you" ? (store.me.username || short(store.me.fingerprint)) : authorLabel(m.from);
+  const av = el("div", "avatar", initials(name));
   const body = el("div", "body");
   if (!sameAuthor) {
     const meta = el("div", "meta");
-    const a = el("span", "author" + (m.from === "you" ? " you" : ""), m.from === "you" ? "you" : short(m.from));
+    const a = el("span", "author" + (m.from === "you" ? " you" : ""), name);
     meta.appendChild(a);
-    if (m.from !== "you" && m.from) meta.appendChild(el("span", "fp", m.from));
+    if (m.from !== "you" && m.from) meta.appendChild(el("span", "fp", short(m.from)));
     meta.appendChild(el("span", "stamp", m._at ? new Date(m._at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""));
     body.appendChild(meta);
   } else {
@@ -1985,9 +2011,12 @@ function renderMembers() {
     wrap.appendChild(el("div", "role-label", g + " — " + members.length));
     for (const fp of members) {
       const isMe = fp === store.me.fingerprint;
+      const label = isMe ? (store.me.username || "you") : dmLabel(fp);
       const row = el("div", "member-row" + (isMe ? " you" : ""));
-      row.appendChild(el("div", "avatar", initials(fp)));
-      row.appendChild(el("span", "name", isMe ? "you" : short(fp)));
+      row.appendChild(el("div", "avatar", initials(label)));
+      const nm = el("span", "name", label);
+      if (username(fp) || isMe) nm.appendChild(Object.assign(el("span", "member-id"), { textContent: short(fp) }));
+      row.appendChild(nm);
       if (inChannel && !isMe && canRoles) {
         const rb = el("button", "kick", "🛡");
         rb.title = "Assign / remove a role";
@@ -2073,7 +2102,7 @@ async function removeMemberFlow(channelTarget, memberFp) {
 
 function renderTyping() { $("#typing").textContent = store.typingText || ""; }
 
-function render() { renderRail(); renderPane(); renderChat(); collapseHeader(); renderMembers(); renderTyping(); renderGroupCallToast(); updateTitle(); }
+function render() { paintMe(); renderRail(); renderPane(); renderChat(); collapseHeader(); renderMembers(); renderTyping(); renderGroupCallToast(); updateTitle(); }
 
 function updateTitle() {
   const n = store.totalUnread();
@@ -2250,6 +2279,16 @@ async function refreshBlocked() {
   try {
     const b = await api.get("/api/blocked");
     if (JSON.stringify(b) !== JSON.stringify(store.blocked)) { store.blocked = b; render(); }
+  } catch (_) {}
+}
+
+async function refreshUsernames() {
+  try {
+    const u = await api.get("/api/usernames");
+    if (JSON.stringify(u) !== JSON.stringify(store.usernames)) { store.usernames = u; render(); }
+    if (!store.me.username && store.me.fingerprint && u[store.me.fingerprint]) {
+      store.me.username = u[store.me.fingerprint];
+    }
   } catch (_) {}
 }
 
@@ -2829,8 +2868,19 @@ $("#btn-members").onclick = () => {
   const next = app.dataset.members === "shown" ? "hidden" : "shown";
   app.dataset.members = next; LS.set("members", next);
 };
-$("#me-fp").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Fingerprint copied."); };
+$("#me-sub").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Block-ID copied."); };
 $("#me-gear").onclick = openSettings;
+
+// Paint the bottom-left identity chip: username big, block-id small below.
+function paintMe(online) {
+  const name = store.me.username || username(store.me.fingerprint) || short(store.me.fingerprint) || "you";
+  $("#me-fp").textContent = name;
+  $("#me-fp").title = name;
+  $("#me-avatar").textContent = initials(name);
+  const id = short(store.me.fingerprint);
+  $("#me-sub").textContent = online === false ? id + " · offline" : id;
+  $("#me-sub").title = store.me.fingerprint + "  (click to copy)";
+}
 
 /* ---------- settings -------------------------------------------- */
 function applyTheme(t) {
@@ -3137,6 +3187,7 @@ function obErr(m) { $("#ob-err").textContent = m || ""; }
 
 async function onboardSubmit(mode, fields) {
   obErr("");
+  if (mode === "create" && !fields.username) { obErr("Pick a username."); return; }
   try {
     const r = await api.post("/api/onboard", { mode, ...fields });
     if (mode === "create" && r.backup) {
@@ -3177,11 +3228,16 @@ function renderOnboard(state) {
   const showNew = () => {
     $("#tab-new").classList.add("on"); $("#tab-imp").classList.remove("on");
     form.innerHTML =
-      '<p>A fresh anonymous identity — no email, no phone. Pick a passphrase ' +
-      '(6+ characters) that encrypts it on this machine.</p>' +
-      '<label>Passphrase</label><input type="password" id="ob-pass" autofocus />' +
+      '<p>A fresh anonymous identity — no email, no phone. Pick a username ' +
+      'others will see, and a passphrase (6+ characters) that encrypts the ' +
+      'identity on this machine.</p>' +
+      '<label>Username</label><input type="text" id="ob-user" maxlength="48" placeholder="how you show up in chat" autofocus />' +
+      '<label>Passphrase</label><input type="password" id="ob-pass" />' +
       '<div class="row"><button id="ob-go">Create identity</button></div>';
-    $("#ob-go").onclick = () => onboardSubmit("create", { passphrase: $("#ob-pass").value });
+    $("#ob-go").onclick = () => onboardSubmit("create", {
+      passphrase: $("#ob-pass").value,
+      username: $("#ob-user").value.trim(),
+    });
   };
   const showImp = () => {
     $("#tab-imp").classList.add("on"); $("#tab-new").classList.remove("on");
@@ -3208,10 +3264,7 @@ async function init() {
   $("#app").dataset.members = LS.get("members", "shown");
   try {
     store.me = await api.me();
-    $("#me-fp").textContent = short(store.me.fingerprint);
-    $("#me-fp").title = store.me.fingerprint + "  (click to copy)";
-    $("#me-avatar").textContent = initials(store.me.fingerprint);
-    $("#me-sub").textContent = "online";
+    paintMe(true);
   } catch (_) { $("#me-sub").textContent = "offline"; }
 
   // restore local Private Notes
@@ -3231,6 +3284,7 @@ async function init() {
   refreshPolicies();
   refreshContacts();
   refreshBlocked();
+  refreshUsernames();
   refreshCalls();
   refreshGroupCalls();
   refreshVoice();
@@ -3241,6 +3295,7 @@ async function init() {
   setInterval(refreshPolicies, 6000);
   setInterval(refreshContacts, 8000);
   setInterval(refreshBlocked, 8000);
+  setInterval(refreshUsernames, 10000);
   setInterval(refreshCalls, 1200);
   setInterval(refreshGroupCalls, 1500);
   setInterval(refreshVoice, 1500);

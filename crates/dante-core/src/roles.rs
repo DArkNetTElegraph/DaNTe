@@ -44,6 +44,18 @@ pub const EMOJI_NAME_MAX: usize = 32;
 /// Max custom emoji a single server may register.
 pub const MAX_SERVER_EMOJIS: usize = 200;
 
+/// Whether `name` is a valid custom-emoji shortcode: 1..=[`EMOJI_NAME_MAX`]
+/// bytes of `[a-z0-9_]`. Enforced both when an emoji is set and when a received
+/// policy is decoded, so a peer cannot smuggle markup (`"><img onerror=...>`)
+/// through a shortcode that a client later renders.
+pub fn valid_emoji_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= EMOJI_NAME_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// One named role. Permissions are allow/deny masks layered over the
 /// `@everyone` default ([`PERM_DEFAULT`]); denies win, so a zero-`allow`
 /// full-`deny` role is a mute.
@@ -254,7 +266,13 @@ impl ServerPolicy {
             let ne = bounded(&mut b)?;
             emojis.reserve(ne);
             for _ in 0..ne {
-                emojis.push((b.string()?, b.fixed::<32>()?));
+                let name = b.string()?;
+                // Reject a shortcode a peer could weaponise at the render sink,
+                // regardless of the (validly signed) policy carrying it.
+                if !valid_emoji_name(&name) {
+                    return Err(WireError::Invalid("emoji shortcode"));
+                }
+                emojis.push((name, b.fixed::<32>()?));
             }
         }
         b.finish()?;
@@ -369,6 +387,26 @@ mod tests {
         let plain = ServerPolicy::genesis(&root(), owner, 0);
         assert!(plain.emojis.is_empty());
         assert_eq!(ServerPolicy::decode(&plain.encode()).unwrap(), plain);
+    }
+
+    #[test]
+    fn decode_rejects_a_malicious_emoji_shortcode() {
+        // A (validly signed) policy whose shortcode carries markup must be
+        // refused at decode, before it can reach a client's render sink.
+        let owner = [1u8; 32];
+        let evil = vec![(r#"x"><img src=x onerror=alert(1)>"#.to_string(), [9u8; 32])];
+        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], evil, 0);
+        // The signature is valid over the hostile bytes...
+        p.verify().unwrap();
+        // ...but decode refuses the shortcode.
+        assert!(matches!(
+            ServerPolicy::decode(&p.encode()),
+            Err(WireError::Invalid("emoji shortcode"))
+        ));
+        // A normal shortcode still decodes.
+        assert!(valid_emoji_name("party_parrot"));
+        assert!(!valid_emoji_name("Party"));
+        assert!(!valid_emoji_name(""));
     }
 
     #[test]

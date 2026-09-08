@@ -2435,7 +2435,14 @@ function openEmojiPicker(anchor, onPick) {
     if (customList) {
       for (const [nm, hash] of customList) {
         const b = el("button", "emoji-cell");
-        b.innerHTML = `<img class="emoji" src="/api/emoji?hash=${hash}" alt=":${nm}:">`;
+        // Build the <img> with escaped attributes: `nm` is a server-supplied
+        // shortcode and `hash` a server-supplied string. The engine now rejects
+        // a non-`[a-z0-9_]` shortcode, but escape here too so the render sink is
+        // safe on its own.
+        const img = el("img", "emoji");
+        img.src = "/api/emoji?hash=" + encodeURIComponent(hash);
+        img.alt = ":" + nm + ":";
+        b.appendChild(img);
         b.title = ":" + nm + ":";
         b.onclick = () => { onPick(":" + nm + ":"); emojiPopClose(); };
         grid.appendChild(b);

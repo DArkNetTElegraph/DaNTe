@@ -543,6 +543,7 @@ const store = {
   policies: {},                       // server root -> policy JSON
   reactions: {},                      // ref_seq -> [{emoji,count,by}]
   pins: {},                           // "#channel" -> { ref_seq: {by, at_ms} }
+  dmEdits: {},                        // dm msg_id (hex) -> { text, deleted }
   safety: {},                         // dm fp -> {number,verified,available}
   emojis: {},                         // server root -> { shortcode: hexhash }
   contacts: [],                       // [{fp,petname,verified,added_ms}]
@@ -591,6 +592,7 @@ const api = {
   messages(since) { return this.get("/api/messages?since=" + since); },
   typing()    { return this.get("/api/typing"); },
   send(to, text, replyTo) { return this.post("/api/send", replyTo ? { to, text, reply_to: replyTo } : { to, text }); },
+  editDm(peer, msgId, text) { return this.post("/api/dm/edit", { peer, msg_id: msgId, text }); },
   createServer(name)      { return this.post("/api/server", { name }); },
   createChannel(server, name, password) { return this.post("/api/channel", { server, name, password: password || "" }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
@@ -1051,20 +1053,25 @@ function renderChat() {
     if (pinned && !m._deleted) {
       g.body.appendChild(Object.assign(el("div", "pin-tag"), { textContent: "📌 pinned" }));
     }
+    const dmEd = (!target.startsWith("#") && m.msg_id) ? store.dmEdits[m.msg_id] : null;
     const line = el("div", "msg-line");
-    if (m._deleted) {
+    if (m._deleted || (dmEd && dmEd.deleted)) {
       line.className = "msg-line deleted";
       line.textContent = "(message deleted)";
     } else if (target.startsWith("#")) {
       line.innerHTML = richText(m.text);
       if (m._edited) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
     } else {
-      line.textContent = m.text;
+      line.textContent = dmEd ? dmEd.text : m.text;
+      if (dmEd) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
     }
     g.body.appendChild(line);
     if (target.startsWith("#") && m.ref_seq && !m._deleted) {
       addMsgActions(g.body, target, m);
       renderReactions(g.body, target, m.ref_seq);
+    }
+    if (!target.startsWith("#") && m.from === "you" && m.msg_id && !(dmEd && dmEd.deleted)) {
+      addDmActions(g.body, target, m);
     }
     if (m.ref_seq) g.node._refSeq = m.ref_seq;
     log.appendChild(g.node);
@@ -1113,6 +1120,28 @@ function addMsgActions(body, channelTarget, m) {
     };
     bar.append(edit, del);
   }
+  body.appendChild(bar);
+}
+
+// Edit / delete affordances on our own direct messages.
+function addDmActions(body, peer, m) {
+  if (!m.msg_id) return;
+  const bar = el("div", "msg-actions");
+  const cur = () => (store.dmEdits[m.msg_id] && store.dmEdits[m.msg_id].text) || m.text;
+  const edit = el("button", null, "✎"); edit.title = "Edit";
+  edit.onclick = async () => {
+    const t = await ui.ask("Edit message", cur());
+    if (t == null || t === cur()) return;
+    try { await api.editDm(peer, m.msg_id, t); store.dmEdits[m.msg_id] = { text: t, deleted: false }; renderChat(); }
+    catch (e) { ui.say("Edit failed: " + e.message); }
+  };
+  const del = el("button", null, "🗑"); del.title = "Delete";
+  del.onclick = async () => {
+    if (!await ui.confirm("Delete this message for everyone?")) return;
+    try { await api.editDm(peer, m.msg_id, ""); store.dmEdits[m.msg_id] = { text: "", deleted: true }; renderChat(); }
+    catch (e) { ui.say("Delete failed: " + e.message); }
+  };
+  bar.append(edit, del);
   body.appendChild(bar);
 }
 
@@ -1677,12 +1706,16 @@ function ingest(items) {
       else delete bag[it.ref_seq];
       continue;
     }
+    if (it.kind === "dmedit") {
+      store.dmEdits[it.msg_id] = { text: it.text, deleted: it.deleted };
+      continue;
+    }
     if (it.kind === "channel") {
       it._target = "#" + it.channel;
       if (!it.from) it.from = "you";
     } else {
       // message / file: attribute to the DM it belongs to
-      it._target = it.from === "you" ? (store._pendingDmTarget || curTarget()) : it.from;
+      it._target = it.peer || (it.from === "you" ? (store._pendingDmTarget || curTarget()) : it.from);
     }
     store.messages.push(it);
     if (it._target && it._target !== curTarget()) store.unread.add(it._target);
@@ -1775,9 +1808,10 @@ $("#composer").addEventListener("submit", async e => {
       await api.send(t, text, rt);             // channel echo comes back via poll
     } else {
       store._pendingDmTarget = t;
-      await api.send(t, text);
+      const res = await api.send(t, text);
       store._pendingDmTarget = null;
-      store.messages.push({ kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1 });
+      const mid = res && typeof res.ok === "string" && /^[0-9a-f]{32}$/.test(res.ok) ? res.ok : undefined;
+      store.messages.push({ kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1, msg_id: mid });
       renderChat();
     }
   } catch (err) { ui.sys("Send failed: " + err.message); }

@@ -95,6 +95,28 @@ pub enum Content {
         /// True to remove an existing pin.
         unpin: bool,
     },
+    /// A text direct message that carries a sender-chosen id, so it can later be
+    /// edited or deleted. `Text` (tag 1) stays the channel path; DMs use this.
+    TextId {
+        /// The message text.
+        text: String,
+        /// A random 16-byte id, unique within this conversation, minted by the
+        /// sender. `DmEdit` / `DmDelete` reference it.
+        id: [u8; 16],
+    },
+    /// Replace the text of one of our earlier direct messages (only the original
+    /// sender's edit is honoured).
+    DmEdit {
+        /// The `id` of the [`TextId`](Content::TextId) message being edited.
+        target: [u8; 16],
+        /// The new text.
+        text: String,
+    },
+    /// Withdraw one of our earlier direct messages.
+    DmDelete {
+        /// The `id` of the [`TextId`](Content::TextId) message being deleted.
+        target: [u8; 16],
+    },
 }
 
 impl Content {
@@ -154,6 +176,15 @@ impl Content {
             Content::Pin { target_seq, unpin } => {
                 w.u8(16).u64(*target_seq).bool(*unpin);
             }
+            Content::TextId { text, id } => {
+                w.u8(17).string(text).fixed(id);
+            }
+            Content::DmEdit { target, text } => {
+                w.u8(18).fixed(target).string(text);
+            }
+            Content::DmDelete { target } => {
+                w.u8(19).fixed(target);
+            }
         }
         w.into_vec()
     }
@@ -200,6 +231,17 @@ impl Content {
             16 => Content::Pin {
                 target_seq: r.u64()?,
                 unpin: r.bool()?,
+            },
+            17 => Content::TextId {
+                text: r.string()?,
+                id: r.fixed::<16>()?,
+            },
+            18 => Content::DmEdit {
+                target: r.fixed::<16>()?,
+                text: r.string()?,
+            },
+            19 => Content::DmDelete {
+                target: r.fixed::<16>()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -300,6 +342,23 @@ mod tests {
                 target_seq: 5,
                 unpin: true,
             },
+        ] {
+            assert_eq!(Content::decode(&c.encode()).unwrap(), c);
+        }
+    }
+
+    #[test]
+    fn dm_text_edit_delete_roundtrip() {
+        for c in [
+            Content::TextId {
+                text: "hello there".into(),
+                id: [7u8; 16],
+            },
+            Content::DmEdit {
+                target: [7u8; 16],
+                text: "hello, there".into(),
+            },
+            Content::DmDelete { target: [7u8; 16] },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }

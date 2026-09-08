@@ -16,6 +16,7 @@
 //! `POST /api/discover/join {server,password}`, `GET /api/reactions`,
 //! `POST /api/react {channel,seq,emoji,remove}`,
 //! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
+//! `POST /api/dm/edit {peer,msg_id,text}` (empty text deletes),
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
 //! `POST /api/emoji/remove {server,name}`,
@@ -83,6 +84,14 @@ enum Cmd {
     EditMsg {
         channel: String,
         seq: u64,
+        text: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Edit (or, with empty text, delete) one of our direct messages.
+    DmEdit {
+        peer: String,
+        /// Hex of the message's edit id.
+        msg_id: String,
         text: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -305,6 +314,12 @@ enum Item {
         seq: u64,
         from: String,
         text: String,
+        /// The other party's fingerprint (present for real DMs, not sys lines).
+        #[serde(skip_serializing_if = "String::is_empty")]
+        peer: String,
+        /// Hex of the DM's edit id, empty when not editable.
+        #[serde(skip_serializing_if = "String::is_empty")]
+        msg_id: String,
     },
     File {
         seq: u64,
@@ -347,6 +362,17 @@ enum Item {
         at_ms: u64,
         pinned: bool,
     },
+    /// An edit or delete of an earlier direct message, folded by the SPA.
+    DmEdit {
+        seq: u64,
+        /// The other party's fingerprint.
+        peer: String,
+        /// Hex of the message's edit id.
+        msg_id: String,
+        /// New text, or empty when `deleted`.
+        text: String,
+        deleted: bool,
+    },
 }
 
 impl Item {
@@ -356,7 +382,8 @@ impl Item {
             | Item::File { seq, .. }
             | Item::Channel { seq, .. }
             | Item::ChannelEdit { seq, .. }
-            | Item::ChannelPin { seq, .. } => *seq,
+            | Item::ChannelPin { seq, .. }
+            | Item::DmEdit { seq, .. } => *seq,
         }
     }
 }
@@ -638,11 +665,18 @@ async fn engine_task(
             } else {
                 short_fp(&h.peer_idk)
             };
+            let peer = short_fp(&h.peer_idk);
             inbox.push_back(match &h.kind {
                 dante_core::HistoryKind::Text(t) => Item::Message {
                     seq,
                     from,
                     text: t.clone(),
+                    peer,
+                    msg_id: if h.msg_id == [0u8; 16] {
+                        String::new()
+                    } else {
+                        to_hex(&h.msg_id)
+                    },
                 },
                 dante_core::HistoryKind::File { filename, size } => Item::File {
                     seq,
@@ -651,6 +685,15 @@ async fn engine_task(
                     size: *size as usize,
                     saved: String::new(),
                 },
+            });
+        }
+        for e in engine.dm_edit_snapshot() {
+            inbox.push_back(Item::DmEdit {
+                seq: engine_shared.next(),
+                peer: short_fp(&e.peer_idk),
+                msg_id: to_hex(&e.msg_id),
+                text: e.text.unwrap_or_default(),
+                deleted: e.deleted,
             });
         }
 
@@ -831,6 +874,23 @@ async fn engine_task(
                     }
                 }
 
+                {
+                    let dm_edits = engine.take_dm_edits();
+                    if !dm_edits.is_empty() {
+                        let mut inbox = engine_shared.inbox.lock().await;
+                        for e in dm_edits {
+                            inbox.push_back(Item::DmEdit {
+                                seq: engine_shared.next(),
+                                peer: short_fp(&e.peer_idk),
+                                msg_id: to_hex(&e.msg_id),
+                                text: e.text.unwrap_or_default(),
+                                deleted: e.deleted,
+                            });
+                            while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                        }
+                    }
+                }
+
                 if let Ok(items) = engine.receive_all(now).await {
                     let mut inbox = engine_shared.inbox.lock().await;
                     for it in items {
@@ -839,7 +899,17 @@ async fn engine_task(
                             Inbound::Message(m) => {
                                 let from = short_fp(&m.from_idk);
                                 last_msg_ms.insert(from.clone(), now);
-                                Item::Message { seq, from, text: m.text }
+                                Item::Message {
+                                    seq,
+                                    from: from.clone(),
+                                    text: m.text,
+                                    peer: from,
+                                    msg_id: if m.msg_id == [0u8; 16] {
+                                        String::new()
+                                    } else {
+                                        to_hex(&m.msg_id)
+                                    },
+                                }
                             }
                             Inbound::File { from_idk, filename, data } => {
                                 let safe = filename.rsplit(['/', '\\']).next().unwrap_or("file")
@@ -856,12 +926,12 @@ async fn engine_task(
                                     fp.clone(),
                                     CallRow { peer: fp.clone(), state: "ringing".into(), incoming: true },
                                 );
-                                Item::Message { seq, from: fp, text: "\u{1f4de} incoming call".into() }
+                                Item::Message { seq, from: fp.clone(), text: "\u{1f4de} incoming call".into(), peer: fp, msg_id: String::new() }
                             }
                             Inbound::CallEnded { from_idk } => {
                                 let fp = short_fp(&from_idk);
                                 engine_shared.calls.lock().await.remove(&fp);
-                                Item::Message { seq, from: fp, text: "\u{1f4de} call ended".into() }
+                                Item::Message { seq, from: fp.clone(), text: "\u{1f4de} call ended".into(), peer: fp, msg_id: String::new() }
                             }
                             Inbound::GroupCallInvite { channel_id, from_idk } => {
                                 let fp = short_fp(&from_idk);
@@ -876,7 +946,7 @@ async fn engine_task(
                                         invited_by: Some(fp.clone()),
                                     },
                                 );
-                                Item::Message { seq, from: fp, text: "\u{1f4de} group call invite".into() }
+                                Item::Message { seq, from: fp.clone(), text: "\u{1f4de} group call invite".into(), peer: fp, msg_id: String::new() }
                             }
                             Inbound::GroupCallMembersChanged { channel_id } => {
                                 Item::Channel {
@@ -1039,7 +1109,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 Ok((false, id)) => engine
                     .send_dm(&id, &text, now_ms())
                     .await
-                    .map(|_| "ok".into())
+                    .map(|mid| to_hex(&mid))
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e),
             };
@@ -1079,6 +1149,27 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                     res.map(|_| "ok".into()).map_err(|e| e.to_string())
                 }
                 Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::DmEdit {
+            peer,
+            msg_id,
+            text,
+            reply,
+        } => {
+            let r = match (parse_fingerprint(&peer), hex_bytes(&msg_id)) {
+                (Ok(pid), Some(mid)) if mid.len() == 16 => {
+                    let mut id = [0u8; 16];
+                    id.copy_from_slice(&mid);
+                    let res = if text.is_empty() {
+                        engine.delete_dm(&pid, &id, now_ms()).await
+                    } else {
+                        engine.edit_dm(&pid, &id, &text, now_ms()).await
+                    };
+                    res.map(|_| "ok".into()).map_err(|e| e.to_string())
+                }
+                _ => Err("bad peer or message id".to_string()),
             };
             let _ = reply.send(r);
         }
@@ -1927,6 +2018,27 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::EditMsg {
                 channel: r.channel,
                 seq: r.seq,
+                text: r.text,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/dm/edit") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+                msg_id: String,
+                /// New text; empty deletes the message.
+                #[serde(default)]
+                text: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::DmEdit {
+                peer: r.peer,
+                msg_id: r.msg_id,
                 text: r.text,
                 reply,
             })

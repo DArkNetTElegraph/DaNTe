@@ -96,7 +96,8 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
         got,
         vec![crate::ReceivedDm {
             from_idk: bob_idk,
-            text: "hi alice!".into()
+            text: "hi alice!".into(),
+            msg_id: got[0].msg_id,
         }]
     );
 
@@ -783,6 +784,56 @@ async fn a_channel_reply_carries_its_target_seq() {
     let chan_hits = alice.search("me", 10);
     assert!(chan_hits.iter().any(|h| h.is_channel && h.text == "me!"));
     assert!(alice.search("nothing-matches-xyz", 10).is_empty());
+}
+
+#[tokio::test]
+async fn a_direct_message_can_be_edited_and_deleted_by_its_sender() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_idk = alice.identity().sign_public().to_bytes();
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    alice.sync(now).await.unwrap();
+    bob.sync(now).await.unwrap();
+
+    // Alice sends a message and gets its id back.
+    let id = alice.send_dm(&bob_id, "helo", now).await.unwrap();
+    assert_eq!(bob.receive(now).await.unwrap()[0].text, "helo");
+    let _ = bob.take_dm_edits();
+
+    // Alice edits it; Bob converges.
+    alice.edit_dm(&bob_id, &id, "hello!", now).await.unwrap();
+    bob.receive(now).await.unwrap();
+    let edits = bob.take_dm_edits();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].msg_id, id);
+    assert_eq!(edits[0].peer_idk, alice_idk);
+    assert_eq!(edits[0].text.as_deref(), Some("hello!"));
+    assert!(!edits[0].deleted);
+    assert!(alice
+        .dm_edit_snapshot()
+        .iter()
+        .any(|d| d.msg_id == id && d.text.as_deref() == Some("hello!")));
+
+    // Alice deletes it; Bob converges.
+    alice.delete_dm(&bob_id, &id, now).await.unwrap();
+    bob.receive(now).await.unwrap();
+    let d = bob.take_dm_edits();
+    assert_eq!(d.len(), 1);
+    assert!(d[0].deleted && d[0].msg_id == id);
+
+    // A deleted message can't be edited again; an unknown id is rejected.
+    assert!(alice.edit_dm(&bob_id, &id, "back", now).await.is_err());
+    assert!(alice.edit_dm(&bob_id, &[9u8; 16], "x", now).await.is_err());
+    // Bob can't edit a message Alice sent.
+    assert!(bob.edit_dm(&alice_id, &id, "nope", now).await.is_err());
 }
 
 #[tokio::test]

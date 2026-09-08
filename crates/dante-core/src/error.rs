@@ -69,6 +69,10 @@ pub enum CoreError {
     #[error("channel operation: {0}")]
     Channel(&'static str),
 
+    /// A direct-message operation (e.g. edit / delete) was rejected.
+    #[error("message operation: {0}")]
+    Message(&'static str),
+
     /// The target identity is on this client's block list.
     #[error("that identity is blocked")]
     Blocked,

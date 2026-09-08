@@ -472,6 +472,21 @@ infrastructure. Reached. ---**
   `Engine::send_channel_reply`. `serve` `POST /api/send` takes an optional
   `reply_to`; the SPA has a ↩ hover action → a reply bar over the composer and
   a quoted line above the reply; CLI `/reply #<chan> <seq> <text>`.
+- **Edit / delete direct messages** *(done)*: a text DM now travels as
+  `Content::TextId { text, id }` (tag 17) with a random 16-byte `id` the sender
+  mints; `send_dm` returns it. `Content::DmEdit { target, text }` (18) /
+  `Content::DmDelete { target }` (19) ride the same ratchet. The id is stored
+  on `store::HistoryEntry::msg_id` (persisted as a positional `dm_msg_ids`
+  section) and echoed on `ReceivedDm`. Authorisation is structural — an inbound
+  `DmEdit` is applied only against a `history` entry in the same conversation
+  and direction as the original, so only the sender's change lands. Standing
+  state `peer_idk -> msg_id -> {text, deleted}` (persisted as
+  `store::StoredDmEdit`); `take_dm_edits` / `dm_edit_snapshot` mirror the
+  channel path. `serve` `POST /api/dm/edit {peer,msg_id,text}` (empty text
+  deletes); `Item::Message` gained `peer` + `msg_id`, new `Item::DmEdit`. SPA
+  folds it in with `(edited)` / `(message deleted)` and hover ✎/🗑 on your own
+  DM lines. CLI `/editdm` `/deldm`. Legacy `Content::Text` (tag 1, no id) still
+  decodes and stays the channel path; those messages just aren't editable.
 - **Pinned messages** *(done)*: `Content::Pin { target_seq, unpin }` rides the
   channel log. A pin is honoured only from the channel host or the pinned
   message's recorded author (`Engine::may_pin`). Folded into a standing

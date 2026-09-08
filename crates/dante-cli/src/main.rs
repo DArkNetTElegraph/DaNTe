@@ -49,6 +49,28 @@ fn parse_flags(mut it: impl Iterator<Item = String>) -> HashMap<String, String> 
     out
 }
 
+/// Lowercase hex of a 16-byte DM message id.
+fn hex16(id: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(32);
+    for b in id {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Parse 32 hex chars back to a 16-byte DM message id.
+fn parse_hex16(s: &str) -> Option<[u8; 16]> {
+    let s = s.trim();
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 fn short_fp(idk: &[u8; 32]) -> String {
     match SignPublic::from_bytes(idk) {
         Ok(pk) => IdentityId::of(&pk)
@@ -322,6 +344,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
          /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
          /react #<chan> <seq> <emoji> [-]  /pin|/unpin #<chan> <seq>  /pins #<chan>  \
+         /editdm <fp> <msg-id> <text>  /deldm <fp> <msg-id>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -366,12 +389,25 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                     println!("  [#{cid} {}] {}", p.target_seq,
                         if p.pinned { "\u{1f4cc} pinned" } else { "unpinned" });
                 }
+                for e in engine.take_dm_edits() {
+                    let who = short_fp(&e.peer_idk);
+                    let mid = hex16(&e.msg_id);
+                    if e.deleted {
+                        println!("  <{who}> ({mid}) (message deleted)");
+                    } else {
+                        println!("  <{who}> ({mid}) (edited) {}", e.text.unwrap_or_default());
+                    }
+                }
                 match engine.receive_all(now).await {
                     Ok(items) => {
                         for item in items {
                             match item {
                                 dante_core::Inbound::Message(m) => {
-                                    println!("<{}> {}", short_fp(&m.from_idk), m.text);
+                                    if m.msg_id == [0u8; 16] {
+                                        println!("<{}> {}", short_fp(&m.from_idk), m.text);
+                                    } else {
+                                        println!("<{}> ({}) {}", short_fp(&m.from_idk), hex16(&m.msg_id), m.text);
+                                    }
                                 }
                                 dante_core::Inbound::File { from_idk, filename, data } => {
                                     let safe = filename
@@ -823,6 +859,39 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 }
                 _ => println!("usage: /{cmd} #<chan> <seq>"),
             },
+            "editdm" | "deldm" => match (a, b) {
+                (Some(fp), rest) => {
+                    let (mid_str, new_text) =
+                        match rest.and_then(|r| r.split_once(char::is_whitespace)) {
+                            Some((m, t)) => (m, t),
+                            None => (rest.unwrap_or(""), ""),
+                        };
+                    match (parse_fingerprint(fp), parse_hex16(mid_str)) {
+                        (Ok(pid), Some(mid)) => {
+                            let r = if cmd == "deldm" {
+                                engine.delete_dm(&pid, &mid, now_ms()).await
+                            } else if new_text.is_empty() {
+                                println!("usage: /editdm <fp> <msg-id> <new text>");
+                                return Ok(false);
+                            } else {
+                                engine.edit_dm(&pid, &mid, new_text, now_ms()).await
+                            };
+                            match r {
+                                Ok(()) => println!("{cmd} ok"),
+                                Err(e) => println!("{cmd} failed: {e}"),
+                            }
+                        }
+                        _ => println!(
+                            "usage: /{cmd} <fp> <msg-id>{}",
+                            if cmd == "editdm" { " <new text>" } else { "" }
+                        ),
+                    }
+                }
+                _ => println!(
+                    "usage: /{cmd} <fp> <msg-id>{}",
+                    if cmd == "editdm" { " <new text>" } else { "" }
+                ),
+            },
             "pins" => match a {
                 Some(chan) => {
                     let chan = chan.strip_prefix('#').unwrap_or(chan);
@@ -1120,7 +1189,7 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
 
     match *target {
         Some(Target::Peer(p)) => match engine.send_dm(&p, line, now_ms()).await {
-            Ok(()) => {}
+            Ok(mid) => println!("  (sent, id {})", hex16(&mid)),
             Err(dante_core::CoreError::UnknownPeer) => {
                 bail_soft("peer not in your ledger yet — they must announce; try again shortly")
             }

@@ -118,7 +118,7 @@ async fn engine_learns_ice_servers_from_the_relay() {
     let ice = dante_relay::state::IcePolicy {
         stun: vec!["stun:stun.example.org:3478".into()],
         turn: vec!["turn:turn.example.org:3478?transport=udp".into()],
-        turn_secret: Some(vec![7u8; 32]),
+        turn_secret: Some("a-shared-secret".into()),
         turn_ttl_secs: 600,
     };
     let relay = spawn_relay_with_ice(ice).await;
@@ -132,14 +132,14 @@ async fn engine_learns_ice_servers_from_the_relay() {
     );
     assert!(servers[0].username.is_empty());
 
+    // coturn `use-auth-secret`: username = future Unix-seconds expiry,
+    // credential = base64(HMAC-SHA1(secret, username)).
     let turn = &servers[1];
     assert!(turn.urls[0].starts_with("turn:"));
-    assert!(turn.username.ends_with(":dante"), "ephemeral username");
-    assert_eq!(turn.credential.len(), 44, "base64 of a 32-byte HMAC");
-    assert!(turn
-        .credential
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='));
+    let expiry: u64 = turn.username.parse().expect("numeric expiry username");
+    let now_s = now_ms() / 1000;
+    assert!(expiry > now_s && expiry <= now_s + 601);
+    assert_eq!(turn.credential.len(), 28, "base64 of a 20-byte SHA-1 HMAC");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

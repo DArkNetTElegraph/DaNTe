@@ -57,7 +57,7 @@ with no operator who can be compelled to surveil users**. Concretely:
 | DM content confidentiality | A1, A2, A3, A4, A5, A6, A8 | Broken only by A7 (endpoint) or A9 (coercion of a conversation participant). |
 | DM forward secrecy | A1–A6, A8; **partial** vs A7 | Double Ratchet: content before a compromise stays secret; keys already on the device at compromise time are exposed until the next ratchet step. |
 | DM post-compromise security | A7 (after access ends) | Requires both parties to exchange at least one new message post-compromise. |
-| 1:1 call media confidentiality | A1, A2, A3, A5, A6, A8 | WebRTC DTLS-SRTP between the two peers. The SDP offer/answer (carrying each side's DTLS certificate fingerprint) travels inside a sealed-sender, sender-authenticated ratchet DM, so a relay cannot substitute its own DTLS identity for a MITM. Broken only by A7 / A9. Peer IP addresses are exposed to each other (and to any TURN relay) — see §5.5. |
+| 1:1 call media confidentiality | A1, A2, A3, A5, A6, A8 | WebRTC DTLS-SRTP between the two peers. The SDP offer/answer (carrying each side's DTLS certificate fingerprint) travels inside a sealed-sender, sender-authenticated ratchet DM, so a relay cannot substitute its own DTLS identity for a MITM. Broken only by A7 / A9. Peer IP addresses are exposed to each other (and to any TURN relay, including a `--turn-listen` relay) — see §5.5. |
 | Group (channel/voice) content confidentiality | A1, A2, A3, A5, A6, A8 | **Not** against A4 — a member-host is inside the group and sees plaintext by design. |
 | Group forward secrecy within a chain | A1–A3, A5, A6, A8; **partial** vs A7 | The current `dante-group` sender-keys ratchet deletes each message key after use. |
 | Removed member loses access | A (the removed member) | On removal, every remaining member rotates its sender chain and redistributes — O(n). The removed member cannot read messages sent after the rekey. |
@@ -121,9 +121,13 @@ provide.
    discovers a direct path between the two peers, so each learns the other's IP;
    a call routed through a TURN server hides the peers' IPs from each other but
    exposes both to the TURN operator (who still cannot read the media — it is
-   DTLS-SRTP). The DaNTe relay only *issues* short-lived TURN credentials
-   (`HMAC-SHA256` over an expiry-stamped username); it does not run the TURN
-   server or see call media.
+   DTLS-SRTP). The DaNTe relay *issues* short-lived TURN credentials using the
+   standard coturn `use-auth-secret` scheme (`HMAC-SHA1` over an expiry-stamped
+   username), so a stock coturn is a drop-in TURN server. A relay run with
+   `--turn-listen` also hosts the TURN server in-process — that operator then
+   sees both call peers' IPs (still not the media). An operator who wants TURN
+   handled by a separate, differently-run box omits `--turn-listen` and points
+   `--turn` at it.
 6. **Availability against a resourced censor.** Bootstrap addresses can be
    blocked; a nation-state can disrupt the DHT. DaNTe aims for resilience, not
    invulnerability.

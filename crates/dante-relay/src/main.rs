@@ -13,6 +13,7 @@ use anyhow::Context;
 use dante_ledger::LedgerParams;
 use dante_net::transport::serve;
 use dante_relay::state::{now_ms, IcePolicy, Limits, RelayHandler, RelayState};
+use dante_relay::turn_server::TurnServer;
 use tokio::net::TcpListener;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
@@ -22,6 +23,10 @@ struct Args {
     listen: String,
     min_pow_bits: Option<u8>,
     ice: IcePolicy,
+    /// `host:port` to run an in-process TURN server on (UDP).
+    turn_listen: Option<String>,
+    /// Public IP the TURN server advertises as its relayed address.
+    turn_public_ip: Option<String>,
 }
 
 #[tokio::main]
@@ -33,7 +38,45 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let args = parse_args();
+    let mut args = parse_args();
+
+    // Optional in-process TURN server. Kept alive for the process lifetime.
+    let mut _turn = None;
+    if let Some(listen) = args.turn_listen.clone() {
+        let secret = args
+            .ice
+            .turn_secret
+            .clone()
+            .context("--turn-listen requires --turn-secret")?;
+        let port = listen
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .context("--turn-listen must be HOST:PORT")?;
+        let public_ip: std::net::IpAddr = args
+            .turn_public_ip
+            .clone()
+            .or_else(|| {
+                listen
+                    .rsplit_once(':')
+                    .map(|(h, _)| h.to_string())
+                    .filter(|h| {
+                        h.parse::<std::net::IpAddr>()
+                            .map(|ip| !ip.is_unspecified())
+                            .unwrap_or(false)
+                    })
+            })
+            .context("give --turn-public-ip (or a concrete IP in --turn-listen)")?
+            .parse()
+            .context("--turn-public-ip is not an IP address")?;
+
+        _turn = Some(TurnServer::start(&listen, public_ip, "dante", secret).await?);
+        let url = format!("turn:{public_ip}:{port}");
+        if !args.ice.turn.iter().any(|u| u == &url) {
+            args.ice.turn.push(url.clone());
+        }
+        tracing::info!(%listen, %url, "in-process TURN server running");
+    }
 
     let mut params = LedgerParams::default();
     if let Some(bits) = args.min_pow_bits {
@@ -92,6 +135,8 @@ fn parse_args() -> Args {
         turn_ttl_secs: 3600,
         ..Default::default()
     };
+    let mut turn_listen = None;
+    let mut turn_public_ip = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -114,17 +159,24 @@ fn parse_args() -> Args {
                 }
             }
             "--turn-secret" => {
-                ice.turn_secret = it.next().and_then(|v| hex_bytes(&v));
+                ice.turn_secret = it.next().filter(|s| !s.is_empty());
             }
             "--turn-ttl" => {
                 if let Some(n) = it.next().and_then(|v| v.parse().ok()) {
                     ice.turn_ttl_secs = n;
                 }
             }
+            "--turn-listen" => {
+                turn_listen = it.next();
+            }
+            "--turn-public-ip" => {
+                turn_public_ip = it.next();
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "usage: dante-relay [--listen ADDR] [--min-pow-bits N]\n  \
-                     [--stun URL ...] [--turn URL ...] [--turn-secret HEX] [--turn-ttl SECS]\n  \
+                     [--stun URL ...] [--turn URL ...] [--turn-secret STR] [--turn-ttl SECS]\n  \
+                     [--turn-listen HOST:PORT] [--turn-public-ip IP]  (run an in-process TURN server)\n  \
                      defaults: --listen {DEFAULT_LISTEN}, PoW floor from LedgerParams::default()"
                 );
                 std::process::exit(0);
@@ -136,15 +188,7 @@ fn parse_args() -> Args {
         listen,
         min_pow_bits,
         ice,
+        turn_listen,
+        turn_public_ip,
     }
-}
-
-fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
-    if s.is_empty() || s.len() % 2 != 0 {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok())
-        .collect()
 }

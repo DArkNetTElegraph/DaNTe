@@ -256,6 +256,14 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .msg-line.file { color: var(--link); }
 .msg-line.deleted { color: var(--text-faint); font-style: italic; }
 .edited-tag { color: var(--text-faint); font-size: 11px; }
+.mention { background: color-mix(in srgb, var(--cornflower-blue) 22%, transparent); color: var(--cornflower-blue);
+  border-radius: 4px; padding: 0 3px; font-weight: 600; }
+.mention.mention-me { background: color-mix(in srgb, var(--orange) 28%, transparent); color: var(--orange); }
+.mention-badge { color: var(--orange) !important; font-weight: 700; }
+#mention-popup { position: fixed; z-index: 95; background: var(--bg-pane); border: 1px solid var(--divider);
+  border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.4); overflow: hidden; max-height: 220px; overflow-y: auto; }
+#mention-popup .mrow { padding: 6px 12px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
+#mention-popup .mrow.sel, #mention-popup .mrow:hover { background: var(--bg-active); color: var(--text); }
 .reply-quote { font-size: 12px; color: var(--text-faint); border-left: 2px solid var(--divider);
   padding-left: 6px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #replybar { display: flex; align-items: center; gap: 8px; padding: 6px 16px; font-size: 12px;
@@ -482,6 +490,7 @@ const store = {
   messages: [],                       // flat inbox, each tagged with _target
   seen: 0,
   unread: new Set(),                  // targets with unseen messages
+  mentions: new Set(),               // targets where I was @-mentioned
   view: LS.get("view", { server: "@dm", target: null }),
   typingText: "",
   policies: {},                       // server root -> policy JSON
@@ -684,6 +693,7 @@ function selectTarget(server, target) {
   store.view = { server, target };
   LS.set("view", store.view);
   store.unread.delete(target);
+  store.mentions.delete(target);
   render();
   const box = $("#text");
   box.disabled = !target; $("#send").disabled = !target;
@@ -832,6 +842,7 @@ function renderPane() {
     const row = el("button", "chan-row" + (curTarget() === t ? " active" : ""));
     row.appendChild(el("span", "hash", "#"));
     row.appendChild(el("span", "name", c.name));
+    if (store.mentions.has(t)) row.appendChild(Object.assign(el("span", "tag mention-badge"), { textContent: "@" }));
     if (store.unread.has(t)) row.appendChild(el("span", "dot"));
     row.onclick = () => selectTarget(server, t);
     list.appendChild(row);
@@ -1294,13 +1305,49 @@ function emojiMap() {
   const root = store.rootOf(store.view.server);
   return (root && store.emojis[root]) || {};
 }
-/* escape, then swap :shortcode: for a known custom emoji <img> */
+/* escape, then swap :shortcode: for a custom emoji <img> and @fp for a mention */
 function richText(s) {
   const m = emojiMap();
-  return esc(s).replace(/:([a-z0-9_]{1,32}):/g, (whole, name) =>
+  let out = esc(s).replace(/:([a-z0-9_]{1,32}):/g, (whole, name) =>
     m[name]
       ? `<img class="emoji" alt=":${name}:" title=":${name}:" src="/api/emoji?hash=${m[name]}">`
       : whole);
+  out = out.replace(/@([A-Z0-9]{4}(?:-[A-Z0-9]{4}){2,12})/g, (whole, fp) => {
+    const hit = resolveMention(fp);
+    if (!hit) return whole;
+    const me = hit === store.me.fingerprint;
+    return `<span class="mention${me ? " mention-me" : ""}" title="${hit}">@${esc(mentionLabel(hit))}</span>`;
+  });
+  return out;
+}
+
+/* Resolve an @-token (full fp or unambiguous prefix) against people we know. */
+function knownPeople() {
+  const t = curTarget();
+  const set = new Set([store.me.fingerprint]);
+  if (t && t.startsWith("#")) for (const fp of store.membersFor(t)) set.add(fp);
+  for (const c of store.contacts) set.add(c.fp);
+  return [...set];
+}
+function resolveMention(token) {
+  const people = knownPeople();
+  if (people.includes(token)) return token;
+  const pfx = people.filter(p => p.startsWith(token));
+  return pfx.length === 1 ? pfx[0] : null;
+}
+function mentionLabel(fp) {
+  const c = store.contacts.find(x => x.fp === fp);
+  return (c && c.petname) || (fp === store.me.fingerprint ? "you" : short(fp));
+}
+
+/* Best-effort desktop notification (asks permission once, silently degrades). */
+function notify(title, body) {
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "granted") {
+    try { new Notification(title, { body: (body || "").slice(0, 140) }); } catch (_) {}
+  } else if (Notification.permission !== "denied") {
+    Notification.requestPermission().catch(() => {});
+  }
 }
 
 /* ---------- flows -------------------------------------------------- */
@@ -1567,6 +1614,13 @@ function ingest(items) {
     }
     store.messages.push(it);
     if (it._target && it._target !== curTarget()) store.unread.add(it._target);
+    // Mention: a channel message from someone else naming my fingerprint.
+    if (it.kind === "channel" && it.from !== "you" && it.text
+        && it.text.includes("@" + store.me.fingerprint)) {
+      store.mentions.add(it._target);
+      if (it._target !== curTarget())
+        notify("Mentioned in " + store.channelName(it.channel), it.text);
+    }
     // auto-list an unknown DM partner
     if (it.kind !== "channel" && it.from !== "you" && it.from && !store.dms.some(d => short(d.fp) === it.from || d.fp === it.from)) {
       store.dms.push({ fp: it.from }); LS.set("dms", store.dms);
@@ -1657,6 +1711,69 @@ $("#composer").addEventListener("submit", async e => {
   } catch (err) { ui.sys("Send failed: " + err.message); }
 });
 $("#text").addEventListener("input", noteTyping);
+$("#text").addEventListener("input", mentionAutocomplete);
+$("#text").addEventListener("keydown", mentionKeydown);
+$("#text").addEventListener("blur", () => setTimeout(closeMentionPopup, 120));
+
+// ---- @mention autocomplete ----------------------------------------
+let mentionState = null; // { start, matches, sel }
+function closeMentionPopup() {
+  mentionState = null;
+  const p = $("#mention-popup"); if (p) p.hidden = true;
+}
+function mentionAutocomplete() {
+  const box = $("#text");
+  const t = curTarget();
+  if (!t || !t.startsWith("#")) return closeMentionPopup();
+  const upto = box.value.slice(0, box.selectionStart);
+  const m = upto.match(/(?:^|\s)@([A-Za-z0-9-]*)$/);
+  if (!m) return closeMentionPopup();
+  const q = m[1].toUpperCase();
+  const start = box.selectionStart - m[1].length;
+  const people = knownPeople().filter(fp => fp !== store.me.fingerprint);
+  const matches = people
+    .map(fp => ({ fp, label: mentionLabel(fp) }))
+    .filter(x => x.fp.replace(/-/g, "").startsWith(q.replace(/-/g, "")) || x.label.toUpperCase().includes(q))
+    .slice(0, 8);
+  if (!matches.length) return closeMentionPopup();
+  mentionState = { start, matches, sel: 0 };
+  renderMentionPopup();
+}
+function renderMentionPopup() {
+  let p = $("#mention-popup");
+  if (!p) { p = el("div"); p.id = "mention-popup"; document.body.appendChild(p); }
+  p.hidden = false;
+  p.innerHTML = "";
+  mentionState.matches.forEach((x, i) => {
+    const row = el("div", "mrow" + (i === mentionState.sel ? " sel" : ""));
+    row.textContent = x.label + "  " + short(x.fp);
+    row.onmousedown = e => { e.preventDefault(); pickMention(i); };
+    p.appendChild(row);
+  });
+  const box = $("#text");
+  const r = box.getBoundingClientRect();
+  p.style.left = r.left + "px";
+  p.style.bottom = (window.innerHeight - r.top + 4) + "px";
+  p.style.minWidth = r.width + "px";
+}
+function mentionKeydown(e) {
+  if (!mentionState) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); mentionState.sel = (mentionState.sel + 1) % mentionState.matches.length; renderMentionPopup(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); mentionState.sel = (mentionState.sel + mentionState.matches.length - 1) % mentionState.matches.length; renderMentionPopup(); }
+  else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionState.sel); }
+  else if (e.key === "Escape") { closeMentionPopup(); }
+}
+function pickMention(i) {
+  const box = $("#text");
+  const x = mentionState.matches[i];
+  const before = box.value.slice(0, mentionState.start - 1); // drop the '@'
+  const after = box.value.slice(box.selectionStart);
+  box.value = before + "@" + x.fp + " " + after;
+  const pos = (before + "@" + x.fp + " ").length;
+  box.setSelectionRange(pos, pos);
+  closeMentionPopup();
+  box.focus();
+}
 
 $("#btn-members").onclick = () => {
   const app = $("#app");

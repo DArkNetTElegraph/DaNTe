@@ -87,7 +87,20 @@ pub struct RelayState {
     deposit_rl: KeyedRateLimiter<IpAddr>,
     max_get_records: u64,
     ice: IcePolicy,
+    /// libp2p bootstrap multiaddrs handed to clients: operator-seeded entries
+    /// (no TTL) first, then self-reported by clients `(addr, last_seen_ms)`.
+    p2p_seed: Vec<String>,
+    p2p_reported: std::collections::VecDeque<(String, u64)>,
 }
+
+/// Cap on client-reported p2p bootstrap addresses kept.
+const MAX_P2P_REPORTED: usize = 64;
+/// A reported p2p address is dropped this long after it was last seen.
+const P2P_REPORTED_TTL_MS: u64 = 60 * 60 * 1000;
+/// Largest p2p multiaddr string accepted.
+const MAX_P2P_ADDR_LEN: usize = 256;
+/// Most p2p addresses returned from one `GetP2pPeers`.
+const MAX_P2P_PEERS_REPLY: usize = 16;
 
 /// Total blob-store budget (all file chunks). 128 MiB.
 const BLOB_STORE_CAP: usize = 128 * 1024 * 1024;
@@ -126,12 +139,23 @@ impl RelayState {
             deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
             max_get_records: 512,
             ice: IcePolicy::default(),
+            p2p_seed: Vec::new(),
+            p2p_reported: std::collections::VecDeque::new(),
         }
     }
 
     /// Set the ICE servers this relay advertises for calls.
     pub fn set_ice_policy(&mut self, ice: IcePolicy) {
         self.ice = ice;
+    }
+
+    /// Operator-provided libp2p bootstrap multiaddrs, always offered to clients
+    /// that ask (via `Request::GetP2pPeers`).
+    pub fn set_p2p_bootstrap(&mut self, addrs: Vec<String>) {
+        self.p2p_seed = addrs
+            .into_iter()
+            .filter(|a| !a.is_empty() && a.len() <= MAX_P2P_ADDR_LEN)
+            .collect();
     }
 
     /// Periodic housekeeping: expire mailbox entries, evaporate stale
@@ -161,6 +185,9 @@ impl RelayState {
             entries.retain(|(_, _, ts)| now.saturating_sub(*ts) <= BLOB_TTL_MS);
         }
         self.channels.retain(|_, (_, entries)| !entries.is_empty());
+
+        self.p2p_reported
+            .retain(|(_, ts)| now.saturating_sub(*ts) <= P2P_REPORTED_TTL_MS);
 
         for sigs in self.signals.values_mut() {
             sigs.retain(|(_, ts)| now.saturating_sub(*ts) <= SIGNAL_TTL_MS);
@@ -413,6 +440,39 @@ impl RelayState {
                 }
                 Response::IceConfig(out)
             }
+
+            Request::AnnounceP2p(addrs) => {
+                if !self.deposit_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                for addr in addrs {
+                    if addr.is_empty() || addr.len() > MAX_P2P_ADDR_LEN || !addr.starts_with('/') {
+                        continue;
+                    }
+                    if let Some(e) = self.p2p_reported.iter_mut().find(|(a, _)| *a == addr) {
+                        e.1 = now;
+                    } else {
+                        self.p2p_reported.push_back((addr, now));
+                        while self.p2p_reported.len() > MAX_P2P_REPORTED {
+                            self.p2p_reported.pop_front();
+                        }
+                    }
+                }
+                Response::Ok
+            }
+
+            Request::GetP2pPeers => {
+                let mut out = self.p2p_seed.clone();
+                for (addr, ts) in self.p2p_reported.iter().rev() {
+                    if out.len() >= MAX_P2P_PEERS_REPLY {
+                        break;
+                    }
+                    if now.saturating_sub(*ts) <= P2P_REPORTED_TTL_MS && !out.contains(addr) {
+                        out.push(addr.clone());
+                    }
+                }
+                Response::P2pPeers(out)
+            }
         }
     }
 }
@@ -656,6 +716,46 @@ mod tests {
             s.handle(Request::GetKeyPackage([0u8; 32]), IP, 0),
             Response::KeyPackage(None)
         );
+    }
+
+    #[test]
+    fn p2p_bootstrap_addresses_are_seeded_reported_and_expire() {
+        let mut s = state();
+        s.set_p2p_bootstrap(vec!["/ip4/10.0.0.1/tcp/4001/p2p/seed".into()]);
+
+        // A client reports its address.
+        assert_eq!(
+            s.handle(
+                Request::AnnounceP2p(vec!["/ip4/1.2.3.4/tcp/4001/p2p/alice".into()]),
+                IP,
+                1_000,
+            ),
+            Response::Ok
+        );
+        // GetP2pPeers returns the seed first, then the reported one.
+        let Response::P2pPeers(list) = s.handle(Request::GetP2pPeers, IP, 2_000) else {
+            panic!("expected P2pPeers");
+        };
+        assert!(list.contains(&"/ip4/10.0.0.1/tcp/4001/p2p/seed".to_string()));
+        assert!(list.contains(&"/ip4/1.2.3.4/tcp/4001/p2p/alice".to_string()));
+
+        // Junk (no leading slash) is ignored.
+        s.handle(
+            Request::AnnounceP2p(vec!["not-a-multiaddr".into()]),
+            IP,
+            3_000,
+        );
+        let Response::P2pPeers(list) = s.handle(Request::GetP2pPeers, IP, 3_000) else {
+            panic!();
+        };
+        assert!(!list.iter().any(|a| a == "not-a-multiaddr"));
+
+        // The reported address ages out after an hour; the seed stays.
+        s.maintain(1_000 + 60 * 60 * 1000 + 1);
+        let Response::P2pPeers(list) = s.handle(Request::GetP2pPeers, IP, 999_999_999) else {
+            panic!();
+        };
+        assert_eq!(list, vec!["/ip4/10.0.0.1/tcp/4001/p2p/seed".to_string()]);
     }
 
     #[test]

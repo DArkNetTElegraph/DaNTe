@@ -87,6 +87,13 @@ pub enum Request {
     },
     /// Take one published MLS `KeyPackage` for `identity`.
     GetKeyPackage([u8; 32]),
+    /// Report this client's dialable libp2p multiaddrs so the relay can hand
+    /// them to other clients as DHT bootstrap peers. Fire-and-forget
+    /// ([`Response::Ok`]). Only sent by clients built with the `p2p` feature.
+    AnnounceP2p(Vec<String>),
+    /// Ask the relay for known libp2p bootstrap multiaddrs (operator-seeded
+    /// plus recently self-reported by other clients).
+    GetP2pPeers,
 }
 
 /// One ICE server entry (STUN or TURN). `username` / `credential` are empty
@@ -136,6 +143,8 @@ pub enum Response {
     /// Reply to [`Request::PostToChannel`]: the relay-log `seq` assigned to the
     /// message.
     Posted(u64),
+    /// Reply to [`Request::GetP2pPeers`]: libp2p bootstrap multiaddrs.
+    P2pPeers(Vec<String>),
 }
 
 const REQ_PING: u8 = 0;
@@ -155,6 +164,8 @@ const REQ_FETCH_SIGNALS: u8 = 13;
 const REQ_GET_ICE: u8 = 14;
 const REQ_PUBLISH_KEYPKG: u8 = 15;
 const REQ_GET_KEYPKG: u8 = 16;
+const REQ_ANNOUNCE_P2P: u8 = 17;
+const REQ_GET_P2P_PEERS: u8 = 18;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -169,6 +180,7 @@ const RES_SIGNALS: u8 = 9;
 const RES_ICE: u8 = 10;
 const RES_KEYPKG: u8 = 11;
 const RES_POSTED: u8 = 12;
+const RES_P2P_PEERS: u8 = 13;
 
 fn write_ice_list(w: &mut Writer, list: &[IceCfg]) {
     w.u32(list.len() as u32);
@@ -210,6 +222,25 @@ fn write_blob_list(w: &mut Writer, blobs: &[Vec<u8>]) {
     for b in blobs {
         w.bytes(b);
     }
+}
+
+fn write_str_list(w: &mut Writer, items: &[String]) {
+    w.u32(items.len() as u32);
+    for s in items {
+        w.string(s);
+    }
+}
+
+fn read_str_list(r: &mut Reader<'_>) -> Result<Vec<String>, WireError> {
+    let n = r.u32()? as usize;
+    if n > r.remaining() {
+        return Err(WireError::LengthTooLarge(n as u64));
+    }
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(r.string()?);
+    }
+    Ok(out)
 }
 
 fn read_blob_list(r: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, WireError> {
@@ -291,6 +322,13 @@ impl Request {
             Request::GetKeyPackage(id) => {
                 w.u8(REQ_GET_KEYPKG).fixed(id);
             }
+            Request::AnnounceP2p(addrs) => {
+                w.u8(REQ_ANNOUNCE_P2P);
+                write_str_list(&mut w, addrs);
+            }
+            Request::GetP2pPeers => {
+                w.u8(REQ_GET_P2P_PEERS);
+            }
         }
         w.into_vec()
     }
@@ -333,6 +371,8 @@ impl Request {
                 key_packages: read_blob_list(&mut r)?,
             },
             REQ_GET_KEYPKG => Request::GetKeyPackage(r.fixed::<32>()?),
+            REQ_ANNOUNCE_P2P => Request::AnnounceP2p(read_str_list(&mut r)?),
+            REQ_GET_P2P_PEERS => Request::GetP2pPeers,
             REQ_FETCH => {
                 let n = r.u32()? as usize;
                 if n > r.remaining() {
@@ -378,6 +418,8 @@ impl Request {
             Request::GetIceConfig => "GetIceConfig",
             Request::PublishKeyPackages { .. } => "PublishKeyPackages",
             Request::GetKeyPackage(_) => "GetKeyPackage",
+            Request::AnnounceP2p(_) => "AnnounceP2p",
+            Request::GetP2pPeers => "GetP2pPeers",
         }
     }
 }
@@ -457,6 +499,10 @@ impl Response {
             Response::Posted(seq) => {
                 w.u8(RES_POSTED).u64(*seq);
             }
+            Response::P2pPeers(addrs) => {
+                w.u8(RES_P2P_PEERS);
+                write_str_list(&mut w, addrs);
+            }
         }
         w.into_vec()
     }
@@ -504,6 +550,7 @@ impl Response {
                 None
             }),
             RES_POSTED => Response::Posted(r.u64()?),
+            RES_P2P_PEERS => Response::P2pPeers(read_str_list(&mut r)?),
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -561,6 +608,12 @@ mod tests {
             key_packages: vec![vec![1, 2, 3, 4], vec![5, 6]],
         });
         rt_req(Request::GetKeyPackage([9u8; 32]));
+        rt_req(Request::AnnounceP2p(vec![
+            "/ip4/1.2.3.4/tcp/4001/p2p/abc".into(),
+            "/ip4/5.6.7.8/tcp/4001/p2p/def".into(),
+        ]));
+        rt_req(Request::AnnounceP2p(vec![]));
+        rt_req(Request::GetP2pPeers);
     }
 
     #[test]
@@ -583,6 +636,10 @@ mod tests {
         rt_res(Response::KeyPackage(Some(vec![5, 6, 7])));
         rt_res(Response::KeyPackage(None));
         rt_res(Response::Posted(4242));
+        rt_res(Response::P2pPeers(vec![
+            "/ip4/1.2.3.4/tcp/4001/p2p/z".into()
+        ]));
+        rt_res(Response::P2pPeers(vec![]));
         rt_res(Response::IceConfig(vec![
             IceCfg {
                 urls: vec!["stun:stun.example.org:3478".into()],

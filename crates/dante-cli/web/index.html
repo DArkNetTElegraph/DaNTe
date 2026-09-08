@@ -364,6 +364,11 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 }
 .composer button:hover { background: var(--accent-warm); color: #1b1832; }
 .composer button:disabled { opacity: .4; cursor: default; }
+.composer #attach {
+  background: transparent; color: var(--text-faint); font-weight: 400;
+  font-size: 17px; padding: 6px 4px; margin: 0;
+}
+.composer #attach:hover:not(:disabled) { background: transparent; color: var(--text); }
 
 /* ========================== members ================================== */
 #members { background: var(--bg-pane); border-left: 1px solid var(--divider); }
@@ -493,9 +498,11 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
     <div id="replybar" hidden></div>
     <div class="composer">
       <form id="composer">
+        <button type="button" id="attach" title="Attach a file (DMs only)" disabled>📎</button>
         <input id="text" autocomplete="off" placeholder="Message" disabled />
         <button id="send" disabled>Send</button>
       </form>
+      <input type="file" id="chat-file" hidden>
     </div>
   </section>
 
@@ -768,6 +775,8 @@ function selectTarget(server, target) {
   render();
   const box = $("#text");
   box.disabled = !target; $("#send").disabled = !target;
+  // Attachments go through the DM file-transfer path only.
+  $("#attach").disabled = !target || target.startsWith("#") || isSelf(target);
   if (target) box.focus();
 }
 
@@ -1959,6 +1968,41 @@ $("#composer").addEventListener("submit", async e => {
     }
   } catch (err) { ui.sys("Send failed: " + err.message); }
 });
+// ---- file attachments (DMs only) --------------------------------
+const MAX_ATTACH = 9 * 1024 * 1024;
+async function sendFile(file) {
+  const t = curTarget();
+  if (!t || t.startsWith("#") || isSelf(t)) { ui.say("Files can only be sent in a direct message."); return; }
+  if (!file) return;
+  if (file.size > MAX_ATTACH) { ui.say("That file is larger than " + Math.round(MAX_ATTACH / 1048576) + " MiB."); return; }
+  const stamp = { kind: "file", from: "you", filename: file.name, size: file.size, saved: "", _target: t, _at: Date.now(), seq: -1 };
+  store.messages.push(stamp); renderChat();
+  try {
+    const buf = await file.arrayBuffer();
+    await fetch("/api/file?to=" + encodeURIComponent(t) + "&name=" + encodeURIComponent(file.name),
+      { method: "POST", body: buf });
+  } catch (e) {
+    stamp.saved = "(send failed)"; renderChat();
+    ui.say("File send failed: " + e.message);
+  }
+}
+$("#attach").addEventListener("click", () => $("#chat-file").click());
+$("#chat-file").addEventListener("change", e => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (f) sendFile(f);
+});
+$("#text").addEventListener("paste", e => {
+  const items = e.clipboardData && e.clipboardData.files;
+  if (items && items.length) { e.preventDefault(); for (const f of items) sendFile(f); }
+});
+["dragover", "drop"].forEach(evt => $("#chat").addEventListener(evt, e => {
+  e.preventDefault();
+  if (evt === "drop" && e.dataTransfer && e.dataTransfer.files) {
+    for (const f of e.dataTransfer.files) sendFile(f);
+  }
+}));
+
 $("#text").addEventListener("input", noteTyping);
 $("#text").addEventListener("input", mentionAutocomplete);
 $("#text").addEventListener("keydown", mentionKeydown);

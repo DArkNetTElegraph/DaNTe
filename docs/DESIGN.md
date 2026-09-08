@@ -234,7 +234,9 @@ DaNTe/
 - **Done:** chunked encrypted file transfer — `dante_dm::FileManifest`
   (per-file XChaCha20-Poly1305 key, per-chunk nonce, signed manifest of
   ciphertext-chunk hashes), relay `PutBlob`/`GetBlob` TTL'd blob store,
-  `Engine::send_file` / `receive_all`, `dante chat /file <path>`.
+  `Engine::send_file` / `receive_all`, `dante chat /file <path>`. `dante serve`:
+  `POST /api/file?to=<fp>&name=<file>` (raw body = bytes, ≤ 9 MiB, DMs only);
+  the SPA has a 📎 button plus drag-and-drop and image-paste on the composer.
 - **Done:** encrypted local store (`dante_core::store`) — one atomically-rewritten
   file, XChaCha20-Poly1305 under an HKDF of the identity's `ratchet_db_key`,
   holding prekey secrets + every Double Ratchet session + message history +
@@ -313,8 +315,11 @@ DaNTe/
   WebView2 / WKWebView that the CI container lacks — `cargo build --workspace`
   skips it; build it with `cd apps/dante-desktop && cargo tauri dev` (see its
   README). SvelteKit is no longer planned — the vanilla-JS SPA is the frontend.
-- **Still to build in whichever shell:** a settings screen (typing-broadcast
-  toggle, relay list editing, identity backup re-download).
+- **Settings screen** *(done)*: a ⚙ overlay in the SPA — Identity (recovery
+  phrase), Appearance (light/dark/auto theme), Behaviour (typing-broadcast
+  toggle, desktop-notification permission), Network (relay list, read-only),
+  Danger zone (revoke identity). `GET /api/state` returns the relay list;
+  `POST /api/revoke {reason,confirm}` + CLI `dante revoke`.
 
 **--- MVP boundary: anonymous identity on a verifiable log, key directory via
 relay, fully E2E DMs with FS/PCS + file transfer, a usable client, zero project

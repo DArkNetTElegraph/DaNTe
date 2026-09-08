@@ -19,6 +19,7 @@
 //! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
 //! `POST /api/dm/edit {peer,msg_id,text}` (empty text deletes),
 //! `POST /api/forward {to,origin,text}`,
+//! `POST /api/file?to=<fp>&name=<file>` (raw body = bytes, DMs only),
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
 //! `POST /api/emoji/remove {server,name}`,
@@ -103,6 +104,13 @@ enum Cmd {
         to: String,
         origin: String,
         text: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Send a file to a DM peer (chunked encrypted transfer via the blob store).
+    SendFile {
+        peer: String,
+        filename: String,
+        data: Vec<u8>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     Invite {
@@ -1232,6 +1240,24 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             }
             let _ = reply.send(r);
         }
+        Cmd::SendFile {
+            peer,
+            filename,
+            data,
+            reply,
+        } => {
+            // No echo: the SPA renders the outgoing file optimistically, like a
+            // sent DM text (serve only echoes channel messages).
+            let r = match parse_fingerprint(&peer) {
+                Ok(id) => engine
+                    .send_file(&id, &filename, &data, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::Pin {
             channel,
             seq,
@@ -1892,9 +1918,14 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         })
         .flatten()
         .unwrap_or(0);
+    // `/api/file` carries raw file bytes; everything else is small JSON.
+    const MAX_BODY: usize = 9 * 1024 * 1024;
+    if content_length > MAX_BODY {
+        return respond(&mut stream, 413, "text/plain", b"body too large").await;
+    }
     let mut body = buf[head_end..].to_vec();
     while body.len() < content_length {
-        let mut chunk = [0u8; 4096];
+        let mut chunk = [0u8; 8192];
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
             break;
@@ -2120,6 +2151,38 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 to: r.to,
                 origin: r.origin,
                 text: r.text,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/file") => {
+            // Raw body = file bytes; ?to=<fp>&name=<url-encoded filename>.
+            let mut to = String::new();
+            let mut name = String::from("file");
+            for kv in query.split('&') {
+                if let Some(v) = kv.strip_prefix("to=") {
+                    to = percent_decode(v);
+                } else if let Some(v) = kv.strip_prefix("name=") {
+                    let d = percent_decode(v);
+                    // display only, never a path
+                    name = d
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or("file")
+                        .replace('\0', "_");
+                    if name.is_empty() {
+                        name = "file".into();
+                    }
+                }
+            }
+            if body.is_empty() {
+                return respond(&mut stream, 400, "text/plain", b"empty file").await;
+            }
+            dispatch(&mut stream, &shared, |reply| Cmd::SendFile {
+                peer: to,
+                filename: name,
+                data: body,
                 reply,
             })
             .await

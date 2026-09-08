@@ -256,6 +256,25 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .msg-line.file { color: var(--link); }
 .msg-line.deleted { color: var(--text-faint); font-style: italic; }
 .edited-tag { color: var(--text-faint); font-size: 11px; }
+#settings-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; overflow-y: auto; }
+.settings-box { width: min(520px, 92vw); background: var(--bg-pane); border: 1px solid var(--divider);
+  border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.5); padding: 18px 20px 22px; margin-bottom: 8vh; }
+.settings-box h3 { margin: 0 0 12px; font-size: 16px; }
+.set-sec { border-top: 1px solid var(--divider); padding: 12px 0; }
+.set-h { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); margin-bottom: 8px; }
+.set-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.set-fp { font: 12px/1.4 ui-monospace, monospace; color: var(--text-muted); word-break: break-all; flex: 1; }
+.set-mono { font-size: 12px; color: var(--text-faint); line-height: 1.5; }
+.settings-box button { border: 1px solid var(--divider); background: var(--bg-input); color: var(--text);
+  border-radius: 7px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.settings-box button:hover { border-color: var(--cornflower-blue); }
+.set-wide { display: block; width: 100%; margin-top: 8px; text-align: left; }
+.set-pill.on { background: var(--bg-active); border-color: var(--cornflower-blue); color: #fff; }
+.set-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; text-transform: none; letter-spacing: 0; }
+.set-toggle input { width: auto; margin: 0; }
+.set-sec.danger .set-h { color: var(--blazing-flame); }
+.danger-btn { border-color: var(--blazing-flame) !important; color: var(--blazing-flame) !important; }
 #search-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.5);
   display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
 .search-box { width: min(560px, 92vw); background: var(--bg-pane); border: 1px solid var(--divider);
@@ -1690,7 +1709,7 @@ async function refreshPolicies() {
 let lastTyping = 0;
 function noteTyping() {
   const t = curTarget();
-  if (!t) return;
+  if (!t || !typingEnabled()) return;
   const now = Date.now();
   if (now - lastTyping < 3000) return;
   lastTyping = now;
@@ -1795,7 +1814,109 @@ $("#btn-members").onclick = () => {
   app.dataset.members = next; LS.set("members", next);
 };
 $("#me-fp").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Fingerprint copied."); };
-$("#me-gear").onclick = () => ui.say("Recovery phrase (keep it secret):\n\n" + store.me.words);
+$("#me-gear").onclick = openSettings;
+
+/* ---------- settings -------------------------------------------- */
+function applyTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  LS.set("theme", t || "system");
+}
+applyTheme(LS.get("theme", "system"));
+function typingEnabled() { return LS.get("typing_off", false) !== true; }
+
+function openSettings() {
+  if ($("#settings-overlay")) return;
+  const ov = el("div"); ov.id = "settings-overlay";
+  const box = el("div", "settings-box");
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape" && $("#settings-overlay")) { ov.remove(); document.removeEventListener("keydown", esc); }
+  });
+
+  box.appendChild(Object.assign(el("h3"), { textContent: "Settings" }));
+
+  // Identity
+  const idSec = el("div", "set-sec");
+  idSec.appendChild(Object.assign(el("div", "set-h"), { textContent: "Identity" }));
+  const fpRow = el("div", "set-row");
+  fpRow.appendChild(Object.assign(el("code", "set-fp"), { textContent: store.me.fingerprint }));
+  const copy = el("button", null, "Copy");
+  copy.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); copy.textContent = "Copied"; setTimeout(() => copy.textContent = "Copy", 1200); };
+  fpRow.appendChild(copy);
+  idSec.appendChild(fpRow);
+  const phrase = el("button", "set-wide", "Reveal recovery phrase");
+  phrase.onclick = () => ui.say("Recovery phrase — write it down, keep it secret:\n\n" + store.me.words);
+  idSec.appendChild(phrase);
+  box.appendChild(idSec);
+
+  // Appearance
+  const apSec = el("div", "set-sec");
+  apSec.appendChild(Object.assign(el("div", "set-h"), { textContent: "Appearance" }));
+  const cur = LS.get("theme", "system");
+  const themeRow = el("div", "set-row");
+  ["system", "light", "dark"].forEach(t => {
+    const b = el("button", "set-pill" + (cur === t ? " on" : ""), t[0].toUpperCase() + t.slice(1));
+    b.onclick = () => { applyTheme(t); [...themeRow.children].forEach(c => c.classList.remove("on")); b.classList.add("on"); };
+    themeRow.appendChild(b);
+  });
+  apSec.appendChild(themeRow);
+  box.appendChild(apSec);
+
+  // Behaviour
+  const beSec = el("div", "set-sec");
+  beSec.appendChild(Object.assign(el("div", "set-h"), { textContent: "Behaviour" }));
+  beSec.appendChild(settingToggle("Broadcast typing indicators", typingEnabled(), on => LS.set("typing_off", !on)));
+  const notifBtn = el("button", "set-wide",
+    ("Notification" in window && Notification.permission === "granted") ? "Desktop notifications: on" : "Enable desktop notifications");
+  notifBtn.onclick = async () => {
+    if (!("Notification" in window)) return;
+    const p = await Notification.requestPermission().catch(() => "denied");
+    notifBtn.textContent = p === "granted" ? "Desktop notifications: on" : "Notifications blocked in the browser";
+  };
+  beSec.appendChild(notifBtn);
+  box.appendChild(beSec);
+
+  // Network
+  const nwSec = el("div", "set-sec");
+  nwSec.appendChild(Object.assign(el("div", "set-h"), { textContent: "Network" }));
+  api.get("/api/state").then(s => {
+    nwSec.appendChild(Object.assign(el("div", "set-mono"),
+      { textContent: "Relays: " + ((s.relays || []).join(", ") || "—") }));
+  }).catch(() => {});
+  box.appendChild(nwSec);
+
+  // Danger zone
+  const dz = el("div", "set-sec danger");
+  dz.appendChild(Object.assign(el("div", "set-h"), { textContent: "Danger zone" }));
+  dz.appendChild(Object.assign(el("div", "set-mono"),
+    { textContent: "Revoking is permanent. Peers can no longer message this identity and any server you host is delisted." }));
+  const revoke = el("button", "set-wide danger-btn", "Revoke this identity…");
+  revoke.onclick = async () => {
+    const f = await ui.form("Revoke identity — permanent", [
+      { name: "reason", label: "Reason", value: "retired", placeholder: "retired | compromised | superseded" },
+      { name: "confirm", label: 'Type REVOKE to confirm', placeholder: "REVOKE" },
+    ], { ok: "Revoke" });
+    if (!f || f.confirm !== "REVOKE") return;
+    try {
+      await api.post("/api/revoke", { reason: (f.reason || "retired").toLowerCase(), confirm: true });
+      ui.say("Identity revoked. This client can no longer be used with it.");
+    } catch (e) { ui.say("Revoke failed: " + e.message); }
+  };
+  dz.appendChild(revoke);
+  box.appendChild(dz);
+
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+}
+
+function settingToggle(label, on, onchange) {
+  const row = el("label", "set-toggle");
+  const cb = el("input"); cb.type = "checkbox"; cb.checked = on;
+  cb.onchange = () => onchange(cb.checked);
+  row.append(cb, document.createTextNode(label));
+  return row;
+}
 $("#btn-search").onclick = openSearch;
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openSearch(); }

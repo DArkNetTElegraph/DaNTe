@@ -310,8 +310,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 #replybar button { border: 0; background: none; color: var(--text-faint); cursor: pointer; font-size: 13px; }
 #replybar button:hover { color: var(--text); }
 .msg-group { position: relative; }
-.msg-actions { position: absolute; top: 2px; right: 6px; display: none; gap: 2px; }
-.msg-group:hover .msg-actions { display: flex; }
+.msg-actions { position: absolute; top: 2px; right: 6px; gap: 2px; }
 .msg-actions button { border: 1px solid var(--divider); background: var(--bg-pane); color: var(--text-muted);
   border-radius: 5px; padding: 1px 5px; font-size: 11px; cursor: pointer; }
 .msg-actions button:hover { color: var(--text); border-color: var(--cornflower-blue); }
@@ -435,6 +434,76 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .modal button.danger { background: var(--blazing-flame); }
 @keyframes modal-in  { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes modal-out { to { opacity: 0; } }
+
+/* ======================= motion / micro-interactions ================== */
+@keyframes fade-in   { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pop-in    { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes toast-in  { from { opacity: 0; transform: translateX(24px) scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes slide-down { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@keyframes badge-pop { 0% { transform: scale(0); } 70% { transform: scale(1.25); } 100% { transform: scale(1); } }
+@keyframes msg-in    { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.msg-fresh { animation: msg-in .18s ease; }
+
+#modal-layer { animation: fade-in .14s ease; }
+
+/* Full-screen overlays fade their scrim and pop their card. */
+#search-overlay, #settings-overlay, #pins-overlay, #fwd-overlay { animation: fade-in .16s ease; }
+.search-box, .settings-box, .pins-box { animation: pop-in .18s cubic-bezier(.2,.9,.3,1); }
+#mention-popup { animation: pop-in .12s cubic-bezier(.2,.9,.3,1); }
+
+/* Toasts slide in from the right (JS only rebuilds them when they change). */
+#call-toast:not([hidden]), #gcall-toast:not([hidden]) { animation: toast-in .22s cubic-bezier(.2,.9,.3,1); }
+
+/* Bars that appear above the composer / log. */
+#replybar:not([hidden]), #callbar:not([hidden]), #gcallbar:not([hidden]) { animation: slide-down .16s ease; }
+
+/* Header icon buttons: lift on hover, squash on press. */
+.icon-btn { transition: background .13s ease, color .13s ease, transform .12s ease; }
+.icon-btn:hover  { transform: translateY(-1px); }
+.icon-btn:active { transform: translateY(0) scale(.88); }
+
+/* Rail server buttons. */
+.rail-btn { transition: border-radius .15s ease, background .15s ease, transform .15s cubic-bezier(.2,.9,.3,1), color .15s ease; }
+.rail-btn:hover  { transform: scale(1.06); }
+.rail-btn:active { transform: scale(.94); }
+
+/* Sidebar rows: quick tint + a growing left accent. */
+.chan-row { transition: background .12s ease, color .12s ease, box-shadow .14s ease, transform .12s ease; }
+.chan-row:hover  { box-shadow: inset 3px 0 0 var(--accent-warm); }
+.chan-row.active { box-shadow: inset 3px 0 0 var(--accent); }
+.chan-row:active { transform: scale(.985); }
+.chan-row .badge { animation: badge-pop .24s cubic-bezier(.2,1.6,.4,1); transition: background .15s ease; }
+
+/* Message hover actions: fade+rise instead of a hard show/hide. */
+.msg-actions { display: flex; opacity: 0; transform: translateY(-3px);
+  pointer-events: none; transition: opacity .12s ease, transform .12s ease; }
+.msg-group:hover .msg-actions,
+.msg-actions:focus-within { opacity: 1; transform: none; pointer-events: auto; }
+
+/* Generic press feedback for the various pill / row / chip buttons. */
+.modal button, .composer button, #onboard button,
+#call-toast button, #gcall-toast button, #callbar button, #gcallbar button,
+.search-hit, .pin-row, #mention-popup .mrow, .msg-actions button {
+  transition: background .15s ease, border-color .15s ease, color .15s ease, transform .11s ease;
+}
+.modal button:active, .composer button:not(#attach):active, #onboard button:active,
+#call-toast button:active, #gcall-toast button:active,
+#callbar button:active, #gcallbar button:active { transform: scale(.95); }
+.react-chip { transition: background .15s ease, border-color .15s ease, color .15s ease, transform .12s cubic-bezier(.2,.9,.3,1); }
+.react-chip:hover  { transform: translateY(-1px); }
+.react-chip:active { transform: scale(.9); }
+.search-hit:active, .pin-row:active, #mention-popup .mrow:active { transform: scale(.99); }
+
+#log { scroll-behavior: smooth; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 </style>
 </head>
 <body>
@@ -936,6 +1005,7 @@ function unreadBadge(row, t) {
   row.appendChild(b);
 }
 
+let msgPaintTs = 0;
 function renderChat() {
   const target = curTarget();
   const titleEl = $("#chat-title");
@@ -1076,15 +1146,18 @@ function renderChat() {
   }
 
   let lastAuthor = null;
+  const freshCut = msgPaintTs;   // groups newer than the last paint slide in
   for (const m of msgs) {
     if (m.kind === "file") {
       const g = groupShell(m, m.from === lastAuthor);
+      if (m._at && m._at > freshCut - 80) g.node.classList.add("msg-fresh");
       g.body.appendChild(Object.assign(el("div", "msg-line file"),
         { textContent: `📎 ${m.filename} (${m.size} bytes)` + (m.saved ? ` — saved to ${m.saved}` : "") }));
       log.appendChild(g.node); lastAuthor = m.from;
       continue;
     }
     const g = groupShell(m, m.from === lastAuthor);
+    if (m._at && m._at > freshCut - 80) g.node.classList.add("msg-fresh");
     if (m.reply_to && !m._deleted) {
       const tgt = store.messages.find(x => x.kind === "channel" && x._target === target && x.ref_seq === m.reply_to);
       const q = el("div", "reply-quote");
@@ -1139,6 +1212,7 @@ function renderChat() {
     lastAuthor = m.from;
   }
   log.scrollTop = log.scrollHeight;
+  msgPaintTs = Date.now();
   renderCallbar();
   renderGroupCallbar();
   renderReplyBar();

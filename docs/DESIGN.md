@@ -508,6 +508,13 @@ infrastructure. Reached. ---**
   substring over stored DM + channel text, newest first. `serve`
   `GET /api/search?q=`; the SPA's 🔍 button / Ctrl+K opens an overlay with
   debounced live results that jump to the DM or channel.
+- **Unread counts + per-conversation mute** *(done, client-side)*: the SPA
+  tracks an unread *count* per DM / channel (was a binary dot), shows it as a
+  badge on the sidebar row, and reflects the total in the browser tab title.
+  A 🔔/🔕 header toggle mutes a conversation (persisted in `localStorage`):
+  muted rows dim, their badge greys out and drops from the tab total, and they
+  raise no desktop notification. Background-tab DMs now notify (not only
+  mentions), gated on mute.
 - **Custom per-server emoji** *(done)*: `ServerPolicy` gained an `emojis:
   Vec<(shortcode, [u8;32])>` tail field (back-compat: only written when
   non-empty, so pre-emoji signatures still verify). `Engine::set_server_emoji`

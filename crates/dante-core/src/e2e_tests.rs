@@ -306,6 +306,35 @@ async fn a_voice_channel_connects_members_and_tracks_presence() {
     want.sort();
     assert_eq!(hp, want);
 
+    // The browser-owned WebRTC signalling relays opaquely between participants.
+    alice
+        .send_voice_signal(&host_id, &vchan, 0, "v=0\r\nOFFER", now)
+        .await
+        .unwrap();
+    let mut relayed = None;
+    for _ in 0..20 {
+        for inb in host.receive_all(now).await.unwrap() {
+            if let crate::Inbound::VoiceSignal {
+                channel_id,
+                kind,
+                data,
+                ..
+            } = inb
+            {
+                relayed = Some((channel_id, kind, data));
+            }
+        }
+        if relayed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        relayed,
+        Some((vchan, 0u8, "v=0\r\nOFFER".to_string())),
+        "the host received Alice's relayed WebRTC offer"
+    );
+
     // Alice disconnects; the host stays.
     alice.leave_voice_channel(&vchan, now).await.unwrap();
     assert!(!alice.in_group_call(&vchan));
@@ -2082,8 +2111,15 @@ async fn password_gated_invite_link() {
 
     let server = host.create_server("lodge", now).await.unwrap();
     let chan = host.create_channel(&server, "general", true, None).unwrap();
-    host.set_join_password(&server, Some("hunter2")).unwrap();
+    host.set_join_password(&server, Some("hunter2"), None)
+        .unwrap();
     assert!(host.has_join_password(&server));
+    // Changing it now requires the current password.
+    assert!(host
+        .set_join_password(&server, Some("hunter3"), Some("wrong"))
+        .is_err());
+    host.set_join_password(&server, Some("hunter2"), Some("hunter2"))
+        .unwrap();
     let link = host.create_invite_link(&chan, 3_600_000, 0, now).unwrap();
 
     // No password, then wrong password: the host ignores the redeem.

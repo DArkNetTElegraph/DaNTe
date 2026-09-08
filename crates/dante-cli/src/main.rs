@@ -498,6 +498,9 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                     println!("\u{1f4de} group call #{} membership changed",
                                         IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""));
                                 }
+                                // Voice-channel WebRTC signalling is browser-only;
+                                // the terminal client has no media path.
+                                dante_core::Inbound::VoiceSignal { .. } => {}
                             }
                         }
                     }
@@ -848,10 +851,13 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 None => println!("usage: /redeem <invite-link> [password]"),
             },
             "joinpw" => match (a, b) {
-                (Some(root), Some(spec)) => match parse_fingerprint(root) {
+                (Some(root), Some(spec_rest)) => match parse_fingerprint(root) {
                     Ok(sr) => {
+                        let mut it = spec_rest.split_whitespace();
+                        let spec = it.next().unwrap_or("");
+                        let current = it.next();
                         let pw = (spec != "off" && spec != "0").then_some(spec);
-                        match engine.set_join_password(&sr, pw) {
+                        match engine.set_join_password(&sr, pw, current) {
                             Ok(()) => println!(
                                 "{}",
                                 if pw.is_some() {
@@ -865,7 +871,7 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     }
                     Err(e) => println!("bad server root: {e}"),
                 },
-                _ => println!("usage: /joinpw <server-root> <password|off>"),
+                _ => println!("usage: /joinpw <server-root> <password|off> [current-password]"),
             },
             "autokick" => match (a, b) {
                 (Some(root), Some(spec)) => match parse_fingerprint(root) {

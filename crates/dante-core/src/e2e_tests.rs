@@ -1990,6 +1990,17 @@ async fn custom_server_emoji_reaches_a_member() {
         .set_server_emoji(&server, "Bad Name", &img, now)
         .await
         .is_err());
+    // only PNG / JPEG, and at most 1 MiB
+    assert!(host
+        .set_server_emoji(&server, "gif", b"GIF89a-nope", now)
+        .await
+        .is_err());
+    let mut too_big = b"\x89PNG\r\n\x1a\n".to_vec();
+    too_big.resize(1024 * 1024 + 1, 0);
+    assert!(host
+        .set_server_emoji(&server, "huge", &too_big, now)
+        .await
+        .is_err());
     settle!();
 
     let seen = alice.server_emojis(&server);

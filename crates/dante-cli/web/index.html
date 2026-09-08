@@ -232,10 +232,16 @@ button, a, [role="button"] { -webkit-tap-highlight-color: transparent; }
   display: grid; place-items: center; font-size: 16px; line-height: 1;
 }
 .icon-btn:hover { color: var(--text); background: var(--bg-hover); }
-#btn-verify:not(.verified) { filter: saturate(1.4); }
 #btn-verify.verified { color: var(--cornflower-blue); }
-img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
-.react-chip img.emoji { height: 1.15em; vertical-align: -0.2em; }
+/* monochrome UI icons */
+.ic { width: 18px; height: 18px; display: block; pointer-events: none; }
+.icon-btn .ic { width: 17px; height: 17px; }
+/* custom emoji render at a fixed emoji-ish size inline in messages */
+:root { --emoji-size: 20px; }
+img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: contain;
+  vertical-align: -0.35em; margin: 0 1px; }
+.react-chip img.emoji { width: 16px; height: 16px; vertical-align: -0.2em; }
+.emoji-cell img.emoji { width: 22px; height: 22px; vertical-align: middle; }
 .chan-row .tag { margin-left: auto; font-size: 11px; color: var(--cornflower-blue); }
 .chan-row.blocked .name { text-decoration: line-through; opacity: .55; }
 #btn-contact.on { color: var(--orange); }
@@ -347,6 +353,44 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .ctx-menu button.danger:hover { background: var(--danger, #d83c3e); color: #fff; }
 .ctx-menu button:disabled { opacity: .4; cursor: default; }
 .ctx-menu .sep { height: 1px; margin: 5px 4px; background: var(--divider); }
+.ctx-menu button .ic { width: 15px; height: 15px; flex: 0 0 15px; color: var(--text-faint); }
+
+/* emoji picker */
+.emoji-pop {
+  position: fixed; z-index: 9999; width: 320px; max-width: calc(100vw - 16px);
+  display: flex; flex-direction: column;
+  border-radius: var(--radius-lg, 16px);
+  background: var(--bg-raised, #221d43); border: 1px solid var(--border-strong, var(--divider));
+  box-shadow: var(--shadow-lg, 0 12px 40px rgba(0,0,0,.5)); overflow: hidden;
+  animation: pop-in .1s ease;
+}
+.emoji-tabs { display: flex; gap: 2px; padding: 6px; border-bottom: 1px solid var(--divider); overflow-x: auto; }
+.emoji-tab {
+  flex: 0 0 auto; border: 0; background: transparent; cursor: pointer;
+  width: 30px; height: 30px; border-radius: var(--radius-sm, 8px); font-size: 17px; line-height: 1;
+}
+.emoji-tab:hover { background: var(--bg-hover); }
+.emoji-tab.on { background: var(--bg-active); }
+.emoji-grid {
+  display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px;
+  padding: 8px; max-height: 260px; overflow-y: auto;
+}
+.emoji-cell {
+  border: 0; background: transparent; cursor: pointer;
+  height: 34px; border-radius: var(--radius-sm, 8px); font-size: 20px; line-height: 1;
+  display: grid; place-items: center;
+}
+.emoji-cell:hover { background: var(--bg-hover); }
+
+/* composer ghost icon buttons (attach / emoji) */
+.composer .ghost-icon {
+  border: 0; background: transparent; color: var(--text-faint); cursor: pointer;
+  width: 32px; height: 32px; border-radius: var(--radius-sm, 8px);
+  display: grid; place-items: center; flex: 0 0 auto;
+}
+.composer .ghost-icon:hover:not(:disabled) { color: var(--text); background: var(--bg-hover); }
+.composer .ghost-icon:disabled { opacity: .4; cursor: default; }
+.composer .ghost-icon .ic { width: 19px; height: 19px; }
 
 /* user panel */
 #user-panel {
@@ -762,7 +806,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
         <div class="fp" id="me-fp" title="click to copy">…</div>
         <div class="sub" id="me-sub">connecting…</div>
       </div>
-      <button class="icon-btn" id="me-gear" title="recovery phrase">⚙</button>
+      <button class="icon-btn" id="me-gear" title="Settings" data-icon="gear"></button>
     </div>
   </section>
 
@@ -772,22 +816,22 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <span class="title" id="chat-title"><span class="hash">#</span> …</span>
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
-      <button class="icon-btn" id="btn-mute" title="Mute notifications" hidden>🔔</button>
-      <button class="icon-btn" id="btn-call" title="Start a voice call" hidden>📞</button>
-      <button class="icon-btn" id="btn-groupcall" title="Start a group call" hidden>📞👥</button>
-      <button class="icon-btn" id="btn-contact" title="Save as contact" hidden>☆</button>
-      <button class="icon-btn" id="btn-leave" title="Leave channel" hidden>🚪</button>
-      <button class="icon-btn" id="btn-delchan" title="Delete channel" hidden>🗑</button>
-      <button class="icon-btn" id="btn-block" title="Block" hidden>🚫</button>
-      <button class="icon-btn" id="btn-verify" title="Safety number" hidden>🛡️</button>
-      <button class="icon-btn" id="btn-emoji" title="Custom emoji" hidden>😀</button>
-      <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" hidden>➕👤</button>
-      <button class="icon-btn" id="btn-link" title="Create invite link" hidden>🔗</button>
-      <button class="icon-btn" id="btn-pins" title="Pinned messages" hidden>📌</button>
-      <button class="icon-btn" id="btn-more" title="More actions" hidden>⋯</button>
-      <button class="icon-btn" id="btn-search" title="Search messages (Ctrl+K)">🔍</button>
-      <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
-      <input type="file" id="emoji-file" accept="image/*" hidden>
+      <button class="icon-btn" id="btn-mute" title="Mute notifications" data-icon="bell" hidden></button>
+      <button class="icon-btn" id="btn-call" title="Start a voice call" data-icon="phone" hidden></button>
+      <button class="icon-btn" id="btn-groupcall" title="Start a group call" data-icon="users" hidden></button>
+      <button class="icon-btn" id="btn-contact" title="Save as contact" data-icon="star" hidden></button>
+      <button class="icon-btn" id="btn-leave" title="Leave channel" data-icon="log-out" hidden></button>
+      <button class="icon-btn" id="btn-delchan" title="Delete channel" data-icon="trash" hidden></button>
+      <button class="icon-btn" id="btn-block" title="Block" data-icon="ban" hidden></button>
+      <button class="icon-btn" id="btn-verify" title="Safety number" data-icon="shield" hidden></button>
+      <button class="icon-btn" id="btn-emoji" title="Custom emoji" data-icon="smile" hidden></button>
+      <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" data-icon="user-plus" hidden></button>
+      <button class="icon-btn" id="btn-link" title="Create invite link" data-icon="link" hidden></button>
+      <button class="icon-btn" id="btn-pins" title="Pinned messages" data-icon="pin" hidden></button>
+      <button class="icon-btn" id="btn-more" title="More actions" data-icon="more" hidden></button>
+      <button class="icon-btn" id="btn-search" title="Search messages (Ctrl+K)" data-icon="search"></button>
+      <button class="icon-btn" id="btn-members" title="Toggle member list" data-icon="users"></button>
+      <input type="file" id="emoji-file" accept="image/png,image/jpeg" hidden>
     </header>
     <div id="callbar" hidden></div>
     <div id="gcallbar" hidden></div>
@@ -796,8 +840,9 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
     <div id="replybar" hidden></div>
     <div class="composer">
       <form id="composer">
-        <button type="button" id="attach" title="Attach a file (DMs only)" disabled>📎</button>
+        <button type="button" id="attach" class="ghost-icon" title="Attach a file (DMs only)" data-icon="paperclip" disabled></button>
         <input id="text" autocomplete="off" placeholder="Message" disabled />
+        <button type="button" id="emoji-pick" class="ghost-icon" title="Emoji" data-icon="smile" disabled></button>
         <button id="send" disabled>Send</button>
       </form>
       <input type="file" id="chat-file" hidden>
@@ -831,17 +876,56 @@ const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) 
 const initials = s => (s || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
 const short = s => (s && s.includes("-")) ? s.split("-").slice(0, 2).join("-") : (s || "");
 
+/* ---------- monochrome UI icons (stroke, currentColor) ---------------- */
+/* Emoji stay for message content + reactions; chrome uses these. */
+const ICONS = {
+  paperclip: '<path d="M21 8.5 12.8 16.7a3.5 3.5 0 0 1-5-5l8.2-8.2a2.3 2.3 0 0 1 3.3 3.3l-8.2 8.2a1.2 1.2 0 0 1-1.7-1.7l7.6-7.6"/>',
+  smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01"/>',
+  bell: '<path d="M18 8a6 6 0 1 0-12 0c0 6-3 8-3 8h18s-3-2-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+  "bell-off": '<path d="M8.7 6.3A6 6 0 0 1 18 8c0 3 .8 5 1.6 6.3M6 8c0 6-3 8-3 8h12"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/><path d="m2 2 20 20"/>',
+  phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.9.6 2.9.7a2 2 0 0 1 1.7 2Z"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>',
+  "user-plus": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>',
+  pin: '<path d="M12 17v5"/><path d="M9 10V4h6v6l3 3v2H6v-2l3-3Z"/>',
+  trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>',
+  "log-out": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+  shield: '<path d="M12 3 4 6v6c0 5 3.4 8 8 9 4.6-1 8-4 8-9V6l-8-3Z"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  more: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
+  star: '<path d="m12 3 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.8 6.2 20.9l1.1-6.5L2.6 9.8l6.5-.9L12 3Z"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
+  "mic-off": '<path d="m2 2 20 20"/><path d="M15 9.3V6a3 3 0 0 0-5.9-.7M9 9v2a3 3 0 0 0 4.6 2.5"/><path d="M5 11a7 7 0 0 0 10.7 6M19 11a7 7 0 0 1-.6 2.8M12 18v3"/>',
+  hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
+  reply: '<path d="M9 17 4 12l5-5"/><path d="M4 12h11a5 5 0 0 1 5 5v1"/>',
+  forward: '<path d="m15 17 5-5-5-5"/><path d="M20 12H9a5 5 0 0 0-5 5v1"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+};
+function svgIcon(name) {
+  return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || "") + '</svg>';
+}
+function setIcon(elm, name) { if (elm) elm.innerHTML = svgIcon(name); }
+function paintIcons(root = document) {
+  for (const e of root.querySelectorAll("[data-icon]")) setIcon(e, e.dataset.icon);
+}
+
 /* ---------- context menus (our own, not the browser's) ----------------- */
 let ctxEl = null;
 function ctxClose() { if (ctxEl) { ctxEl.remove(); ctxEl = null; } }
-// items: array of { label, run, danger, disabled, icon } or the string "sep".
+// items: { label, run, danger, disabled, iconName } or the string "sep".
 function ctxShow(x, y, items) {
   ctxClose();
   const menu = el("div", "ctx-menu");
   for (const it of items) {
     if (it === "sep") { menu.appendChild(el("div", "sep")); continue; }
     const b = el("button", it.danger ? "danger" : null);
-    if (it.icon) b.appendChild(Object.assign(el("span"), { textContent: it.icon }));
+    if (it.iconName) { const s = el("span"); s.innerHTML = svgIcon(it.iconName); b.appendChild(s); }
     b.appendChild(Object.assign(el("span"), { textContent: it.label }));
     b.disabled = !!it.disabled;
     b.onclick = () => { ctxClose(); try { it.run(); } catch (e) { ui && ui.sys && ui.sys(String(e)); } };
@@ -879,16 +963,16 @@ addEventListener("contextmenu", e => {
     e.preventDefault();
     const t = e.target;
     ctxShow(e.clientX, e.clientY, [
-      { label: "Cut", icon: "✂️", disabled: !sel, run: async () => { await navigator.clipboard.writeText(sel); document.execCommand("delete"); } },
-      { label: "Copy", icon: "⧉", disabled: !sel, run: () => navigator.clipboard.writeText(sel) },
-      { label: "Paste", icon: "📋", run: async () => { const txt = await navigator.clipboard.readText(); insertAtCaret(t, txt); } },
+      { label: "Cut", iconName: "x", disabled: !sel, run: async () => { await navigator.clipboard.writeText(sel); document.execCommand("delete"); } },
+      { label: "Copy", iconName: "copy", disabled: !sel, run: () => navigator.clipboard.writeText(sel) },
+      { label: "Paste", iconName: "copy", run: async () => { const txt = await navigator.clipboard.readText(); insertAtCaret(t, txt); } },
       "sep",
       { label: "Select all", run: () => t.select && t.select() },
     ]);
     return;
   }
   e.preventDefault();
-  if (sel) ctxShow(e.clientX, e.clientY, [{ label: "Copy", icon: "⧉", run: () => navigator.clipboard.writeText(sel) }]);
+  if (sel) ctxShow(e.clientX, e.clientY, [{ label: "Copy", iconName: "copy", run: () => navigator.clipboard.writeText(sel) }]);
 });
 function insertAtCaret(t, text) {
   const s = t.selectionStart ?? t.value.length, e = t.selectionEnd ?? t.value.length;
@@ -908,8 +992,8 @@ function collapseHeader() {
     const handler = b.onclick;
     b.hidden = true;
     if (!handler) continue;
-    const label = (b.title || b.textContent || "").replace(/\s*[—-].*$/, "").trim();
-    items.push({ icon: b.textContent, label: label || b.id, run: () => handler.call(b) });
+    const label = (b.title || "").replace(/\s*[—-].*$/, "").trim();
+    items.push({ iconName: b.dataset.icon, label: label || b.id, run: () => handler.call(b) });
   }
   const more = $("#btn-more");
   more.hidden = items.length === 0;
@@ -1021,7 +1105,7 @@ const api = {
   editDm(peer, msgId, text) { return this.post("/api/dm/edit", { peer, msg_id: msgId, text }); },
   forward(to, origin, text) { return this.post("/api/forward", { to, origin, text }); },
   createServer(name)      { return this.post("/api/server", { name }); },
-  createChannel(server, name, password, voice) { return this.post("/api/channel", { server, name, password: password || "", voice: !!voice }); },
+  createChannel(server, name, voice) { return this.post("/api/channel", { server, name, voice: !!voice }); },
   voice()                { return this.get("/api/voice"); },
   voiceJoin(channel)     { return this.post("/api/voice/join", { channel }); },
   voiceLeave(channel)    { return this.post("/api/voice/leave", { channel }); },
@@ -1177,6 +1261,7 @@ function selectTarget(server, target) {
   render();
   const box = $("#text");
   box.disabled = !target; $("#send").disabled = !target;
+  $("#emoji-pick").disabled = !target;
   // Attachments go through the DM file-transfer path only.
   $("#attach").disabled = !target || target.startsWith("#") || isSelf(target);
   if (target) box.focus();
@@ -1298,7 +1383,8 @@ function renderPane() {
 
   // One entry point — the full set of server-management actions lives in the
   // Server settings overlay, not crammed next to the name.
-  const gear = el("button", "icon-btn", "⚙");
+  const gear = el("button", "icon-btn");
+  setIcon(gear, "gear");
   gear.title = "Server settings";
   gear.onclick = () => openServerSettings(server);
   actions.appendChild(gear);
@@ -1359,19 +1445,19 @@ function channelCtxItems(c, server, t) {
   const iOwn = c.root && store.policies[c.root] && store.policies[c.root].owner === store.me.fingerprint;
   const muted = store.isMuted(t);
   const items = [
-    { label: "Open", icon: c.voice ? "🔊" : "#", run: () => selectTarget(server, t) },
-    { label: muted ? "Unmute" : "Mute", icon: muted ? "🔔" : "🔕", run: () => { store.toggleMute(t); render(); } },
+    { label: "Open", iconName: c.voice ? "phone" : "hash", run: () => selectTarget(server, t) },
+    { label: muted ? "Unmute" : "Mute", iconName: muted ? "bell" : "bell-off", run: () => { store.toggleMute(t); render(); } },
   ];
   if (iOwn && !isGeneral) {
     items.push("sep");
-    items.push({ label: "Rename…", icon: "✏️", run: () => renameChannelFlow(c, t) });
-    items.push({ label: "Delete channel", icon: "🗑", danger: true, run: () => deleteChannelFlow(c, t) });
+    items.push({ label: "Rename…", iconName: "edit", run: () => renameChannelFlow(c, t) });
+    items.push({ label: "Delete channel", iconName: "trash", danger: true, run: () => deleteChannelFlow(c, t) });
   } else if (!iOwn) {
     items.push("sep");
-    items.push({ label: "Leave channel", icon: "🚪", danger: true, run: () => leaveChannelFlow(c, t) });
+    items.push({ label: "Leave channel", iconName: "log-out", danger: true, run: () => leaveChannelFlow(c, t) });
   }
   items.push("sep");
-  items.push({ label: "Copy channel ID", icon: "⧉", run: () => navigator.clipboard.writeText(c.id) });
+  items.push({ label: "Copy channel ID", iconName: "copy", run: () => navigator.clipboard.writeText(c.id) });
   return items;
 }
 async function renameChannelFlow(c, t) {
@@ -1457,7 +1543,7 @@ function renderChat() {
   if (!isSelf(target)) {
     muteBtn.hidden = false;
     const m = store.isMuted(target);
-    muteBtn.textContent = m ? "🔕" : "🔔";
+    setIcon(muteBtn, m ? "bell-off" : "bell");
     muteBtn.title = m ? "Notifications muted — click to unmute" : "Mute notifications";
     muteBtn.onclick = () => { store.toggleMute(target); render(); };
   }
@@ -1512,7 +1598,7 @@ function renderChat() {
 
     const known = store.contacts.some(c => c.fp === target);
     contactBtn.hidden = false;
-    contactBtn.textContent = known ? "★" : "☆";
+    setIcon(contactBtn, "star");
     contactBtn.classList.toggle("on", known);
     contactBtn.title = known ? "Edit contact" : "Save as contact";
     contactBtn.onclick = () => contactFlow(target);
@@ -1533,7 +1619,7 @@ function renderChat() {
     };
     if (blk) {
       $("#chat-topic").textContent = "blocked — their messages are hidden";
-      $("#log").innerHTML = '<div class="empty">You blocked this person. Their messages and typing are hidden. Unblock (🚫) to resume.</div>';
+      $("#log").innerHTML = '<div class="empty">You blocked this person. Their messages and typing are hidden. Unblock to resume.</div>';
       $("#typing").textContent = "";
       $("#text").disabled = true; $("#send").disabled = true;
       return;
@@ -1543,7 +1629,7 @@ function renderChat() {
     if (s === undefined) { loadSafety(target); }
     else if (s && s.available) {
       verifyBtn.hidden = false;
-      verifyBtn.textContent = s.verified ? "🛡️" : "⚠️";
+      setIcon(verifyBtn, "shield");
       verifyBtn.classList.toggle("verified", !!s.verified);
       verifyBtn.title = s.verified ? "Verified — safety number confirmed" : "Unverified — compare the safety number";
       verifyBtn.onclick = () => verifyFlow(target);
@@ -1691,7 +1777,6 @@ function renderVoiceRoom(c, target) {
   log.appendChild(wrap);
 }
 
-const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
 const FWD_PREFIX = "↪ Forwarded from ";
 
 // Reply / forward / edit / delete affordances on channel messages.
@@ -1741,23 +1826,23 @@ function msgCtxItems(m, target, bodyText) {
   const mine = m.from === "you";
   const items = [];
   if (isChan && m.ref_seq) {
-    items.push({ label: "Reply", icon: "↩", run: () => {
+    items.push({ label: "Reply", iconName: "reply", run: () => {
       store._replyTo = { target, seq: m.ref_seq, from: m.from, text: m.text };
       renderReplyBar(); $("#text").focus();
     }});
   }
-  items.push({ label: "Copy text", icon: "⧉", run: () => navigator.clipboard.writeText(bodyText || m.text || "") });
-  items.push({ label: "Forward…", icon: "↪", run: () => openForwardPicker(isChan ? m : { ...m, text: bodyText }, target) });
+  items.push({ label: "Copy text", iconName: "copy", run: () => navigator.clipboard.writeText(bodyText || m.text || "") });
+  items.push({ label: "Forward…", iconName: "forward", run: () => openForwardPicker(isChan ? m : { ...m, text: bodyText }, target) });
   if (isChan && m.ref_seq) {
     const isPinned = store.pins[target] && store.pins[target][m.ref_seq];
-    items.push({ label: isPinned ? "Unpin" : "Pin", icon: "📌", run: async () => {
+    items.push({ label: isPinned ? "Unpin" : "Pin", iconName: "pin", run: async () => {
       try { await api.post("/api/pin", { channel: target, seq: m.ref_seq, pinned: !isPinned }); }
       catch (e) { ui.say("Pin failed: " + e.message); }
     }});
   }
   if (mine && ((isChan && m.ref_seq) || (!isChan && m.msg_id))) {
     items.push("sep");
-    items.push({ label: "Edit…", icon: "✎", run: async () => {
+    items.push({ label: "Edit…", iconName: "edit", run: async () => {
       const cur = isChan ? m.text : ((store.dmEdits[m.msg_id] && store.dmEdits[m.msg_id].text) || m.text);
       const t = await ui.ask("Edit message", cur);
       if (t == null || t === cur) return;
@@ -1766,7 +1851,7 @@ function msgCtxItems(m, target, bodyText) {
         else { await api.editDm(target, m.msg_id, t); store.dmEdits[m.msg_id] = { text: t, deleted: false }; renderChat(); }
       } catch (e) { ui.say("Edit failed: " + e.message); }
     }});
-    items.push({ label: "Delete", icon: "🗑", danger: true, run: async () => {
+    items.push({ label: "Delete", iconName: "trash", danger: true, run: async () => {
       if (!await ui.confirm("Delete this message for everyone?")) return;
       try {
         if (isChan) await api.post("/api/edit", { channel: target, seq: m.ref_seq, text: "" });
@@ -1879,11 +1964,7 @@ function renderReactions(body, channelTarget, refSeq) {
   }
   const add = el("button", "react-chip add", "＋");
   add.title = "Add a reaction";
-  add.onclick = async () => {
-    const custom = Object.keys(emojiMap()).map(n => ":" + n + ":").join(" ");
-    const e = await ui.ask("React with which emoji?\n(" + QUICK_EMOJI.join(" ") + (custom ? "  " + custom : "") + ")", "👍");
-    if (e) toggleReact(channelTarget, refSeq, e, false);
-  };
+  add.onclick = () => openEmojiPicker(add, e => toggleReact(channelTarget, refSeq, e, false));
   row.appendChild(add);
   body.appendChild(row);
 }
@@ -1908,7 +1989,10 @@ async function emojiFlow(root) {
     const f = inp.files[0];
     inp.value = "";
     if (!f) return;
-    if (f.size > 256 * 1024) { ui.say("image must be 256 KiB or smaller"); return; }
+    if (!/\.(png|jpe?g)$/i.test(f.name) && !/^image\/(png|jpeg)$/.test(f.type)) {
+      ui.say("custom emoji must be a PNG or JPEG"); return;
+    }
+    if (f.size > 1024 * 1024) { ui.say("image must be 1 MB or smaller"); return; }
     const bytes = new Uint8Array(await f.arrayBuffer());
     let hex = "";
     for (const b of bytes) hex += b.toString(16).padStart(2, "0");
@@ -2110,6 +2194,76 @@ function updateTitle() {
 }
 const esc = s => { const d = el("div"); d.textContent = s; return d.innerHTML; };
 
+/* ---------- emoji picker (categorised, phone-keyboard style) ----------- */
+const EMOJI_CATS = [
+  ["Smileys", "🙂", "😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 💩 🤡 👻 👽 🤖"],
+  ["Gestures", "👍", "👋 🤚 🖐 ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 🖕 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 ✍️ 💅 🤳 💪 🦵 🦶 👂 👃 🧠 🫀 🫁 🦷 👀 👁 👅 👄"],
+  ["People", "🙋", "👶 🧒 👦 👧 🧑 👨 👩 🧔 👱 👴 👵 🙍 🙎 🙅 🙆 💁 🙋 🧏 🙇 🤦 🤷 👮 🕵️ 💂 👷 🤴 👸 👳 👲 🧕 🤵 👰 🤰 🤱 👼 🎅 🤶 🦸 🦹 🧙 🧚 🧛 🧜 🧝 🧞 🧟 💆 💇 🚶 🧍 🧎 🏃 💃 🕺 👯 🧖 🧗"],
+  ["Animals", "🐱", "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🐤 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐞 🐜 🦗 🕷 🦂 🐢 🐍 🦎 🦖 🐙 🦑 🦐 🦞 🦀 🐡 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🐘 🦏 🐪 🐫 🦒 🐃 🐂 🐄 🐎 🐖 🐏 🐑 🐐 🦌 🐕 🐩 🐈 🐓 🦃 🕊 🐇 🐁 🐀 🐿 🦔 🌵 🎄 🌲 🌳 🌴 🌱 🌿 ☘️ 🍀 🎍 🍃 🍂 🍁 🌾 🌺 🌻 🌹 🌷 🌸 💐 🍄"],
+  ["Food", "🍔", "🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍈 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🍆 🥑 🥦 🥬 🥒 🌶 🌽 🥕 🧄 🧅 🥔 🍠 🥐 🥯 🍞 🥖 🥨 🧀 🥚 🍳 🧈 🥞 🧇 🥓 🥩 🍗 🍖 🌭 🍔 🍟 🍕 🥪 🥙 🧆 🌮 🌯 🥗 🥘 🍝 🍜 🍲 🍛 🍣 🍱 🥟 🍤 🍙 🍚 🍘 🍥 🥠 🍢 🍡 🍧 🍨 🍦 🥧 🧁 🍰 🎂 🍮 🍭 🍬 🍫 🍿 🍩 🍪 ☕️ 🍵 🥤 🧃 🍺 🍻 🥂 🍷 🥃 🍸 🍹 🍾"],
+  ["Activities", "⚽", "⚽️ 🏀 🏈 ⚾️ 🥎 🎾 🏐 🏉 🥏 🎱 🪀 🏓 🏸 🏒 🏑 🥍 🏏 ⛳️ 🪁 🏹 🎣 🤿 🥊 🥋 🎽 🛹 🛼 🛷 ⛸ 🥌 🎿 ⛷ 🏂 🏋️ 🤼 🤸 🤺 🤾 🏌️ 🏇 🧘 🏄 🏊 🤽 🚣 🧗 🚵 🚴 🏆 🥇 🥈 🥉 🏅 🎖 🏵 🎗 🎫 🎟 🎪 🤹 🎭 🎨 🎬 🎤 🎧 🎼 🎹 🥁 🎷 🎺 🎸 🪕 🎻 🎲 ♟ 🎯 🎳 🎮 🎰 🧩"],
+  ["Travel", "✈️", "🚗 🚕 🚙 🚌 🚎 🏎 🚓 🚑 🚒 🚐 🚚 🚛 🚜 🦯 🦽 🦼 🛴 🚲 🛵 🏍 🛺 🚨 🚔 🚍 🚘 🚖 🚡 🚠 🚟 🚃 🚋 🚞 🚝 🚄 🚅 🚈 🚂 🚆 🚇 🚊 🚉 ✈️ 🛫 🛬 🛩 💺 🛰 🚀 🛸 🚁 🛶 ⛵️ 🚤 🛥 🛳 ⛴ 🚢 ⚓️ ⛽️ 🚧 🚦 🚥 🗺 🗿 🗽 🗼 🏰 🏯 🏟 🎡 🎢 🎠 ⛲️ ⛱ 🏖 🏝 🏜 🌋 ⛰ 🏔 🗻 🏕 ⛺️ 🏠 🏡 🏘 🏚 🏗 🏭 🏢 🏬 🏣 🏤 🏥 🏦 🏨 🏪 🏫 🏩 💒 🏛 ⛪️ 🕌 🕍 🛕 🕋"],
+  ["Objects", "💡", "⌚️ 📱 💻 ⌨️ 🖥 🖨 🖱 🕹 💽 💾 💿 📀 📷 📸 📹 🎥 📞 ☎️ 📟 📠 📺 📻 🎙 ⏱ ⏰ 🕰 ⌛️ ⏳ 🔋 🔌 💡 🔦 🕯 🧯 🛢 💸 💵 💴 💶 💷 💰 💳 💎 ⚖️ 🧰 🔧 🔨 ⚒ 🛠 ⛏ 🔩 ⚙️ 🧱 ⛓ 🧲 🔫 💣 🧨 🔪 🗡 ⚔️ 🛡 🚬 ⚰️ ⚱️ 🏺 🔮 📿 🧿 💈 ⚗️ 🔭 🔬 🕳 💊 💉 🩸 🩹 🩺 🌡 🧬 🦠 🧫 🧪 🧹 🧺 🧻 🚽 🚰 🚿 🛁 🛀 🧼 🪒 🧽 🧴 🛎 🔑 🗝 🚪 🪑 🛋 🛏 🛌 🖼 🛍 🛒 🎁 🎈 🎏 🎀 🎊 🎉 🎎 🏮 🎐 🧧 ✉️ 📩 📨 📧 💌 📥 📤 📦 🏷 📪 📫 📬 📭 📮 📯 📜 📃 📄 📑 📊 📈 📉 🗒 🗓 📆 📅 📇 🗃 🗳 🗄 📋 📁 📂 🗂 🗞 📰 📓 📔 📒 📕 📗 📘 📙 📚 📖 🔖 🔗 📎 🖇 📐 📏 📌 📍 ✂️ 🖊 🖋 ✒️ 🖌 🖍 📝 ✏️ 🔍 🔎"],
+  ["Symbols", "❤️", "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ☮️ ✝️ ☪️ 🕉 ☸️ ✡️ 🔯 🕎 ☯️ ☦️ 🛐 ⛎ ♈️ ♉️ ♊️ ♋️ ♌️ ♍️ ♎️ ♏️ ♐️ ♑️ ♒️ ♓️ 🆔 ⚛️ 🉑 ☢️ ☣️ 📴 📳 🈶 🈚️ 🈸 🈺 🈷️ ✴️ 🆚 💮 🉐 ㊙️ ㊗️ 🈴 🈵 🈹 🈲 🅰️ 🅱️ 🆎 🆑 🅾️ 🆘 ❌ ⭕️ 🛑 ⛔️ 📛 🚫 💯 💢 ♨️ 🚷 🚯 🚳 🚱 🔞 📵 🚭 ❗️ ❕ ❓ ❔ ‼️ ⁉️ 🔅 🔆 〽️ ⚠️ 🚸 🔱 ⚜️ 🔰 ♻️ ✅ 🈯️ 💹 ❇️ ✳️ ❎ 🌐 💠 Ⓜ️ 🌀 💤 🏧 🚾 ♿️ 🅿️ 🈳 🈂️ 🛂 🛃 🛄 🛅 🚹 🚺 🚼 ⚧ 🚻 🚮 🎦 📶 🈁 🔣 ℹ️ 🔤 🔡 🔠 🆖 🆗 🆙 🆒 🆕 🆓 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣ 🔟 🔢 #️⃣ *️⃣ ⏏️ ▶️ ⏸ ⏯ ⏹ ⏺ ⏭ ⏮ ⏩ ⏪ ⏫ ⏬ ◀️ 🔼 🔽 ➡️ ⬅️ ⬆️ ⬇️ ↗️ ↘️ ↙️ ↖️ ↕️ ↔️ ↪️ ↩️ ⤴️ ⤵️ 🔀 🔁 🔂 🔄 🔃 ➕ ➖ ➗ ✖️ ♾ 💲 💱 ™️ ©️ ®️ 〰️ ➰ ➿ 🔚 🔙 🔛 🔝 🔜 ✔️ ☑️ 🔘 ⚪️ ⚫️ 🔴 🔵 🟠 🟡 🟢 🟣 🟤 🔺 🔻 🔸 🔹 🔶 🔷 🔳 🔲 ▪️ ▫️ ◾️ ◽️ ◼️ ◻️ ⬛️ ⬜️ 🟥 🟧 🟨 🟩 🟦 🟪 🟫 🔈 🔇 🔉 🔊 🔔 🔕 📣 📢 💬 💭 🗯 ♠️ ♣️ ♥️ ♦️ 🃏 🎴 🀄️ 🕐 🕑 🕒 🕓 🕔 🕕 🕖 🕗 🕘 🕙 🕚 🕛"],
+];
+
+let emojiPop = null;
+function emojiPopClose() { if (emojiPop) { emojiPop.remove(); emojiPop = null; } }
+// Open the picker anchored to `anchor`; `onPick(str)` gets an emoji char or
+// `:shortcode:` for a custom one.
+function openEmojiPicker(anchor, onPick) {
+  if (emojiPop) { emojiPopClose(); return; }
+  const pop = el("div", "emoji-pop");
+  const tabs = el("div", "emoji-tabs");
+  const grid = el("div", "emoji-grid");
+  const custom = emojiMap();
+  const cats = [];
+  if (Object.keys(custom).length) {
+    cats.push(["Custom", "⭐", null, Object.entries(custom)]);
+  }
+  for (const [name, icon, chars] of EMOJI_CATS) cats.push([name, icon, chars, null]);
+
+  const showCat = i => {
+    for (const b of tabs.children) b.classList.toggle("on", +b.dataset.i === i);
+    grid.innerHTML = "";
+    const [, , chars, customList] = cats[i];
+    if (customList) {
+      for (const [nm, hash] of customList) {
+        const b = el("button", "emoji-cell");
+        b.innerHTML = `<img class="emoji" src="/api/emoji?hash=${hash}" alt=":${nm}:">`;
+        b.title = ":" + nm + ":";
+        b.onclick = () => { onPick(":" + nm + ":"); emojiPopClose(); };
+        grid.appendChild(b);
+      }
+      return;
+    }
+    for (const ch of chars.split(" ")) {
+      const b = el("button", "emoji-cell", ch);
+      b.onclick = () => { onPick(ch); emojiPopClose(); };
+      grid.appendChild(b);
+    }
+  };
+  cats.forEach(([name, icon], i) => {
+    const t = el("button", "emoji-tab", icon);
+    t.title = name; t.dataset.i = i;
+    t.onclick = () => showCat(i);
+    tabs.appendChild(t);
+  });
+  pop.appendChild(tabs);
+  pop.appendChild(grid);
+  document.body.appendChild(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)) + "px";
+  pop.style.top = Math.max(8, r.top - pop.offsetHeight - 8) + "px";
+  emojiPop = pop;
+  showCat(0);
+  setTimeout(() => addEventListener("click", emojiPopOutside), 0);
+}
+function emojiPopOutside(e) {
+  if (emojiPop && !emojiPop.contains(e.target)) { emojiPopClose(); removeEventListener("click", emojiPopOutside); }
+}
+addEventListener("keydown", e => { if (e.key === "Escape") emojiPopClose(); });
+
 /* custom-emoji map for the server currently in view: { shortcode: hexhash } */
 function emojiMap() {
   const root = store.rootOf(store.view.server);
@@ -2180,12 +2334,11 @@ async function createChannelFlow(server) {
   if (!root) return ui.say("Unknown server root — open a channel in this server first.");
   const f = await ui.form("New channel", [
     { name: "name", label: "Channel name", placeholder: "general" },
-    { name: "pw", label: "Password (optional)", placeholder: "content-protects the relay log", password: true },
     { name: "voice", label: "Voice channel (members join a call, no text)", type: "check", value: false },
   ], { ok: "Create" });
   if (!f || !f.name) return;
   try {
-    await api.createChannel(root, f.name, f.voice ? "" : f.pw, f.voice);
+    await api.createChannel(root, f.name, f.voice);
     await refreshChannels();
   } catch (e) { ui.say("Could not create channel (are you the host?): " + e.message); }
 }
@@ -2782,6 +2935,9 @@ async function sendFile(file) {
   }
 }
 $("#attach").addEventListener("click", () => $("#chat-file").click());
+$("#emoji-pick").addEventListener("click", () => {
+  openEmojiPicker($("#emoji-pick"), s => { insertAtCaret($("#text"), s); $("#text").focus(); });
+});
 $("#chat-file").addEventListener("change", e => {
   const f = e.target.files && e.target.files[0];
   e.target.value = "";
@@ -3300,6 +3456,7 @@ async function init() {
   setInterval(refreshGroupCalls, 1500);
   setInterval(refreshVoice, 1500);
 }
+paintIcons();
 init();
 </script>
 </body>

@@ -2726,8 +2726,13 @@ impl Engine {
         {
             return Err(CoreError::Channel("bad emoji name"));
         }
-        if image.is_empty() || image.len() > 256 * 1024 {
-            return Err(CoreError::Channel("emoji image must be 1..=256 KiB"));
+        if image.is_empty() || image.len() > 1024 * 1024 {
+            return Err(CoreError::Channel("emoji image must be 1..=1024 KiB"));
+        }
+        let is_png = image.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        let is_jpeg = image.starts_with(&[0xff, 0xd8, 0xff]);
+        if !is_png && !is_jpeg {
+            return Err(CoreError::Channel("emoji image must be a PNG or JPEG"));
         }
         let (roles_vec, assignments, mut emojis, owner, version, root) =
             self.policy_draft(server_root)?;

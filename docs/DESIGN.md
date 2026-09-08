@@ -456,6 +456,16 @@ infrastructure. Reached. ---**
   `Engine::send_channel_reply`. `serve` `POST /api/send` takes an optional
   `reply_to`; the SPA has a ↩ hover action → a reply bar over the composer and
   a quoted line above the reply; CLI `/reply #<chan> <seq> <text>`.
+- **@mentions** *(done, client-side)*: no protocol change — the SPA's
+  `richText` renders `@<fingerprint>` (full, or an unambiguous prefix resolved
+  against channel members + contacts) as a pill; a mention of your own
+  fingerprint highlights and, when the channel is closed, raises a desktop
+  notification + an `@` badge on the channel row. The composer has an
+  `@`-autocomplete over channel members that inserts the full fingerprint.
+- **Message search** *(done)*: `Engine::search(query, limit)` — case-insensitive
+  substring over stored DM + channel text, newest first. `serve`
+  `GET /api/search?q=`; the SPA's 🔍 button / Ctrl+K opens an overlay with
+  debounced live results that jump to the DM or channel.
 - **Custom per-server emoji** *(done)*: `ServerPolicy` gained an `emojis:
   Vec<(shortcode, [u8;32])>` tail field (back-compat: only written when
   non-empty, so pre-emoji signatures still verify). `Engine::set_server_emoji`

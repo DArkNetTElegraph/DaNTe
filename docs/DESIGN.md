@@ -102,7 +102,8 @@ achievable with no project-run infrastructure.
 
 **Not built yet:** private-channel access control beyond the secret
 `channel_id` + password wrapper. libp2p/DHT + multi-relay gossip
-(Phase 3 deferred); screen share + an SFrame layer over the group-call key
+(Phase 3 deferred — a working prototype lives in the detached `crates/dante-p2p`,
+not yet wired into `Engine`); screen share + an SFrame layer over the group-call key
 (Phase 7); rich features — emoji/stickers/soundboards, bots, embeds (Phase 8);
 the Tauri desktop native layer.
 
@@ -204,6 +205,21 @@ DaNTe/
   lookup, gossipsub for multi-relay ledger fan-out. The request/response
   protocol is designed to run unchanged over that overlay; until then a client
   syncs the key directory by pulling records from the relay(s) it connects to.
+- **Prototype (`crates/dante-p2p`, detached crate):** a minimal `Node` over a
+  libp2p Swarm — TCP + Noise + Yamux, Kademlia (memory store, DaNTe-private
+  `/dante/kad/1.0.0` protocol, server mode) for `put_record`/`get_record`, and
+  gossipsub for `publish`/`subscribe`; identify feeds addresses into the kad
+  routing table; ping for liveness. Driven by a background Tokio task behind a
+  command channel + `Event` stream. In-process-swarm tests cover two nodes
+  gossiping and a DHT record put on one node being resolved by a peer. Kept
+  **out of the root workspace** on purpose: the libp2p tree's `licenses`/`bans`
+  are clean under our `deny.toml`, but `advisories` still flags `paste`
+  (RUSTSEC-2024-0436, unmaintained, no upgrade, via the `netlink`/`if-watch`
+  stack that `libp2p-tcp` needs on Linux). The `dns` feature is left off to
+  avoid `hickory-proto` 0.25's DoS advisory. Folding this in waits on those
+  clearing (or an explicit `advisories.ignore` entry) and on wiring it into
+  `Engine` (DHT for the key directory, gossipsub for ledger + channel logs;
+  the sealed-sender mailbox stays on `dante-relay`).
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

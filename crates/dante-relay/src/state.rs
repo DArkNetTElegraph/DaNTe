@@ -70,6 +70,9 @@ pub struct RelayState {
     mailbox: Mailbox,
     /// `identity_id` -> latest published, encoded `PreKeyBundle`.
     prekeys: std::collections::HashMap<[u8; 32], Vec<u8>>,
+    /// `identity_id` -> queue of published MLS `KeyPackage`s (opaque). Handed
+    /// out one per fetch; the last one is kept and reused as a last resort.
+    key_packages: std::collections::HashMap<[u8; 32], std::collections::VecDeque<Vec<u8>>>,
     /// `SHA-256(bytes)` -> (ciphertext blob, deposited_ms). File chunks.
     blobs: std::collections::HashMap<[u8; 32], (Vec<u8>, u64)>,
     blob_bytes: usize,
@@ -98,6 +101,10 @@ const SIGNAL_TTL_MS: u64 = 12_000;
 const MAX_SIGNALS_PER_TOPIC: usize = 64;
 /// Largest accepted signal payload.
 const MAX_SIGNAL_BYTES: usize = 4 * 1024;
+/// Cap on stored MLS KeyPackages per identity (bounds a spammer).
+const MAX_KEYPKGS_PER_IDENTITY: usize = 32;
+/// Largest accepted MLS KeyPackage.
+const MAX_KEYPKG_BYTES: usize = 16 * 1024;
 
 /// `(next_seq, entries)` where each entry is `(seq, blob, ts_ms)`.
 type ChannelLog = (u64, Vec<(u64, Vec<u8>, u64)>);
@@ -109,6 +116,7 @@ impl RelayState {
             ledger: Ledger::new(MemoryStore::default(), params),
             mailbox: Mailbox::new(),
             prekeys: std::collections::HashMap::new(),
+            key_packages: std::collections::HashMap::new(),
             blobs: std::collections::HashMap::new(),
             blob_bytes: 0,
             channels: std::collections::HashMap::new(),
@@ -264,6 +272,35 @@ impl RelayState {
                     }
                     _ => Response::Prekeys(Some(stored.clone())),
                 }
+            }
+
+            Request::PublishKeyPackage {
+                identity,
+                key_package,
+            } => {
+                if !self.record_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                if key_package.is_empty() || key_package.len() > MAX_KEYPKG_BYTES {
+                    return Response::Error("bad key package".into());
+                }
+                let q = self.key_packages.entry(identity).or_default();
+                q.push_back(key_package);
+                while q.len() > MAX_KEYPKGS_PER_IDENTITY {
+                    q.pop_front();
+                }
+                Response::Ok
+            }
+
+            Request::GetKeyPackage(id) => {
+                let out = match self.key_packages.get_mut(&id) {
+                    // More than one queued: consume the oldest.
+                    Some(q) if q.len() > 1 => q.pop_front(),
+                    // Exactly one: keep it as a reusable last resort.
+                    Some(q) => q.front().cloned(),
+                    None => None,
+                };
+                Response::KeyPackage(out)
             }
 
             Request::PutBlob(bytes) => {
@@ -577,6 +614,44 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn key_packages_are_handed_out_once_then_reused_as_last_resort() {
+        let mut s = state();
+        let id = [42u8; 32];
+
+        for kp in [b"kp-a".to_vec(), b"kp-b".to_vec()] {
+            assert_eq!(
+                s.handle(
+                    Request::PublishKeyPackage {
+                        identity: id,
+                        key_package: kp,
+                    },
+                    IP,
+                    0
+                ),
+                Response::Ok
+            );
+        }
+
+        // First fetch consumes the oldest.
+        assert_eq!(
+            s.handle(Request::GetKeyPackage(id), IP, 0),
+            Response::KeyPackage(Some(b"kp-a".to_vec()))
+        );
+        // Only one left: it is served but kept.
+        for _ in 0..3 {
+            assert_eq!(
+                s.handle(Request::GetKeyPackage(id), IP, 0),
+                Response::KeyPackage(Some(b"kp-b".to_vec()))
+            );
+        }
+        // Unknown identity.
+        assert_eq!(
+            s.handle(Request::GetKeyPackage([0u8; 32]), IP, 0),
+            Response::KeyPackage(None)
+        );
     }
 
     #[test]

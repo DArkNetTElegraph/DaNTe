@@ -72,6 +72,18 @@ pub enum Request {
     /// (STUN URLs, plus short-lived TURN credentials if the relay has a TURN
     /// secret configured).
     GetIceConfig,
+    /// Publish an MLS `KeyPackage` (opaque bytes) for `identity`, so other
+    /// members can add that identity to a channel's MLS group / a group call.
+    /// The relay keeps a small per-identity queue and hands them out one at a
+    /// time (last one is reusable).
+    PublishKeyPackage {
+        /// The publisher's identity id.
+        identity: [u8; 32],
+        /// One encoded MLS `KeyPackage`.
+        key_package: Vec<u8>,
+    },
+    /// Take one published MLS `KeyPackage` for `identity`.
+    GetKeyPackage([u8; 32]),
 }
 
 /// One ICE server entry (STUN or TURN). `username` / `credential` are empty
@@ -116,6 +128,8 @@ pub enum Response {
     Signals(Vec<Vec<u8>>),
     /// Reply to [`Request::GetIceConfig`]: the ICE servers for this network.
     IceConfig(Vec<IceCfg>),
+    /// Reply to [`Request::GetKeyPackage`]: one MLS `KeyPackage`, or `None`.
+    KeyPackage(Option<Vec<u8>>),
 }
 
 const REQ_PING: u8 = 0;
@@ -133,6 +147,8 @@ const REQ_FETCH_CHANNEL: u8 = 11;
 const REQ_POST_SIGNAL: u8 = 12;
 const REQ_FETCH_SIGNALS: u8 = 13;
 const REQ_GET_ICE: u8 = 14;
+const REQ_PUBLISH_KEYPKG: u8 = 15;
+const REQ_GET_KEYPKG: u8 = 16;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -145,6 +161,7 @@ const RES_BLOB: u8 = 7;
 const RES_CHANNEL_LOG: u8 = 8;
 const RES_SIGNALS: u8 = 9;
 const RES_ICE: u8 = 10;
+const RES_KEYPKG: u8 = 11;
 
 fn write_ice_list(w: &mut Writer, list: &[IceCfg]) {
     w.u32(list.len() as u32);
@@ -257,6 +274,15 @@ impl Request {
             Request::GetIceConfig => {
                 w.u8(REQ_GET_ICE);
             }
+            Request::PublishKeyPackage {
+                identity,
+                key_package,
+            } => {
+                w.u8(REQ_PUBLISH_KEYPKG).fixed(identity).bytes(key_package);
+            }
+            Request::GetKeyPackage(id) => {
+                w.u8(REQ_GET_KEYPKG).fixed(id);
+            }
         }
         w.into_vec()
     }
@@ -294,6 +320,11 @@ impl Request {
                 topic: r.fixed::<32>()?,
             },
             REQ_GET_ICE => Request::GetIceConfig,
+            REQ_PUBLISH_KEYPKG => Request::PublishKeyPackage {
+                identity: r.fixed::<32>()?,
+                key_package: r.bytes()?.to_vec(),
+            },
+            REQ_GET_KEYPKG => Request::GetKeyPackage(r.fixed::<32>()?),
             REQ_FETCH => {
                 let n = r.u32()? as usize;
                 if n > r.remaining() {
@@ -337,6 +368,8 @@ impl Request {
             Request::PostSignal { .. } => "PostSignal",
             Request::FetchSignals { .. } => "FetchSignals",
             Request::GetIceConfig => "GetIceConfig",
+            Request::PublishKeyPackage { .. } => "PublishKeyPackage",
+            Request::GetKeyPackage(_) => "GetKeyPackage",
         }
     }
 }
@@ -402,6 +435,17 @@ impl Response {
                 w.u8(RES_ICE);
                 write_ice_list(&mut w, list);
             }
+            Response::KeyPackage(kp) => {
+                w.u8(RES_KEYPKG);
+                match kp {
+                    Some(b) => {
+                        w.bool(true).bytes(b);
+                    }
+                    None => {
+                        w.bool(false);
+                    }
+                }
+            }
         }
         w.into_vec()
     }
@@ -443,6 +487,11 @@ impl Response {
             }
             RES_SIGNALS => Response::Signals(read_blob_list(&mut r)?),
             RES_ICE => Response::IceConfig(read_ice_list(&mut r)?),
+            RES_KEYPKG => Response::KeyPackage(if r.bool()? {
+                Some(r.bytes()?.to_vec())
+            } else {
+                None
+            }),
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -495,6 +544,11 @@ mod tests {
         });
         rt_req(Request::FetchSignals { topic: [6u8; 32] });
         rt_req(Request::GetIceConfig);
+        rt_req(Request::PublishKeyPackage {
+            identity: [8u8; 32],
+            key_package: vec![1, 2, 3, 4],
+        });
+        rt_req(Request::GetKeyPackage([9u8; 32]));
     }
 
     #[test]
@@ -514,6 +568,8 @@ mod tests {
         rt_res(Response::Blob(None));
         rt_res(Response::ChannelLog(vec![(1, vec![9]), (2, vec![])]));
         rt_res(Response::Signals(vec![vec![1, 2], vec![]]));
+        rt_res(Response::KeyPackage(Some(vec![5, 6, 7])));
+        rt_res(Response::KeyPackage(None));
         rt_res(Response::IceConfig(vec![
             IceCfg {
                 urls: vec!["stun:stun.example.org:3478".into()],

@@ -9,11 +9,16 @@
 //! DMs / channel log; this crate is transport-agnostic and hands back opaque
 //! byte blobs.
 //!
-//! Scope of this first cut: create a group, publish a [`KeyPkg`] to be
-//! added, add / remove members, process inbound handshake + application
-//! messages, and export the group-call key for the current epoch. Group state
-//! lives in an in-memory OpenMLS store; persisting it across restarts (needed
-//! before this is wired into `dante-core`) is a follow-up.
+//! Scope: create a group, publish a [`KeyPkg`] to be added, add / remove
+//! members, process inbound handshake + application messages, export the
+//! group-call key for the current epoch, and [`export`](Member::export) /
+//! [`import`](Member::import) the whole member so a call / channel survives a
+//! restart. Not yet driven by `dante-core` — the group-call orchestration
+//! (fetching members' KeyPackages, carrying Welcome / Commit over the channel
+//! log, opening the media mesh) is the next step.
+//!
+//! This crate declares `rust-version = 1.91` (OpenMLS 0.9's floor); the rest of
+//! the workspace still builds on 1.85.
 //!
 //! [OpenMLS]: https://openmls.tech
 
@@ -254,7 +259,9 @@ impl Member {
                 Ok(Processed::EpochChanged)
             }
             ProcessedMessageContent::ProposalMessage(_)
-            | ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(Processed::Ignored),
+            | ProcessedMessageContent::ExternalJoinProposalMessage(_)
+            | ProcessedMessageContent::OwnPendingCommit
+            | ProcessedMessageContent::OwnPrivateMessage => Ok(Processed::Ignored),
         }
     }
 

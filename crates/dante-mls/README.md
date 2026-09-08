@@ -15,7 +15,7 @@ authenticated pairwise DMs / channel log, and `process` takes the bytes back.
 
 ## Status
 
-Groundwork, not yet wired into `dante-core`. Covered:
+Not yet driven by `dante-core`. Covered:
 
 - `Member::create` — start a group
 - `Member::publish_key_package` → `Pending::join` — be added to one
@@ -23,31 +23,29 @@ Groundwork, not yet wired into `dante-core`. Covered:
 - `Member::encrypt` / `process` — application messages + inbound commits
 - `Member::call_key` — the group-call media key for the current epoch
 - `Member::export` / `import` — serialize the whole member (OpenMLS store +
-  signature key + reload handles) to a byte blob DaNTe stores in its own
+  signature key + reload handles) to a byte blob DaNTe keeps in its own
   encrypted local state, so a call / channel survives a restart
 
-Remaining before the `dante-core` integration: a `dante-core` group-call state
-machine (fetch members' KeyPackages, carry Welcome/Commit over the channel
-log, open the mesh), and the N-party media path.
+Remaining before group calls work end to end: a `dante-core` group-call state
+machine (fetch members' KeyPackages, carry Welcome / Commit over the channel
+log, open the media mesh) and the N-party audio path.
 
-## Why it's detached from the workspace
+## Notes
 
-Like `crates/dante-audio` and `apps/dante-desktop`, this crate has its own
-`[workspace]` and is **not** a member of the root workspace. OpenMLS's current
-release pulls a crypto stack (`hpke-rs` → `libcrux-sha3` 0.0.8, plus the
-`hax-lib` proc-macros) that trips four RUSTSEC advisories the root `cargo deny`
-gate rejects (RUSTSEC-2026-0207/0208/0212 in the SHA-3/SHAKE code, which our
-`…_SHA256_…` ciphersuite does not exercise, and RUSTSEC-2026-0173 for an
-unmaintained build-time proc-macro). Since nothing ships against it yet,
-keeping it out of the gate is the same call already made for the audio stack.
-
-When MLS is integrated for real, revisit with a fixed OpenMLS release or a
-documented `[advisories] ignore` list and fold this back into the workspace.
+- Requires Rust 1.91 (OpenMLS 0.9's floor); declared per-crate, the rest of the
+  workspace still builds on 1.85.
+- One transitive advisory is allow-listed in the repo `deny.toml`:
+  RUSTSEC-2026-0173 (`proc-macro-error2` unmaintained) — a build-time
+  proc-macro from the libcrux stack with no runtime exposure and no fix
+  available upstream.
+- Our newtype is `KeyPkg`, not `KeyPackage` (which collides with the OpenMLS
+  prelude glob). `MlsMessageIn::into_welcome()` is test-only in OpenMLS — use
+  `.extract()` + match `MlsMessageBodyIn::Welcome`.
 
 ## Test
 
 ```sh
-cd crates/dante-mls && cargo test
+cargo test -p dante-mls
 ```
 
 [OpenMLS]: https://openmls.tech

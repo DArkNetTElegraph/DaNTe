@@ -1,30 +1,20 @@
-# Detached from the root workspace on purpose (like crates/dante-audio and
-# apps/dante-desktop). OpenMLS's current release pulls a crypto stack
-# (hpke-rs -> libcrux-sha3 0.0.8 and the hax-lib proc-macros) that trips four
-# RUSTSEC advisories the root `cargo deny` gate rejects. None are wired into a
-# shipping binary yet — this crate is groundwork. When MLS is actually
-# integrated into dante-core, revisit with a fixed OpenMLS release or a
-# documented `[advisories] ignore` list, and fold this back into the workspace.
-#
-#   cd crates/dante-mls && cargo test
-[workspace]
-
 [package]
 name = "dante-mls"
-version = "0.0.1"
-edition = "2021"
-rust-version = "1.85"
-license = "AGPL-3.0-or-later"
-repository = "https://github.com/DArkNetTElegraph/DaNTe"
-authors = ["The DaNTe contributors"]
-description = "MLS (RFC 9420) groups for DaNTe channels and group calls — thin wrapper over OpenMLS."
+version.workspace = true
+edition.workspace = true
+# OpenMLS 0.9 requires Rust 1.91; the rest of the workspace still builds on 1.85.
+rust-version = "1.91"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MLS (RFC 9420) groups for DaNTe channels and group calls — a thin wrapper over OpenMLS."
 
 [dependencies]
-thiserror = "2"
-openmls = "0.7"
-openmls_rust_crypto = "0.4"
-openmls_traits = "0.4"
-openmls_basic_credential = "0.4"
+thiserror.workspace = true
+openmls = "0.9"
+openmls_rust_crypto = "0.6"
+openmls_traits = "0.6"
+openmls_basic_credential = "0.6"
 tls_codec = { version = "0.4.2", features = ["std", "derive"] }
 
 [lints.rust]

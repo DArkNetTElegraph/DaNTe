@@ -100,9 +100,8 @@ achievable with no project-run infrastructure.
   `dante serve`: a "broadcast when I'm typing" toggle, `GET`/`POST /api/typing`,
   and the coalescing rule (>3 concurrent → "several people are typing…").
 
-**Not built yet:** content-protecting per-server passwords (the `Argon2id` PSK
-into the channel MLS key schedule — now unblocked), private-channel access
-control beyond the secret `channel_id`. libp2p/DHT + multi-relay gossip
+**Not built yet:** private-channel access control beyond the secret
+`channel_id` + password wrapper. libp2p/DHT + multi-relay gossip
 (Phase 3 deferred); screen share + an SFrame layer over the group-call key
 (Phase 7); rich features — emoji/stickers/soundboards, bots, embeds (Phase 8);
 the Tauri desktop native layer.
@@ -339,10 +338,22 @@ infrastructure. Reached. ---**
   `SHA-256("dante/join-pw/v1" || server_root || password)` (`Engine::
   set_join_password`); an invite-link redemption (`ChannelControl::Redeem`)
   carries the password and the host checks it before admitting the joiner.
-  Direct invites bypass it. `POST /api/joinpw`, `/joinpw`. The
-  content-protection form (an `Argon2id` PSK woven into the channel MLS key
-  schedule so the password is needed to *decrypt*, not just to join) is now
-  unblocked by the MLS migration — still to wire in.
+  Direct invites bypass it. `POST /api/joinpw`, `/joinpw`.
+- **Password-protected channels** *(content protection done)*:
+  `create_channel(…, password)` derives `log_key = Argon2id(password; salt =
+  "dante/channel-content/v1" || server_root || channel_id)` and wraps **every**
+  relay-log frame (MLS app messages *and* Commits) in an outer
+  XChaCha20-Poly1305 layer (`channel::{derive_log_key, wrap, unwrap}`). So a
+  holder of just the 32-byte `channel_id` — the shared capability, visible to
+  the relay — cannot read the log without the password. The host ships
+  `log_key` to each joiner inside `ChannelControl::MlsWelcome` (E2E, and only
+  after the `Redeem` password check). `ChannelSession.log_key` /
+  `StoredChannel.log_key` persisted. `POST /api/channel {…, password}`; SPA
+  create-channel modal has a password field; CLI `/channel <root>
+  <name>[ | <password>]`. Not the same as weaving the PSK into the MLS key
+  schedule (a possible future hardening) — this is an outer wrapper, so the
+  key is static per `(channel, password)` and rotating the password means
+  re-distributing it.
 - **Optional per-server auto-kick** *(done)*: `HostedServer.auto_kick_ms` (opt-in, off by default; `Engine::set_auto_kick`). `Engine::sweep_inactive_members` — run periodically by the client — removes any channel member whose ledger identity has had no announce / liveness-proof / rotation within the window (`Ledger::last_activity`), driving the same `remove_from_channel` rekey. Inactivity is measured against **ledger activity**, not chattiness, so a member active elsewhere in DaNTe is safe. `serve` sweeps every 120 s; `POST /api/autokick {server,days}`; CLI `/autokick <root> <days|off>`.
 
 ### Phase 7 — Voice & media  (post-MVP)

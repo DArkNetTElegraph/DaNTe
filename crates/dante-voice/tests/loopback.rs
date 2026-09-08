@@ -11,13 +11,16 @@ struct Outcome {
     connected: bool,
     ctl_open: bool,
     heard: Option<Vec<u8>>,
+    heard_audio: Option<Vec<u8>>,
 }
 
 /// Drive one side: relay its ICE to the peer, apply the peer's ICE, and once
-/// the control channel is open keep sending `probe` until it hears the peer's.
+/// the control channel is open keep sending `probe` (ctl) and `audio_probe`
+/// (an Opus-frame-shaped payload on the media track) until it has heard both.
 async fn drive(
     mut call: Call,
     probe: &'static [u8],
+    audio_probe: &'static [u8],
     to_peer: mpsc::UnboundedSender<String>,
     mut from_peer: mpsc::UnboundedReceiver<String>,
     done: mpsc::UnboundedSender<Outcome>,
@@ -25,18 +28,20 @@ async fn drive(
     let mut connected = false;
     let mut ctl_open = false;
     let mut heard: Option<Vec<u8>> = None;
+    let mut heard_audio: Option<Vec<u8>> = None;
     let deadline = tokio::time::sleep(Duration::from_secs(25));
     tokio::pin!(deadline);
-    let mut resend = tokio::time::interval(Duration::from_millis(250));
+    let mut resend = tokio::time::interval(Duration::from_millis(120));
 
     loop {
-        if ctl_open && heard.is_some() {
+        if ctl_open && heard.is_some() && heard_audio.is_some() {
             break;
         }
         tokio::select! {
             _ = &mut deadline => break,
-            _ = resend.tick(), if ctl_open && heard.is_none() => {
-                let _ = call.send_ctl(probe).await;
+            _ = resend.tick(), if connected => {
+                if ctl_open && heard.is_none() { let _ = call.send_ctl(probe).await; }
+                if heard_audio.is_none() { let _ = call.push_audio(audio_probe, 20).await; }
             }
             ev = call.next_event() => match ev {
                 Some(CallEvent::LocalIce(c)) => { let _ = to_peer.send(c); }
@@ -45,6 +50,7 @@ async fn drive(
                 Some(CallEvent::State(_)) => {}
                 Some(CallEvent::CtlOpen) => { ctl_open = true; }
                 Some(CallEvent::Ctl(b)) => { heard = Some(b); }
+                Some(CallEvent::RemoteAudio(b)) => { heard_audio = Some(b); }
                 None => break,
             },
             Some(cand) = from_peer.recv() => { let _ = call.add_ice(&cand).await; }
@@ -54,11 +60,12 @@ async fn drive(
         connected,
         ctl_open,
         heard,
+        heard_audio,
     });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_calls_connect_and_exchange_control_bytes() {
+async fn two_calls_connect_and_exchange_control_and_audio() {
     let (a_ice_tx, a_ice_rx) = mpsc::unbounded_channel::<String>();
     let (b_ice_tx, b_ice_rx) = mpsc::unbounded_channel::<String>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Outcome>();
@@ -70,11 +77,19 @@ async fn two_calls_connect_and_exchange_control_bytes() {
     tokio::spawn(drive(
         caller,
         b"caller",
+        b"opus-from-caller",
         b_ice_tx,
         a_ice_rx,
         done_tx.clone(),
     ));
-    tokio::spawn(drive(callee, b"callee", a_ice_tx, b_ice_rx, done_tx));
+    tokio::spawn(drive(
+        callee,
+        b"callee",
+        b"opus-from-callee",
+        a_ice_tx,
+        b_ice_rx,
+        done_tx,
+    ));
 
     let mut outcomes = Vec::new();
     for _ in 0..2 {
@@ -102,4 +117,19 @@ async fn two_calls_connect_and_exchange_control_bytes() {
         heard, want,
         "each side received the other's control-channel probe"
     );
+
+    let audio: Vec<_> = outcomes
+        .iter()
+        .filter_map(|o| o.heard_audio.clone())
+        .collect();
+    assert_eq!(
+        audio.len(),
+        2,
+        "each side received an audio-track RTP payload"
+    );
+    let mut aw: Vec<Vec<u8>> = vec![b"opus-from-caller".to_vec(), b"opus-from-callee".to_vec()];
+    aw.sort();
+    let mut ag = audio.clone();
+    ag.sort();
+    assert_eq!(ag, aw, "the audio payloads round-trip through SRTP intact");
 }

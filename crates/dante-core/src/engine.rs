@@ -260,6 +260,8 @@ pub struct Engine {
     ice_servers: Vec<IceServer>,
     /// Active 1:1 calls, keyed by peer `IdentityId` bytes. Ephemeral.
     calls: HashMap<[u8; 32], Call>,
+    /// Opus frames received on each call's audio track, awaiting a decoder.
+    inbound_audio: HashMap<[u8; 32], std::collections::VecDeque<Vec<u8>>>,
     /// Received call offers awaiting an accept/decline, `peer -> offer SDP`.
     pending_call_offers: HashMap<[u8; 32], String>,
     /// Last-seen connection state per active call.
@@ -324,6 +326,7 @@ impl Engine {
             blocked: HashSet::new(),
             ice_servers: Vec::new(),
             calls: HashMap::new(),
+            inbound_audio: HashMap::new(),
             pending_call_offers: HashMap::new(),
             call_states: HashMap::new(),
             relay_addrs,
@@ -779,6 +782,7 @@ impl Engine {
     pub async fn hangup(&mut self, peer_id: &[u8; 32], now_ms: u64) -> Result<(), CoreError> {
         self.pending_call_offers.remove(peer_id);
         self.call_states.remove(peer_id);
+        self.inbound_audio.remove(peer_id);
         if let Some(call) = self.calls.remove(peer_id) {
             call.close().await;
         }
@@ -800,6 +804,13 @@ impl Engine {
                     CallEvent::State(state) => {
                         self.call_states.insert(peer, state);
                         updates.push(CallUpdate { peer, state });
+                    }
+                    CallEvent::RemoteAudio(frame) => {
+                        let q = self.inbound_audio.entry(peer).or_default();
+                        q.push_back(frame);
+                        while q.len() > 200 {
+                            q.pop_front();
+                        }
                     }
                     CallEvent::CtlOpen | CallEvent::Ctl(_) => {}
                 }
@@ -832,6 +843,31 @@ impl Engine {
     /// Whether a call with `peer_id` is active (connecting or connected).
     pub fn in_call(&self, peer_id: &[u8; 32]) -> bool {
         self.calls.contains_key(peer_id)
+    }
+
+    /// Send one Opus frame (`ms` = its duration, e.g. 20) on the call's audio
+    /// track. A capture layer (cpal + Opus, `dante-audio`) drives this.
+    pub async fn send_call_audio(
+        &self,
+        peer_id: &[u8; 32],
+        opus: &[u8],
+        ms: u32,
+    ) -> Result<(), CoreError> {
+        let call = self
+            .calls
+            .get(peer_id)
+            .ok_or(CoreError::Voice("no active call".into()))?;
+        call.push_audio(opus, ms).await.map_err(voice_err)
+    }
+
+    /// Drain the Opus frames received on `peer_id`'s audio track since the last
+    /// call (collected by [`Engine::poll_calls`]). Feed them to a decoder +
+    /// speaker.
+    pub fn take_call_audio(&mut self, peer_id: &[u8; 32]) -> Vec<Vec<u8>> {
+        self.inbound_audio
+            .get_mut(peer_id)
+            .map(|q| q.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// Whether `peer_id` is verified **and** still on the key that was verified.
@@ -2566,6 +2602,7 @@ impl Engine {
                     let id = idk_to_id(&from);
                     self.pending_call_offers.remove(&id);
                     self.call_states.remove(&id);
+                    self.inbound_audio.remove(&id);
                     if let Some(call) = self.calls.remove(&id) {
                         call.close().await;
                     }

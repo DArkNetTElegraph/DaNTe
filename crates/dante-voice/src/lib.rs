@@ -15,15 +15,27 @@
 //! carries in-call state (mute/hold) and, in tests, a connectivity probe.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
+use rtc::media_stream::MediaStreamTrack;
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+};
+use rtc_media::Sample;
 use tokio::sync::{mpsc, Mutex};
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
+use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
+use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use webrtc::peer_connection::{
-    PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-    RTCIceCandidateInit, RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
-    RTCSessionDescription, SettingEngineBuilder,
+    MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+    RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceServer, RTCPeerConnectionIceEvent,
+    RTCPeerConnectionState, RTCSessionDescription, SettingEngineBuilder,
 };
+
+/// Opus in `register_default_codecs`: 48 kHz stereo, dynamic payload type 111.
+const OPUS_PT: u8 = 111;
+const AUDIO_SSRC: u32 = 0x5A_11_CE_01;
 
 /// A STUN or TURN server for ICE. `username` / `credential` are empty for STUN.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -97,6 +109,9 @@ pub enum CallEvent {
     CtlOpen,
     /// A message arrived on the control data channel.
     Ctl(Vec<u8>),
+    /// One Opus frame (the RTP payload) received from the peer's audio track.
+    /// Feed it to a decoder + speaker.
+    RemoteAudio(Vec<u8>),
 }
 
 type DcSlot = Arc<Mutex<Option<Arc<dyn DataChannel>>>>;
@@ -105,6 +120,7 @@ type DcSlot = Arc<Mutex<Option<Arc<dyn DataChannel>>>>;
 pub struct Call {
     pc: Arc<dyn PeerConnection>,
     dc: DcSlot,
+    audio: Option<Arc<TrackLocalStaticSample>>,
     events: mpsc::UnboundedReceiver<CallEvent>,
 }
 
@@ -141,6 +157,58 @@ impl PeerConnectionEventHandler for Handler {
         *self.dc.lock().await = Some(Arc::clone(&data_channel));
         pump_dc(data_channel, self.tx.clone());
     }
+
+    async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        pump_track(track, self.tx.clone());
+    }
+}
+
+/// Forward the peer's inbound audio-track RTP payloads as [`CallEvent::RemoteAudio`].
+fn pump_track(track: Arc<dyn TrackRemote>, tx: mpsc::UnboundedSender<CallEvent>) {
+    tokio::spawn(async move {
+        while let Some(ev) = track.poll().await {
+            match ev {
+                TrackRemoteEvent::OnRtpPacket(pkt) => {
+                    if tx
+                        .send(CallEvent::RemoteAudio(pkt.payload.to_vec()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                TrackRemoteEvent::OnEnded => break,
+                _ => {}
+            }
+        }
+    });
+}
+
+/// Build the local Opus audio track (48 kHz stereo, PT 111, fixed SSRC).
+fn opus_track() -> Result<Arc<TrackLocalStaticSample>, VoiceError> {
+    let codec = RTCRtpCodec {
+        mime_type: "audio/opus".to_owned(),
+        clock_rate: 48_000,
+        channels: 2,
+        sdp_fmtp_line: "minptime=10;useinbandfec=1".to_owned(),
+        rtcp_feedback: vec![],
+    };
+    let mst = MediaStreamTrack::new(
+        "dante".to_owned(),
+        "dante-audio".to_owned(),
+        "voice".to_owned(),
+        RtpCodecKind::Audio,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(AUDIO_SSRC),
+                ..Default::default()
+            },
+            codec,
+            ..Default::default()
+        }],
+    );
+    Ok(Arc::new(
+        TrackLocalStaticSample::new(Instant::now(), mst).map_err(VoiceError::from)?,
+    ))
 }
 
 /// Spawn a task that forwards inbound control-channel messages as [`CallEvent::Ctl`].
@@ -163,6 +231,7 @@ fn pump_dc(dc: Arc<dyn DataChannel>, tx: mpsc::UnboundedSender<CallEvent>) {
 type Built = (
     Arc<dyn PeerConnection>,
     DcSlot,
+    Arc<TrackLocalStaticSample>,
     mpsc::UnboundedSender<CallEvent>,
     mpsc::UnboundedReceiver<CallEvent>,
 );
@@ -189,9 +258,13 @@ async fn build_pc(ice: &[IceServer]) -> Result<Built, VoiceError> {
         .with_include_loopback_candidate(true)
         .build();
 
+    let mut media = MediaEngine::default();
+    media.register_default_codecs().map_err(VoiceError::from)?;
+
     let pc = PeerConnectionBuilder::<&str>::new()
         .with_configuration(config)
         .with_setting_engine(setting)
+        .with_media_engine(media)
         .with_handler(Arc::new(Handler {
             tx: tx.clone(),
             dc: Arc::clone(&dc),
@@ -199,8 +272,12 @@ async fn build_pc(ice: &[IceServer]) -> Result<Built, VoiceError> {
         .with_udp_addrs(vec!["0.0.0.0:0"])
         .build()
         .await?;
+    let pc: Arc<dyn PeerConnection> = Arc::new(pc);
 
-    Ok((Arc::new(pc), dc, tx, rx))
+    let audio = opus_track()?;
+    pc.add_track(audio.clone()).await?;
+
+    Ok((pc, dc, audio, tx, rx))
 }
 
 impl Call {
@@ -217,7 +294,7 @@ impl Call {
     /// Caller side: build the connection and the control channel using `ice`
     /// (STUN/TURN), return the call plus the SDP **offer** to hand to the peer.
     pub async fn offer_with(ice: &[IceServer]) -> Result<(Call, String), VoiceError> {
-        let (pc, dc, tx, events) = build_pc(ice).await?;
+        let (pc, dc, audio, tx, events) = build_pc(ice).await?;
 
         let channel = pc.create_data_channel("dante", None).await?;
         *dc.lock().await = Some(Arc::clone(&channel));
@@ -225,7 +302,15 @@ impl Call {
 
         let offer = pc.create_offer(None).await?;
         pc.set_local_description(offer.clone()).await?;
-        Ok((Call { pc, dc, events }, offer.sdp))
+        Ok((
+            Call {
+                pc,
+                dc,
+                audio: Some(audio),
+                events,
+            },
+            offer.sdp,
+        ))
     }
 
     /// Callee side: apply a received **offer** with `ice` servers, return the
@@ -235,12 +320,20 @@ impl Call {
         offer_sdp: &str,
         ice: &[IceServer],
     ) -> Result<(Call, String), VoiceError> {
-        let (pc, dc, _tx, events) = build_pc(ice).await?;
+        let (pc, dc, audio, _tx, events) = build_pc(ice).await?;
         pc.set_remote_description(RTCSessionDescription::offer(offer_sdp.to_owned())?)
             .await?;
         let answer = pc.create_answer(None).await?;
         pc.set_local_description(answer.clone()).await?;
-        Ok((Call { pc, dc, events }, answer.sdp))
+        Ok((
+            Call {
+                pc,
+                dc,
+                audio: Some(audio),
+                events,
+            },
+            answer.sdp,
+        ))
     }
 
     /// Caller side: apply the peer's **answer**.
@@ -263,6 +356,26 @@ impl Call {
             })
             .await?;
         Ok(())
+    }
+
+    /// Send one Opus frame (`ms` = its duration, e.g. 20) on the audio track.
+    /// No-op if the call has no audio track.
+    pub async fn push_audio(&self, opus: &[u8], ms: u32) -> Result<(), VoiceError> {
+        let Some(track) = &self.audio else {
+            return Ok(());
+        };
+        let sample = Sample {
+            data: Bytes::copy_from_slice(opus),
+            timestamp: Instant::now(),
+            duration: Duration::from_millis(u64::from(ms)),
+            packet_timestamp: 0,
+            prev_dropped_packets: 0,
+            prev_padding_packets: 0,
+        };
+        track
+            .write_sample(AUDIO_SSRC, OPUS_PT, &sample, &[])
+            .await
+            .map_err(VoiceError::from)
     }
 
     /// Send bytes on the reliable control channel (mute/hold state, probes).

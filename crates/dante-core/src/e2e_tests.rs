@@ -192,6 +192,27 @@ async fn a_one_to_one_call_connects_over_dm_signalling() {
     assert!(connected, "both ends reached CallState::Connected");
     assert!(alice.in_call(&bob_id) && bob.in_call(&alice_id));
 
+    // Audio rides the negotiated Opus track: Alice pushes a frame, Bob receives
+    // it through SRTP (the bytes are opaque to the transport).
+    let mut bob_heard_audio = false;
+    for _ in 0..40 {
+        alice
+            .send_call_audio(&bob_id, b"opus-frame-payload", 20)
+            .await
+            .unwrap();
+        bob.poll_calls(now).await.unwrap();
+        if bob
+            .take_call_audio(&alice_id)
+            .iter()
+            .any(|f| f == b"opus-frame-payload")
+        {
+            bob_heard_audio = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(bob_heard_audio, "Bob received Alice's audio frame");
+
     // Alice hangs up; Bob sees it and both tear down.
     alice.hangup(&bob_id, now).await.unwrap();
     let mut bob_saw_end = false;

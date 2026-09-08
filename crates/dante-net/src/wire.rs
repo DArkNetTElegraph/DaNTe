@@ -133,6 +133,9 @@ pub enum Response {
     IceConfig(Vec<IceCfg>),
     /// Reply to [`Request::GetKeyPackage`]: one MLS `KeyPackage`, or `None`.
     KeyPackage(Option<Vec<u8>>),
+    /// Reply to [`Request::PostToChannel`]: the relay-log `seq` assigned to the
+    /// message.
+    Posted(u64),
 }
 
 const REQ_PING: u8 = 0;
@@ -165,6 +168,7 @@ const RES_CHANNEL_LOG: u8 = 8;
 const RES_SIGNALS: u8 = 9;
 const RES_ICE: u8 = 10;
 const RES_KEYPKG: u8 = 11;
+const RES_POSTED: u8 = 12;
 
 fn write_ice_list(w: &mut Writer, list: &[IceCfg]) {
     w.u32(list.len() as u32);
@@ -450,6 +454,9 @@ impl Response {
                     }
                 }
             }
+            Response::Posted(seq) => {
+                w.u8(RES_POSTED).u64(*seq);
+            }
         }
         w.into_vec()
     }
@@ -496,6 +503,7 @@ impl Response {
             } else {
                 None
             }),
+            RES_POSTED => Response::Posted(r.u64()?),
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -574,6 +582,7 @@ mod tests {
         rt_res(Response::Signals(vec![vec![1, 2], vec![]]));
         rt_res(Response::KeyPackage(Some(vec![5, 6, 7])));
         rt_res(Response::KeyPackage(None));
+        rt_res(Response::Posted(4242));
         rt_res(Response::IceConfig(vec![
             IceCfg {
                 urls: vec!["stun:stun.example.org:3478".into()],

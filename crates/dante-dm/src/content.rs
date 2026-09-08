@@ -65,6 +65,20 @@ pub enum Content {
         /// The channel the group call belongs to.
         channel_id: [u8; 32],
     },
+    /// Replace the text of an earlier channel message (only its original
+    /// author's edit is honoured). Rides the channel log like a normal message.
+    Edit {
+        /// The relay-log `seq` of the message being edited.
+        target_seq: u64,
+        /// The new text.
+        text: String,
+    },
+    /// Withdraw an earlier channel message (only its original author's delete
+    /// is honoured).
+    Delete {
+        /// The relay-log `seq` of the message being deleted.
+        target_seq: u64,
+    },
 }
 
 impl Content {
@@ -112,6 +126,12 @@ impl Content {
             Content::GroupCallLeave { channel_id } => {
                 w.u8(12).fixed(channel_id);
             }
+            Content::Edit { target_seq, text } => {
+                w.u8(13).u64(*target_seq).string(text);
+            }
+            Content::Delete { target_seq } => {
+                w.u8(14).u64(*target_seq);
+            }
         }
         w.into_vec()
     }
@@ -143,6 +163,13 @@ impl Content {
             },
             12 => Content::GroupCallLeave {
                 channel_id: r.fixed::<32>()?,
+            },
+            13 => Content::Edit {
+                target_seq: r.u64()?,
+                text: r.string()?,
+            },
+            14 => Content::Delete {
+                target_seq: r.u64()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -218,6 +245,19 @@ mod tests {
             Content::GroupCallLeave {
                 channel_id: [5u8; 32],
             },
+        ] {
+            assert_eq!(Content::decode(&c.encode()).unwrap(), c);
+        }
+    }
+
+    #[test]
+    fn edit_delete_roundtrip() {
+        for c in [
+            Content::Edit {
+                target_seq: 77,
+                text: "fixed a typo".into(),
+            },
+            Content::Delete { target_seq: 42 },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }

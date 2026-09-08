@@ -637,6 +637,80 @@ async fn a_password_protected_channel_wraps_the_relay_log() {
 }
 
 #[tokio::test]
+async fn a_channel_message_can_be_edited_and_deleted_by_its_author() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    for _ in 0..6 {
+        for e in [&mut host, &mut alice] {
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
+        }
+    }
+
+    // Host posts and learns the message's relay-log seq.
+    let seq = host.send_channel(&chan, "helo wrold", now).await.unwrap();
+    assert!(seq > 0);
+    assert_eq!(
+        alice
+            .poll_channels(now)
+            .await
+            .unwrap()
+            .first()
+            .map(|m| m.text.clone()),
+        Some("helo wrold".into())
+    );
+
+    // Host edits it; Alice sees the correction.
+    host.edit_channel_message(&chan, seq, "hello world", now)
+        .await
+        .unwrap();
+    alice.poll_channels(now).await.unwrap();
+    let edits = alice.take_edits();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].target_seq, seq);
+    assert_eq!(edits[0].text.as_deref(), Some("hello world"));
+    assert!(!edits[0].deleted);
+
+    // Only the author may edit — Alice cannot.
+    assert!(alice
+        .edit_channel_message(&chan, seq, "haha", now)
+        .await
+        .is_err());
+
+    // Host deletes it; Alice sees the deletion.
+    host.delete_channel_message(&chan, seq, now).await.unwrap();
+    alice.poll_channels(now).await.unwrap();
+    let edits = alice.take_edits();
+    assert_eq!(edits.len(), 1);
+    assert!(edits[0].deleted);
+
+    // A later edit of a deleted message is ignored.
+    assert!(host
+        .edit_channel_message(&chan, seq, "back!", now)
+        .await
+        .is_err());
+
+    // The snapshot reflects the final state (deleted).
+    let snap = host.edit_snapshot();
+    assert_eq!(snap.len(), 1);
+    assert!(snap[0].deleted && snap[0].target_seq == seq);
+}
+
+#[tokio::test]
 async fn three_channel_members_all_key_each_other() {
     let now = now_ms();
     let relay = spawn_relay().await;

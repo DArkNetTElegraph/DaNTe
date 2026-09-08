@@ -76,6 +76,13 @@ enum Cmd {
         password: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Edit (or, with empty text, delete) one of our channel messages.
+    EditMsg {
+        channel: String,
+        seq: u64,
+        text: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     Invite {
         channel: String,
         peer: String,
@@ -287,15 +294,28 @@ enum Item {
         channel_name: String,
         from: String,
         text: String,
-        /// The relay-log seq — what reactions point at; `0` for our own echo.
+        /// The relay-log seq — what reactions / edits point at.
         ref_seq: u64,
+    },
+    /// An edit or delete of an earlier channel message, folded by the SPA.
+    ChannelEdit {
+        seq: u64,
+        channel: String,
+        /// The relay-log seq of the message being changed.
+        ref_seq: u64,
+        /// New text, or empty when `deleted`.
+        text: String,
+        deleted: bool,
     },
 }
 
 impl Item {
     fn seq(&self) -> u64 {
         match self {
-            Item::Message { seq, .. } | Item::File { seq, .. } | Item::Channel { seq, .. } => *seq,
+            Item::Message { seq, .. }
+            | Item::File { seq, .. }
+            | Item::Channel { seq, .. }
+            | Item::ChannelEdit { seq, .. } => *seq,
         }
     }
 }
@@ -601,6 +621,20 @@ async fn engine_task(
         }
     }
 
+    // Seed the SPA with any edits/deletes made before this restart.
+    {
+        let mut inbox = engine_shared.inbox.lock().await;
+        for e in engine.edit_snapshot() {
+            inbox.push_back(Item::ChannelEdit {
+                seq: engine_shared.next(),
+                channel: id_b32(&e.channel_id),
+                ref_seq: e.target_seq,
+                text: e.text.unwrap_or_default(),
+                deleted: e.deleted,
+            });
+        }
+    }
+
     eprintln!("announcing to the relay ...");
     if let Err(e) = async {
         engine.announce_if_stale("", now_ms()).await?;
@@ -681,6 +715,23 @@ async fn engine_task(
                             if r.removed { set.remove(&who); } else { set.insert(who); }
                         }
                         map.retain(|_, e| { e.retain(|_, s| !s.is_empty()); !e.is_empty() });
+                    }
+                }
+
+                {
+                    let edits = engine.take_edits();
+                    if !edits.is_empty() {
+                        let mut inbox = engine_shared.inbox.lock().await;
+                        for e in edits {
+                            inbox.push_back(Item::ChannelEdit {
+                                seq: engine_shared.next(),
+                                channel: id_b32(&e.channel_id),
+                                ref_seq: e.target_seq,
+                                text: e.text.unwrap_or_default(),
+                                deleted: e.deleted,
+                            });
+                            while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                        }
                     }
                 }
 
@@ -868,12 +919,15 @@ async fn refresh_group_calls(engine: &Engine, shared: &Shared) {
 async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
     match cmd {
         Cmd::Send { to, text, reply } => {
+            let mut channel_seq: Option<u64> = None;
             let r = match parse_target(&to) {
-                Ok((true, id)) => engine
-                    .send_channel(&id, &text, now_ms())
-                    .await
-                    .map(|_| "ok".into())
-                    .map_err(|e| e.to_string()),
+                Ok((true, id)) => match engine.send_channel(&id, &text, now_ms()).await {
+                    Ok(seq) => {
+                        channel_seq = Some(seq);
+                        Ok("ok".into())
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
                 Ok((false, id)) => engine
                     .send_dm(&id, &text, now_ms())
                     .await
@@ -890,11 +944,33 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                             channel_name: String::new(),
                             from: "you".into(),
                             text,
-                            ref_seq: 0,
+                            ref_seq: channel_seq.unwrap_or(0),
                         });
                     }
                 }
             }
+            let _ = reply.send(r);
+        }
+        Cmd::EditMsg {
+            channel,
+            seq,
+            text,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel).to_string();
+            let r = match parse_fingerprint(&channel) {
+                Ok(cid) => {
+                    let res = if text.is_empty() {
+                        engine.delete_channel_message(&cid, seq, now_ms()).await
+                    } else {
+                        engine
+                            .edit_channel_message(&cid, seq, &text, now_ms())
+                            .await
+                    };
+                    res.map(|_| "ok".into()).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
             let _ = reply.send(r);
         }
         Cmd::CreateServer { name, reply } => {
@@ -1645,6 +1721,27 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             };
             dispatch(&mut stream, &shared, |reply| Cmd::Send {
                 to: r.to,
+                text: r.text,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/edit") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                seq: u64,
+                /// New text; empty deletes the message.
+                #[serde(default)]
+                text: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::EditMsg {
+                channel: r.channel,
+                seq: r.seq,
                 text: r.text,
                 reply,
             })

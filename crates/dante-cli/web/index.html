@@ -254,6 +254,14 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .msg-group .fp { font: 11px/1 ui-monospace, monospace; color: var(--text-faint); }
 .msg-line { color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
 .msg-line.file { color: var(--link); }
+.msg-line.deleted { color: var(--text-faint); font-style: italic; }
+.edited-tag { color: var(--text-faint); font-size: 11px; }
+.msg-group { position: relative; }
+.msg-actions { position: absolute; top: 2px; right: 6px; display: none; gap: 2px; }
+.msg-group:hover .msg-actions { display: flex; }
+.msg-actions button { border: 1px solid var(--divider); background: var(--bg-pane); color: var(--text-muted);
+  border-radius: 5px; padding: 1px 5px; font-size: 11px; cursor: pointer; }
+.msg-actions button:hover { color: var(--text); border-color: var(--cornflower-blue); }
 .sys { color: var(--text-faint); font-style: italic; padding: 4px 0; font-size: 13px; }
 .reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .react-chip { border: 1px solid var(--divider); background: var(--bg-input); color: var(--text-muted); border-radius: 10px; padding: 1px 7px; font-size: 12px; cursor: pointer; line-height: 1.5; }
@@ -958,9 +966,20 @@ function renderChat() {
     }
     const g = groupShell(m, m.from === lastAuthor);
     const line = el("div", "msg-line");
-    if (target.startsWith("#")) line.innerHTML = richText(m.text); else line.textContent = m.text;
+    if (m._deleted) {
+      line.className = "msg-line deleted";
+      line.textContent = "(message deleted)";
+    } else if (target.startsWith("#")) {
+      line.innerHTML = richText(m.text);
+      if (m._edited) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
+    } else {
+      line.textContent = m.text;
+    }
     g.body.appendChild(line);
-    if (target.startsWith("#") && m.ref_seq) renderReactions(g.body, target, m.ref_seq);
+    if (target.startsWith("#") && m.ref_seq && !m._deleted) {
+      addMsgActions(g.body, target, m);
+      renderReactions(g.body, target, m.ref_seq);
+    }
     log.appendChild(g.node);
     lastAuthor = m.from;
   }
@@ -970,6 +989,27 @@ function renderChat() {
 }
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
+
+// Edit / delete affordances on your own channel messages.
+function addMsgActions(body, channelTarget, m) {
+  if (m.from !== "you" || !m.ref_seq) return;
+  const bar = el("div", "msg-actions");
+  const edit = el("button", null, "✎"); edit.title = "Edit";
+  edit.onclick = async () => {
+    const t = await ui.ask("Edit message", m.text);
+    if (t == null || t === m.text) return;
+    try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: t }); }
+    catch (e) { ui.say("Edit failed: " + e.message); }
+  };
+  const del = el("button", null, "🗑"); del.title = "Delete";
+  del.onclick = async () => {
+    if (!await ui.confirm("Delete this message for everyone?")) return;
+    try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: "" }); }
+    catch (e) { ui.say("Delete failed: " + e.message); }
+  };
+  bar.append(edit, del);
+  body.appendChild(bar);
+}
 
 function renderReactions(body, channelTarget, refSeq) {
   const row = el("div", "reacts");
@@ -1466,6 +1506,16 @@ function ingest(items) {
   for (const it of items) {
     store.seen = Math.max(store.seen, it.seq);
     it._at = Date.now();
+    if (it.kind === "channeledit") {
+      // Fold an edit/delete into the channel message it points at.
+      const tgt = "#" + it.channel;
+      const msg = store.messages.find(m => m.kind === "channel" && m._target === tgt && m.ref_seq === it.ref_seq);
+      if (msg) {
+        if (it.deleted) { msg._deleted = true; msg.text = ""; }
+        else { msg.text = it.text; msg._edited = true; }
+      }
+      continue;
+    }
     if (it.kind === "channel") {
       it._target = "#" + it.channel;
       if (!it.from) it.from = "you";

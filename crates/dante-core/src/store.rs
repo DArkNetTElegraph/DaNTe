@@ -64,6 +64,21 @@ pub struct ChannelHistoryEntry {
     pub text: String,
 }
 
+/// A persisted channel-message edit / delete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredEdit {
+    /// The channel the message is in.
+    pub channel_id: [u8; 32],
+    /// The message's relay-log seq.
+    pub seq: u64,
+    /// The original author (only their edit / delete is honoured).
+    pub author: [u8; 32],
+    /// The edited text (empty when `deleted`).
+    pub text: String,
+    /// Whether the message was deleted.
+    pub deleted: bool,
+}
+
 /// A persisted channel membership.
 pub struct StoredChannel {
     /// Channel description.
@@ -123,6 +138,8 @@ pub struct PersistedState {
     pub contacts: Vec<([u8; 32], String, u64)>,
     /// Blocked identities (by `IdentityId` bytes).
     pub blocked: Vec<[u8; 32]>,
+    /// Standing channel message edits/deletes.
+    pub channel_edits: Vec<StoredEdit>,
     /// Processed-envelope tags (deduplication).
     pub seen_envelopes: Vec<[u8; 32]>,
     /// When we last announced / proved liveness.
@@ -308,6 +325,15 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     w.u32(s.blocked.len() as u32);
     for id in &s.blocked {
         w.fixed(id);
+    }
+
+    w.u32(s.channel_edits.len() as u32);
+    for e in &s.channel_edits {
+        w.fixed(&e.channel_id)
+            .u64(e.seq)
+            .fixed(&e.author)
+            .string(&e.text)
+            .bool(e.deleted);
     }
     w.into_vec()
 }
@@ -500,6 +526,21 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut channel_edits = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        channel_edits.reserve(n);
+        for _ in 0..n {
+            channel_edits.push(StoredEdit {
+                channel_id: r.fixed::<32>()?,
+                seq: r.u64()?,
+                author: r.fixed::<32>()?,
+                text: r.string()?,
+                deleted: r.bool()?,
+            });
+        }
+    }
+
     r.finish()?;
     Ok(PersistedState {
         prekeys,
@@ -517,6 +558,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         verified_peers,
         contacts,
         blocked,
+        channel_edits,
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
@@ -583,6 +625,22 @@ mod tests {
             verified_peers: vec![([3u8; 32], [4u8; 32])],
             contacts: vec![([5u8; 32], "alice".into(), 1_700_000_000_000)],
             blocked: vec![[2u8; 32], [9u8; 32]],
+            channel_edits: vec![
+                StoredEdit {
+                    channel_id: [7u8; 32],
+                    seq: 12,
+                    author: [6u8; 32],
+                    text: "fixed typo".into(),
+                    deleted: false,
+                },
+                StoredEdit {
+                    channel_id: [7u8; 32],
+                    seq: 15,
+                    author: [6u8; 32],
+                    text: String::new(),
+                    deleted: true,
+                },
+            ],
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
@@ -600,6 +658,7 @@ mod tests {
         assert_eq!(back.server_policies, state.server_policies);
         assert_eq!(back.server_join_pw, state.server_join_pw);
         assert_eq!(back.channel_reactions, state.channel_reactions);
+        assert_eq!(back.channel_edits, state.channel_edits);
         assert_eq!(back.verified_peers, state.verified_peers);
         assert_eq!(back.contacts, state.contacts);
         assert_eq!(back.blocked, state.blocked);
@@ -633,6 +692,7 @@ mod tests {
             verified_peers: vec![],
             contacts: vec![],
             blocked: vec![],
+            channel_edits: vec![],
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,

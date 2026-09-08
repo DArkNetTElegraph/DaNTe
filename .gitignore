@@ -26,3 +26,4 @@ Cargo.lock.orig
 .idea/
 .vscode/
 *.swp
+/.demo/

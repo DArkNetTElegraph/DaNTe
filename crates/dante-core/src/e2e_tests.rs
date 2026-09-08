@@ -110,6 +110,74 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
     assert!(bob.receive(now).await.unwrap().is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_one_to_one_call_connects_over_dm_signalling() {
+    use crate::CallState;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    // Alice rings Bob. The offer goes as a sealed-sender ratchet DM.
+    alice.start_call(&bob_id, now).await.unwrap();
+
+    // Pump both engines: receive_all carries offer/answer/ICE, poll_calls
+    // relays locally-gathered candidates back out.
+    let mut bob_saw_ring = false;
+    let mut connected = false;
+    for _ in 0..300 {
+        for it in bob.receive_all(now).await.unwrap() {
+            if matches!(it, crate::Inbound::IncomingCall { .. }) && !bob_saw_ring {
+                bob_saw_ring = true;
+                bob.accept_call(&alice_id, now).await.unwrap();
+            }
+        }
+        alice.receive_all(now).await.unwrap();
+        alice.poll_calls(now).await.unwrap();
+        bob.poll_calls(now).await.unwrap();
+
+        if alice.call_state(&bob_id) == Some(CallState::Connected)
+            && bob.call_state(&alice_id) == Some(CallState::Connected)
+        {
+            connected = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(bob_saw_ring, "Bob got the IncomingCall");
+    assert!(connected, "both ends reached CallState::Connected");
+    assert!(alice.in_call(&bob_id) && bob.in_call(&alice_id));
+
+    // Alice hangs up; Bob sees it and both tear down.
+    alice.hangup(&bob_id, now).await.unwrap();
+    let mut bob_saw_end = false;
+    for _ in 0..40 {
+        for it in bob.receive_all(now).await.unwrap() {
+            if matches!(it, crate::Inbound::CallEnded { .. }) {
+                bob_saw_end = true;
+            }
+        }
+        if bob_saw_end {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(bob_saw_end, "Bob saw the hang-up");
+    assert!(!alice.in_call(&bob_id) && !bob.in_call(&alice_id));
+}
+
 #[tokio::test]
 async fn a_revoked_identity_can_no_longer_be_messaged() {
     use dante_identity::RevokeReason;

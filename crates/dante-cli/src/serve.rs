@@ -636,11 +636,19 @@ async fn engine_task(
                                 last_msg_ms.insert(from.clone(), now);
                                 Item::File { seq, from, filename, size: data.len(), saved }
                             }
+                            Inbound::IncomingCall { from_idk } => {
+                                Item::Message { seq, from: short_fp(&from_idk), text: "\u{1f4de} incoming call".into() }
+                            }
+                            Inbound::CallEnded { from_idk } => {
+                                Item::Message { seq, from: short_fp(&from_idk), text: "\u{1f4de} call ended".into() }
+                            }
                         };
                         inbox.push_back(entry);
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }
                     }
                 }
+
+                let _ = engine.poll_calls(now).await;
 
                 if let Ok(events) = engine.poll_typing(now).await {
                     let mut typing = engine_shared.typing.lock().await;

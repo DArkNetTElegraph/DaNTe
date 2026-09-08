@@ -315,7 +315,24 @@ infrastructure. Reached. ---**
 - **Optional per-server auto-kick** *(done)*: `HostedServer.auto_kick_ms` (opt-in, off by default; `Engine::set_auto_kick`). `Engine::sweep_inactive_members` — run periodically by the client — removes any channel member whose ledger identity has had no announce / liveness-proof / rotation within the window (`Ledger::last_activity`), driving the same `remove_from_channel` rekey. Inactivity is measured against **ledger activity**, not chattiness, so a member active elsewhere in DaNTe is safe. `serve` sweeps every 120 s; `POST /api/autokick {server,days}`; CLI `/autokick <root> <days|off>`.
 
 ### Phase 7 — Voice & media  (post-MVP)
-- WebRTC (`webrtc-rs`), DTLS-SRTP. Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
+- **1:1 calls *(done — transport & signalling)*:** `crate/dante-voice` wraps
+  `webrtc` 0.21 (`PeerConnection` + a reliable `"dante"` control `DataChannel`,
+  DTLS-SRTP). `Call::offer()` / `answer(sdp)` / `set_answer` / `add_ice` /
+  `send_ctl` / `next_event` — signalling-agnostic (opaque strings). `dante-core`
+  carries the offer/answer/ICE as **sealed-sender ratchet DMs**
+  (`Content::CallOffer/CallAnswer/CallIce/CallEnd`, tags 6–9): the SDP holds the
+  DTLS fingerprint, so riding a sender-authenticated message is what makes the
+  media path E2E — a relay that cannot forge a ratchet DM cannot substitute its
+  own DTLS identity. `Engine::start_call` / `accept_call` / `hangup` /
+  `poll_calls` (relays locally-gathered ICE) / `call_state`; `Inbound::
+  IncomingCall` / `CallEnded`. `dante chat`: `/call` `/answer` `/hangup
+  <fp>`. e2e-tested: a call connects to `CallState::Connected` purely over the
+  DM path (loopback ICE, no STUN) and the hang-up propagates.
+- **Still to build:** OS audio capture/playback (cpal) + Opus encode/decode
+  pushed through a `TrackLocalStaticSample`; the `dante serve` / SPA call UI
+  (state + accept/hangup — no browser media path, the engine owns the pc);
+  STUN/TURN for peers behind NAT; screen share.
+- Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
 - SFU role in the server relay above ~5 participants; full mesh below.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.
   Sources: full display, single window, and "follow the active screen" (see `IDEAS.md`).

@@ -1,0 +1,23 @@
+[package]
+name = "dante-voice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "1:1 voice/media calls over DaNTe's E2E DM signalling (WebRTC / DTLS-SRTP)."
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+webrtc = "0.21.0-rc.2"
+bytes = "1"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"

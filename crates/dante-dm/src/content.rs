@@ -32,6 +32,17 @@ pub enum Content {
         /// True to withdraw a previously-added reaction.
         remove: bool,
     },
+    /// A 1:1 call SDP **offer** (the caller starts a call). Carries the DTLS
+    /// fingerprint, so riding the authenticated ratchet is what binds the media
+    /// transport to this identity.
+    CallOffer(String),
+    /// The SDP **answer** to a `CallOffer`.
+    CallAnswer(String),
+    /// A trickled ICE candidate for the in-progress call (empty = end of
+    /// gathering).
+    CallIce(String),
+    /// Hang up / decline the call.
+    CallEnd,
 }
 
 impl Content {
@@ -58,6 +69,18 @@ impl Content {
             } => {
                 w.u8(5).u64(*target_seq).string(emoji).bool(*remove);
             }
+            Content::CallOffer(s) => {
+                w.u8(6).string(s);
+            }
+            Content::CallAnswer(s) => {
+                w.u8(7).string(s);
+            }
+            Content::CallIce(s) => {
+                w.u8(8).string(s);
+            }
+            Content::CallEnd => {
+                w.u8(9);
+            }
         }
         w.into_vec()
     }
@@ -75,6 +98,10 @@ impl Content {
                 emoji: r.string()?,
                 remove: r.bool()?,
             },
+            6 => Content::CallOffer(r.string()?),
+            7 => Content::CallAnswer(r.string()?),
+            8 => Content::CallIce(r.string()?),
+            9 => Content::CallEnd,
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "dm::Content",
@@ -124,7 +151,19 @@ mod tests {
     }
 
     #[test]
+    fn call_signalling_roundtrips() {
+        for c in [
+            Content::CallOffer("v=0\r\n...".into()),
+            Content::CallAnswer("v=0\r\n...".into()),
+            Content::CallIce("candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".into()),
+            Content::CallEnd,
+        ] {
+            assert_eq!(Content::decode(&c.encode()).unwrap(), c);
+        }
+    }
+
+    #[test]
     fn bad_tag_rejected() {
-        assert!(Content::decode(&[9]).is_err());
+        assert!(Content::decode(&[20]).is_err());
     }
 }

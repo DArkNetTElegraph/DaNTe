@@ -96,6 +96,36 @@ pub async fn get_prekeys(
     }
 }
 
+/// Publish one MLS `KeyPackage` (opaque bytes) for `identity` so other members
+/// can add it to a channel's MLS group or a group call.
+pub async fn publish_key_package(
+    client: &mut Client,
+    identity: &[u8; 32],
+    key_package: &[u8],
+) -> Result<(), NetError> {
+    match client
+        .request(&Request::PublishKeyPackage {
+            identity: *identity,
+            key_package: key_package.to_vec(),
+        })
+        .await?
+    {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("PublishKeyPackage: {other:?}"))),
+    }
+}
+
+/// Take one published MLS `KeyPackage` for `identity`, if the relay has one.
+pub async fn get_key_package(
+    client: &mut Client,
+    identity: &[u8; 32],
+) -> Result<Option<Vec<u8>>, NetError> {
+    match client.request(&Request::GetKeyPackage(*identity)).await? {
+        Response::KeyPackage(kp) => Ok(kp),
+        _ => Err(NetError::UnexpectedResponse("GetKeyPackage")),
+    }
+}
+
 /// Store a ciphertext blob (a file chunk) at the relay. Idempotent.
 pub async fn put_blob(client: &mut Client, bytes: &[u8]) -> Result<(), NetError> {
     match client.request(&Request::PutBlob(bytes.to_vec())).await? {

@@ -364,10 +364,17 @@ infrastructure. Reached. ---**
   loop (`Capture::try_frame` → `encode` → `send_call_audio`; `take_call_audio`
   → `decode` → `Playback::play`). Its own `[workspace]` — `opus`/`cpal` link
   system libs the CI container lacks; the Opus round-trip test runs on a real
-  host. The desktop client wires this in; `dante serve` has no browser media
-  path so its call UI stays state-only.
-- **Still to build:** wiring `dante-audio` into a client (Tauri); screen
-  share; group calls (MLS-derived media keys).
+  host. `dante serve` has no browser media path so its call UI stays
+  state-only.
+- **Desktop mic/speaker *(done)*:** `apps/dante-desktop/src/audio.rs` — a
+  dedicated thread (`cpal::Stream` is `!Send`) that, whenever a call is
+  `connected`, captures + Opus-encodes with `dante-audio` and exchanges frames
+  with the co-hosted `dante-cli` service over `POST` / `GET /api/call/audio`
+  (the `POST` grew a `frames_hex: [..]` batch form so a burst flushes in one
+  round-trip). The mic opens only for the duration of a call. `dante-audio` is
+  a dependency of the (detached) desktop crate, never of `dante-cli`, so the
+  CI gate never links libopus/cpal.
+- **Still to build:** screen share; group calls (MLS-derived media keys).
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
 - SFU role in the server relay above ~5 participants; full mesh below.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

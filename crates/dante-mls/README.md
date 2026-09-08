@@ -22,9 +22,13 @@ Groundwork, not yet wired into `dante-core`. Covered:
 - `Member::add` / `remove` — membership changes, epoch advances
 - `Member::encrypt` / `process` — application messages + inbound commits
 - `Member::call_key` — the group-call media key for the current epoch
+- `Member::export` / `import` — serialize the whole member (OpenMLS store +
+  signature key + reload handles) to a byte blob DaNTe stores in its own
+  encrypted local state, so a call / channel survives a restart
 
-Group state currently lives in an in-memory OpenMLS store; serializing it for
-restart-persistence is a prerequisite for the `dante-core` integration.
+Remaining before the `dante-core` integration: a `dante-core` group-call state
+machine (fetch members' KeyPackages, carry Welcome/Commit over the channel
+log, open the mesh), and the N-party media path.
 
 ## Why it's detached from the workspace
 

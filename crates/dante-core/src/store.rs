@@ -74,6 +74,8 @@ pub struct StoredChannel {
     pub roster: Vec<[u8; 32]>,
     /// Last consumed channel-log sequence number.
     pub last_seq: u64,
+    /// Outer log-wrapper key for a password-protected channel.
+    pub log_key: Option<[u8; 32]>,
 }
 
 /// A persisted hosted-server record (holds the root secret).
@@ -213,6 +215,14 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
         for m in &c.roster {
             w.fixed(m);
         }
+        match &c.log_key {
+            Some(k) => {
+                w.bool(true).fixed(k);
+            }
+            None => {
+                w.bool(false);
+            }
+        }
     }
 
     w.u32(s.hosted.len() as u32);
@@ -327,11 +337,17 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         for _ in 0..rc {
             roster.push(r.fixed::<32>()?);
         }
+        let log_key = if r.bool()? {
+            Some(r.fixed::<32>()?)
+        } else {
+            None
+        };
         channels.push(StoredChannel {
             info,
             mls,
             roster,
             last_seq,
+            log_key,
         });
     }
 

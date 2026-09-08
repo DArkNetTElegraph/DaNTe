@@ -617,17 +617,29 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 None => println!("usage: /server <name>"),
             },
             "channel" => match (a, b) {
-                (Some(sfp), Some(name)) => match parse_fingerprint(sfp) {
-                    Ok(root) => match engine.create_channel(&root, name, true) {
-                        Ok(id) => println!(
-                            "channel \"{name}\" -> #{}",
-                            IdentityId::from_bytes(id).to_base32()
-                        ),
-                        Err(e) => println!("create failed: {e}"),
-                    },
+                (Some(sfp), Some(spec)) => match parse_fingerprint(sfp) {
+                    Ok(root) => {
+                        // `<name>` or `<name> | <password>` (content-protects the log).
+                        let (name, pw) = match spec.split_once(" | ") {
+                            Some((n, p)) => (n.trim(), Some(p.trim())),
+                            None => (spec, None),
+                        };
+                        match engine.create_channel(&root, name, true, pw) {
+                            Ok(id) => println!(
+                                "channel \"{name}\"{} -> #{}",
+                                if pw.is_some() {
+                                    " (password-protected)"
+                                } else {
+                                    ""
+                                },
+                                IdentityId::from_bytes(id).to_base32()
+                            ),
+                            Err(e) => println!("create failed: {e}"),
+                        }
+                    }
                     Err(e) => println!("bad server root: {e}"),
                 },
-                _ => println!("usage: /channel <server-root> <name>"),
+                _ => println!("usage: /channel <server-root> <name>[ | <password>]"),
             },
             "invite" => match (a, b) {
                 (Some(chan), Some(fp)) => {

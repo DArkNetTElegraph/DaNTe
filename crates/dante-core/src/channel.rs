@@ -7,7 +7,15 @@
 //! interleaved with the encrypted messages (both opaque to the relay). A new
 //! member receives an MLS **Welcome** over an authenticated DM
 //! ([`ChannelControl::MlsWelcome`]) and then catches up from the log.
+//!
+//! A **password-protected** channel additionally wraps every log frame in an
+//! outer XChaCha20-Poly1305 layer keyed by `Argon2id(password)` (see
+//! [`derive_log_key`] / [`wrap`] / [`unwrap`]), so possession of the 32-byte
+//! `channel_id` alone does not grant read access to the relay log — the
+//! password-derived key is also required. MLS still handles member removal
+//! underneath.
 
+use dante_crypto::{aead, pwhash, random_array};
 use dante_proto::enc::{Reader, WireError, Writer};
 
 /// Public description of a channel a client belongs to.
@@ -76,6 +84,10 @@ pub enum ChannelControl {
         /// The channel-log sequence the joiner should start reading from —
         /// the host's view at the time it committed the add.
         since_seq: u64,
+        /// The outer log key for a password-protected channel, or all-zeros
+        /// for an unprotected one (the joiner already proved knowledge of the
+        /// password via `Redeem`, or was directly invited by the host).
+        log_key: [u8; 32],
     },
     /// A joiner presents a signed invite token (and, if the server is
     /// password-gated, the password) to the host to be added.
@@ -118,10 +130,11 @@ impl ChannelControl {
                 info,
                 welcome,
                 since_seq,
+                log_key,
             } => {
                 w.u8(1);
                 info.write(&mut w);
-                w.bytes(welcome).u64(*since_seq);
+                w.bytes(welcome).u64(*since_seq).fixed(log_key);
             }
             ChannelControl::Redeem { token, pw } => {
                 w.u8(3).bytes(token).string(pw);
@@ -150,10 +163,12 @@ impl ChannelControl {
                 let info = ChannelInfo::read(&mut r)?;
                 let welcome = r.bytes()?.to_vec();
                 let since_seq = r.u64()?;
+                let log_key = r.fixed::<32>()?;
                 ChannelControl::MlsWelcome {
                     info,
                     welcome,
                     since_seq,
+                    log_key,
                 }
             }
             3 => ChannelControl::Redeem {
@@ -232,6 +247,46 @@ pub(crate) fn unframe(blob: &[u8]) -> Option<(u8, &[u8])> {
     blob.split_first().map(|(t, rest)| (*t, rest))
 }
 
+const LOG_KEY_DOMAIN: &[u8] = b"dante/channel-content/v1";
+
+/// Derive a channel's outer log key from its password. Deterministic in
+/// `(server_root, channel_id, password)` so the host can regenerate it. Runs
+/// Argon2id at keystore strength — the host does this once per channel.
+pub(crate) fn derive_log_key(
+    server_root: &[u8; 32],
+    channel_id: &[u8; 32],
+    password: &str,
+) -> [u8; 32] {
+    let mut salt = Vec::with_capacity(LOG_KEY_DOMAIN.len() + 64);
+    salt.extend_from_slice(LOG_KEY_DOMAIN);
+    salt.extend_from_slice(server_root);
+    salt.extend_from_slice(channel_id);
+    let mut key = [0u8; 32];
+    pwhash::argon2id(password.as_bytes(), &salt, pwhash::KEYSTORE, &mut key)
+        .expect("argon2id with 32-byte output and >=8-byte salt");
+    key
+}
+
+/// Outer-wrap a channel-log frame under `log_key`: `nonce(24) || ct`.
+pub(crate) fn wrap(log_key: &[u8; 32], channel_id: &[u8; 32], frame: &[u8]) -> Vec<u8> {
+    let nonce = random_array::<24>();
+    let ct = aead::xchacha_seal(log_key, &nonce, frame, channel_id);
+    let mut out = Vec::with_capacity(24 + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
+/// Reverse [`wrap`]. `None` if the blob is malformed or the key is wrong.
+pub(crate) fn unwrap(log_key: &[u8; 32], channel_id: &[u8; 32], blob: &[u8]) -> Option<Vec<u8>> {
+    if blob.len() < 24 {
+        return None;
+    }
+    let (nonce, ct) = blob.split_at(24);
+    let nonce: [u8; 24] = nonce.try_into().ok()?;
+    aead::xchacha_open(log_key, &nonce, ct, channel_id).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +314,7 @@ mod tests {
                 info: info(),
                 welcome: vec![9, 9, 9],
                 since_seq: 12,
+                log_key: [7u8; 32],
             },
             ChannelControl::Redeem {
                 token: vec![1, 2, 3],
@@ -286,5 +342,22 @@ mod tests {
         let f = frame(FRAME_COMMIT, &[1, 2, 3]);
         assert_eq!(unframe(&f), Some((FRAME_COMMIT, &[1u8, 2, 3][..])));
         assert_eq!(unframe(&[]), None);
+    }
+
+    #[test]
+    fn log_wrap_roundtrip_and_key_binding() {
+        let sr = [3u8; 32];
+        let cid = [4u8; 32];
+        let k = derive_log_key(&sr, &cid, "hunter2");
+        assert_eq!(k, derive_log_key(&sr, &cid, "hunter2"), "deterministic");
+        assert_ne!(k, derive_log_key(&sr, &cid, "hunter3"));
+
+        let msg = frame(FRAME_APP, b"secret channel message");
+        let blob = wrap(&k, &cid, &msg);
+        assert_eq!(unwrap(&k, &cid, &blob).as_deref(), Some(&msg[..]));
+        // Wrong key or wrong channel id -> no read.
+        assert_eq!(unwrap(&[0u8; 32], &cid, &blob), None);
+        assert_eq!(unwrap(&k, &[9u8; 32], &blob), None);
+        assert_eq!(unwrap(&k, &cid, &[0u8; 4]), None);
     }
 }

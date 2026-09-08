@@ -146,6 +146,29 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .chan-row.blocked .name { text-decoration: line-through; opacity: .55; }
 #btn-contact.on { color: var(--orange); }
 #btn-block.on { color: var(--blazing-flame); }
+#btn-call.active { color: var(--cornflower-blue); }
+
+#callbar { display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+  background: var(--bg-active); border-bottom: 1px solid var(--divider);
+  font-size: 13px; color: var(--text); }
+#callbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cornflower-blue);
+  animation: pulse 1.2s ease-in-out infinite; }
+#callbar.connected .dot { background: #3fbf6f; animation: none; }
+#callbar .spacer { flex: 1; }
+#callbar button { border: 0; border-radius: 6px; padding: 6px 12px; font-weight: 700;
+  font-size: 12px; cursor: pointer; }
+#callbar button.accept { background: #3fbf6f; color: #08240f; }
+#callbar button.hangup { background: var(--blazing-flame); color: #fff; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+#call-toast { position: fixed; right: 18px; bottom: 18px; z-index: 90;
+  background: var(--bg-pane); border: 1px solid var(--divider); border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0,0,0,.45); padding: 14px 16px; display: flex;
+  gap: 10px; align-items: center; font-size: 13px; color: var(--text); }
+#call-toast button { border: 0; border-radius: 6px; padding: 6px 12px; font-weight: 700;
+  font-size: 12px; cursor: pointer; }
+#call-toast .accept { background: #3fbf6f; color: #08240f; }
+#call-toast .decline { background: var(--blazing-flame); color: #fff; }
 
 .pane-scroll { flex: 1; overflow-y: auto; padding: 10px 8px; }
 .group-label {
@@ -368,6 +391,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <span class="title" id="chat-title"><span class="hash">#</span> …</span>
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
+      <button class="icon-btn" id="btn-call" title="Start a voice call" hidden>📞</button>
       <button class="icon-btn" id="btn-contact" title="Save as contact" hidden>☆</button>
       <button class="icon-btn" id="btn-leave" title="Leave channel" hidden>🚪</button>
       <button class="icon-btn" id="btn-delchan" title="Delete channel" hidden>🗑</button>
@@ -379,6 +403,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <button class="icon-btn" id="btn-members" title="Toggle member list">👥</button>
       <input type="file" id="emoji-file" accept="image/*" hidden>
     </header>
+    <div id="callbar" hidden></div>
     <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
     <div id="typing"></div>
     <div class="composer">
@@ -396,6 +421,8 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
   </aside>
 
 </div>
+
+<div id="call-toast" hidden></div>
 
 <script>
 "use strict";
@@ -442,6 +469,7 @@ const store = {
   emojis: {},                         // server root -> { shortcode: hexhash }
   contacts: [],                       // [{fp,petname,verified,added_ms}]
   blocked: [],                        // [fp]
+  calls: [],                          // [{peer,state,incoming}]
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -806,6 +834,9 @@ function renderChat() {
   leaveBtn.hidden = true;
   const delChanBtn = $("#btn-delchan");
   delChanBtn.hidden = true;
+  const callBtn = $("#btn-call");
+  callBtn.hidden = true;
+  $("#callbar").hidden = true;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
@@ -857,6 +888,12 @@ function renderChat() {
     contactBtn.title = known ? "Edit contact" : "Save as contact";
     contactBtn.onclick = () => contactFlow(target);
 
+    const ac = callFor(target);
+    callBtn.hidden = false;
+    callBtn.classList.toggle("active", !!ac);
+    callBtn.title = ac ? "In a call — open the call bar to hang up" : "Start a voice call";
+    callBtn.onclick = () => { if (!ac) callAction(target, "start"); };
+
     const blk = isBlocked(target);
     blockBtn.hidden = false;
     blockBtn.classList.toggle("on", blk);
@@ -906,6 +943,7 @@ function renderChat() {
     lastAuthor = m.from;
   }
   log.scrollTop = log.scrollHeight;
+  renderCallbar();
 }
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
@@ -1275,6 +1313,65 @@ async function refreshBlocked() {
   } catch (_) {}
 }
 
+async function refreshCalls() {
+  try {
+    const c = await api.get("/api/calls");
+    if (JSON.stringify(c) !== JSON.stringify(store.calls)) {
+      store.calls = c;
+      renderCallbar();
+      renderCallToast();
+    }
+  } catch (_) {}
+}
+
+function callFor(fp) { return store.calls.find(c => c.peer === fp) || null; }
+
+async function callAction(fp, action) {
+  const path = action === "start" ? "/api/call"
+    : action === "accept" ? "/api/call/accept" : "/api/call/hangup";
+  try { await api.post(path, { peer: fp }); await refreshCalls(); }
+  catch (e) { ui.sys("call: " + e.message); }
+}
+
+function renderCallbar() {
+  const bar = $("#callbar");
+  const t = curTarget();
+  const c = (t && !t.startsWith("#") && !isSelf(t)) ? callFor(t) : null;
+  if (!c) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.className = c.state === "connected" ? "connected" : "";
+  bar.innerHTML = "";
+  bar.appendChild(el("span", "dot"));
+  const label = { calling: "Calling…", ringing: "Incoming call", connecting: "Connecting…",
+    connected: "On a call", disconnected: "Reconnecting…", failed: "Call failed" }[c.state] || c.state;
+  bar.appendChild(el("span", null, "📞 " + label));
+  bar.appendChild(el("span", "spacer"));
+  if (c.incoming && c.state === "ringing") {
+    const acc = el("button", "accept", "Accept");
+    acc.onclick = () => callAction(t, "accept");
+    bar.appendChild(acc);
+  }
+  const hang = el("button", "hangup", c.incoming && c.state === "ringing" ? "Decline" : "Hang up");
+  hang.onclick = () => callAction(t, "hangup");
+  bar.appendChild(hang);
+}
+
+function renderCallToast() {
+  const toast = $("#call-toast");
+  // Ring for an incoming call that isn't the DM currently open.
+  const ring = store.calls.find(c => c.incoming && c.state === "ringing" && c.peer !== curTarget());
+  if (!ring) { toast.hidden = true; return; }
+  toast.hidden = false;
+  toast.innerHTML = "";
+  toast.appendChild(el("span", null, "📞 " + dmLabel(ring.peer)));
+  const acc = el("button", "accept", "Accept");
+  acc.onclick = () => { selectTarget("@dm", ring.peer); callAction(ring.peer, "accept"); };
+  const dec = el("button", "decline", "Decline");
+  dec.onclick = () => callAction(ring.peer, "hangup");
+  toast.appendChild(acc);
+  toast.appendChild(dec);
+}
+
 /* ---------- polling ---------------------------------------------- */
 function ingest(items) {
   for (const it of items) {
@@ -1484,6 +1581,7 @@ async function init() {
   refreshPolicies();
   refreshContacts();
   refreshBlocked();
+  refreshCalls();
   setInterval(poll, 700);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
@@ -1491,6 +1589,7 @@ async function init() {
   setInterval(refreshPolicies, 6000);
   setInterval(refreshContacts, 8000);
   setInterval(refreshBlocked, 8000);
+  setInterval(refreshCalls, 1200);
 }
 init();
 </script>

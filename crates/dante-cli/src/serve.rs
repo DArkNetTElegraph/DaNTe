@@ -21,7 +21,8 @@
 //! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
 //! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
 //! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
-//! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`.
+//! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`,
+//! `GET /api/calls`, `POST /api/call|call/accept|call/hangup {peer}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -203,6 +204,25 @@ enum Cmd {
         on: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// 1:1 call action: `"start"`, `"accept"`, or `"hangup"`.
+    Call {
+        peer: String,
+        action: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The active calls as a ready JSON array.
+    Calls { reply: oneshot::Sender<String> },
+}
+
+/// One row of the SPA's call panel.
+#[derive(Clone, Serialize)]
+struct CallRow {
+    /// Peer fingerprint (base32) — also the DM target.
+    peer: String,
+    /// `ringing` | `calling` | `connecting` | `connected` | `disconnected` | `failed`.
+    state: String,
+    /// True while it is an unanswered inbound call.
+    incoming: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -271,6 +291,8 @@ struct Shared {
             std::collections::HashMap<String, std::collections::HashSet<String>>,
         >,
     >,
+    /// Active 1:1 calls, keyed by peer fingerprint. Live-session only.
+    calls: Mutex<std::collections::HashMap<String, CallRow>>,
     /// Monotonic id stamped on every inbox item, drawn by both the engine tick
     /// loop and command handlers so the SPA's `since` cursor never regresses.
     next_seq: AtomicU64,
@@ -404,6 +426,7 @@ pub async fn run_on(
         channels: Mutex::new(Vec::new()),
         typing: Mutex::new(Vec::new()),
         reactions: Mutex::new(std::collections::HashMap::new()),
+        calls: Mutex::new(std::collections::HashMap::new()),
         next_seq: AtomicU64::new(0),
         me: Mutex::new((String::new(), String::new())),
         ready: AtomicBool::new(false),
@@ -637,10 +660,17 @@ async fn engine_task(
                                 Item::File { seq, from, filename, size: data.len(), saved }
                             }
                             Inbound::IncomingCall { from_idk } => {
-                                Item::Message { seq, from: short_fp(&from_idk), text: "\u{1f4de} incoming call".into() }
+                                let fp = short_fp(&from_idk);
+                                engine_shared.calls.lock().await.insert(
+                                    fp.clone(),
+                                    CallRow { peer: fp.clone(), state: "ringing".into(), incoming: true },
+                                );
+                                Item::Message { seq, from: fp, text: "\u{1f4de} incoming call".into() }
                             }
                             Inbound::CallEnded { from_idk } => {
-                                Item::Message { seq, from: short_fp(&from_idk), text: "\u{1f4de} call ended".into() }
+                                let fp = short_fp(&from_idk);
+                                engine_shared.calls.lock().await.remove(&fp);
+                                Item::Message { seq, from: fp, text: "\u{1f4de} call ended".into() }
                             }
                         };
                         inbox.push_back(entry);
@@ -648,7 +678,21 @@ async fn engine_task(
                     }
                 }
 
-                let _ = engine.poll_calls(now).await;
+                if let Ok(updates) = engine.poll_calls(now).await {
+                    if !updates.is_empty() {
+                        let mut calls = engine_shared.calls.lock().await;
+                        for u in updates {
+                            let fp = id_b32(&u.peer);
+                            let state = format!("{:?}", u.state).to_lowercase();
+                            let incoming = calls.get(&fp).map(|c| c.incoming).unwrap_or(false);
+                            if state == "closed" {
+                                calls.remove(&fp);
+                            } else {
+                                calls.insert(fp.clone(), CallRow { peer: fp, state, incoming });
+                            }
+                        }
+                    }
+                }
 
                 if let Ok(events) = engine.poll_typing(now).await {
                     let mut typing = engine_shared.typing.lock().await;
@@ -1106,6 +1150,58 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         engine.unblock(&id);
                     }
                     Ok("ok".into())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::Calls { reply } => {
+            let rows: Vec<_> = shared.calls.lock().await.values().cloned().collect();
+            let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
+        }
+        Cmd::Call {
+            peer,
+            action,
+            reply,
+        } => {
+            let now = now_ms();
+            let r = match parse_fingerprint(&peer) {
+                Ok(id) => {
+                    let fp = id_b32(&id);
+                    let res = match action.as_str() {
+                        "start" => engine.start_call(&id, now).await,
+                        "accept" => engine.accept_call(&id, now).await,
+                        "hangup" => engine.hangup(&id, now).await,
+                        _ => Err(dante_core::CoreError::Voice("unknown call action".into())),
+                    };
+                    match res {
+                        Ok(()) => {
+                            let mut calls = shared.calls.lock().await;
+                            match action.as_str() {
+                                "start" => {
+                                    calls.insert(
+                                        fp.clone(),
+                                        CallRow {
+                                            peer: fp,
+                                            state: "calling".into(),
+                                            incoming: false,
+                                        },
+                                    );
+                                }
+                                "accept" => {
+                                    if let Some(c) = calls.get_mut(&fp) {
+                                        c.state = "connecting".into();
+                                        c.incoming = false;
+                                    }
+                                }
+                                _ => {
+                                    calls.remove(&fp);
+                                }
+                            }
+                            Ok("ok".into())
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
                 }
                 Err(e) => Err(e.to_string()),
             };
@@ -1735,6 +1831,37 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Block {
                 peer: r.peer,
                 on,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/calls") => {
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::Calls { reply: tx }).await.is_err() {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/call") | ("POST", "/api/call/accept") | ("POST", "/api/call/hangup") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let action = match path {
+                "/api/call/accept" => "accept",
+                "/api/call/hangup" => "hangup",
+                _ => "start",
+            }
+            .to_string();
+            dispatch(&mut stream, &shared, |reply| Cmd::Call {
+                peer: r.peer,
+                action,
                 reply,
             })
             .await

@@ -169,7 +169,13 @@ fn parse_args() -> Args {
                 }
             }
             "--turn-secret" => {
+                // Prefer DANTE_TURN_SECRET: an argv secret is visible in
+                // `ps`/`/proc/<pid>/cmdline` and shell history to any local user.
                 ice.turn_secret = it.next().filter(|s| !s.is_empty());
+                eprintln!(
+                    "warning: --turn-secret is visible in the process list; \
+                     prefer the DANTE_TURN_SECRET environment variable"
+                );
             }
             "--turn-ttl" => {
                 if let Some(n) = it.next().and_then(|v| v.parse().ok()) {
@@ -198,12 +204,19 @@ fn parse_args() -> Args {
                      [--stun URL ...] [--turn URL ...] [--turn-secret STR] [--turn-ttl SECS]\n  \
                      [--turn-listen HOST:PORT] [--turn-public-ip IP]  (run an in-process TURN server)\n  \
                      [--p2p-bootstrap MULTIADDR,...]  (libp2p bootstrap peers offered to p2p clients)\n  \
+                     the TURN secret is read from DANTE_TURN_SECRET (preferred) or --turn-secret\n  \
                      defaults: --listen {DEFAULT_LISTEN}, PoW floor from LedgerParams::default()"
                 );
                 std::process::exit(0);
             }
             _ => {}
         }
+    }
+    // The TURN secret is best supplied out-of-band via the environment so it
+    // never lands in argv; a `--turn-secret` on the command line still wins if
+    // both are set (the operator asked for it explicitly).
+    if ice.turn_secret.is_none() {
+        ice.turn_secret = std::env::var("DANTE_TURN_SECRET").ok().filter(|s| !s.is_empty());
     }
     Args {
         listen,

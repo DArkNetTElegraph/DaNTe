@@ -2,6 +2,8 @@
 //! (in the real client these ride sealed-sender DMs). Proves DTLS-SRTP comes
 //! up and the control channel carries bytes both ways.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dante_voice::{Call, CallEvent, CallState};
@@ -17,6 +19,7 @@ struct Outcome {
 /// Drive one side: relay its ICE to the peer, apply the peer's ICE, and once
 /// the control channel is open keep sending `probe` (ctl) and `audio_probe`
 /// (an Opus-frame-shaped payload on the media track) until it has heard both.
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     mut call: Call,
     probe: &'static [u8],
@@ -24,6 +27,7 @@ async fn drive(
     to_peer: mpsc::UnboundedSender<String>,
     mut from_peer: mpsc::UnboundedReceiver<String>,
     done: mpsc::UnboundedSender<Outcome>,
+    both_done: Arc<AtomicUsize>,
 ) {
     let mut connected = false;
     let mut ctl_open = false;
@@ -32,20 +36,35 @@ async fn drive(
     let deadline = tokio::time::sleep(Duration::from_secs(55));
     tokio::pin!(deadline);
     let mut resend = tokio::time::interval(Duration::from_millis(100));
+    // Whichever side finishes first must not drop its `Call` (and with it the
+    // SRTP session) out from under the other. Stay in the loop — still feeding
+    // the media track — until BOTH sides report done, or a generous grace
+    // window elapses as a fallback for a genuinely stuck peer.
+    let mut counted = false;
+    let mut satisfied_at: Option<tokio::time::Instant> = None;
 
     loop {
         if ctl_open && heard.is_some() && heard_audio.is_some() {
-            break;
+            if !counted {
+                counted = true;
+                both_done.fetch_add(1, Ordering::SeqCst);
+                satisfied_at = Some(tokio::time::Instant::now());
+            }
+            if both_done.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            if satisfied_at.is_some_and(|t| t.elapsed() > Duration::from_secs(8)) {
+                break;
+            }
         }
         tokio::select! {
             _ = &mut deadline => break,
             _ = resend.tick(), if connected => {
                 if ctl_open && heard.is_none() { let _ = call.send_ctl(probe).await; }
-                if heard_audio.is_none() {
-                    // A few frames per tick — the media path can drop the first
-                    // packets while SRTP finishes keying.
-                    for _ in 0..3 { let _ = call.push_audio(audio_probe, 20).await; }
-                }
+                // Keep the media track flowing even after we are personally done —
+                // the first RTP packets can be dropped while SRTP finishes keying,
+                // and the peer may still be waiting.
+                for _ in 0..4 { let _ = call.push_audio(audio_probe, 20).await; }
             }
             ev = call.next_event() => match ev {
                 Some(CallEvent::LocalIce(c)) => { let _ = to_peer.send(c); }
@@ -78,6 +97,7 @@ async fn two_calls_connect_and_exchange_control_and_audio() {
     let (callee, answer) = Call::answer(&offer).await.unwrap();
     caller.set_answer(&answer).await.unwrap();
 
+    let both_done = Arc::new(AtomicUsize::new(0));
     tokio::spawn(drive(
         caller,
         b"caller",
@@ -85,6 +105,7 @@ async fn two_calls_connect_and_exchange_control_and_audio() {
         b_ice_tx,
         a_ice_rx,
         done_tx.clone(),
+        Arc::clone(&both_done),
     ));
     tokio::spawn(drive(
         callee,
@@ -93,6 +114,7 @@ async fn two_calls_connect_and_exchange_control_and_audio() {
         a_ice_tx,
         b_ice_rx,
         done_tx,
+        both_done,
     ));
 
     let mut outcomes = Vec::new();

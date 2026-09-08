@@ -19,6 +19,18 @@ use crate::{
 
 /// Lanes / parallelism. Fixed at 1 so a proof is verifier-cheap to reproduce.
 pub const PARALLELISM: u32 = 1;
+/// Hard ceiling on the Argon2 memory cost a *verifier* will reproduce, in KiB
+/// (128 MiB). `m_cost_kib`/`t_cost` are attacker-chosen wire data, and
+/// verification runs one Argon2 pass at exactly those costs; without a ceiling a
+/// single unauthenticated proof can force a multi-GiB allocation (OOM) or a
+/// multi-year hash (permanent wedge). 128 MiB / 8 passes leaves generous
+/// headroom over [`REGISTRATION`] (64 MiB / 3) while bounding a verify to well
+/// under a second and a fraction of a GiB. A network that tunes above this must
+/// raise the constant in lockstep on solvers and verifiers.
+pub const MAX_VERIFY_M_COST_KIB: u32 = 131_072;
+/// Hard ceiling on the Argon2 time cost a verifier will reproduce. See
+/// [`MAX_VERIFY_M_COST_KIB`].
+pub const MAX_VERIFY_T_COST: u32 = 8;
 /// Argon2id output length used as the puzzle digest.
 pub const DIGEST_LEN: usize = 32;
 /// Length of the solver-chosen nonce carried in a proof.
@@ -122,6 +134,12 @@ pub fn verify(challenge: &[u8; 32], proof: &PowProof, min_bits: u8) -> Result<()
     if proof.difficulty < min_bits {
         return Err(CryptoError::PowUnmetDifficulty);
     }
+    // Reject before touching Argon2: the costs are untrusted wire data and
+    // verification would otherwise allocate/spin at exactly the attacker's
+    // chosen scale. See [`MAX_VERIFY_M_COST_KIB`].
+    if proof.m_cost_kib > MAX_VERIFY_M_COST_KIB || proof.t_cost > MAX_VERIFY_T_COST {
+        return Err(CryptoError::PowUnmetDifficulty);
+    }
     let d = digest(challenge, &proof.nonce, proof.m_cost_kib, proof.t_cost)?;
     if leading_zero_bits(&d) >= u32::from(proof.difficulty) {
         Ok(())
@@ -171,6 +189,39 @@ mod tests {
             verify(&challenge, &proof, 16),
             Err(CryptoError::PowUnmetDifficulty)
         ));
+    }
+
+    #[test]
+    fn oversized_cost_params_are_rejected_before_hashing() {
+        // A proof claiming absurd Argon2 costs must be refused up front, never
+        // reproduced — otherwise a single ~120-byte message OOMs or wedges the
+        // verifier. This returns fast precisely because `digest` is not called.
+        let challenge = [3u8; 32];
+        let bomb = PowProof {
+            m_cost_kib: u32::MAX,
+            t_cost: u32::MAX,
+            difficulty: 8,
+            nonce: [0u8; NONCE_LEN],
+        };
+        assert!(matches!(
+            verify(&challenge, &bomb, 8),
+            Err(CryptoError::PowUnmetDifficulty)
+        ));
+        // The boundary: one over the ceiling on either axis is refused.
+        let over_m = PowProof {
+            m_cost_kib: MAX_VERIFY_M_COST_KIB + 1,
+            t_cost: 1,
+            difficulty: 8,
+            nonce: [0u8; NONCE_LEN],
+        };
+        assert!(verify(&challenge, &over_m, 8).is_err());
+        let over_t = PowProof {
+            m_cost_kib: 32,
+            t_cost: MAX_VERIFY_T_COST + 1,
+            difficulty: 8,
+            nonce: [0u8; NONCE_LEN],
+        };
+        assert!(verify(&challenge, &over_t, 8).is_err());
     }
 
     #[test]

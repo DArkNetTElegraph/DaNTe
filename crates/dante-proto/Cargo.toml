@@ -14,7 +14,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-hex-literal = "0.4"
+hex-literal = "1.1"
 
 [lints.rust]
 unsafe_code = "forbid"

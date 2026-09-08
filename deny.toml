@@ -3,7 +3,15 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # proc-macro-error2 is unmaintained (not vulnerable). It is a build-time
+    # proc-macro dependency of hax-lib-macros, deep inside the OpenMLS /
+    # libcrux crypto stack (openmls -> openmls_rust_crypto -> hpke-rs ->
+    # libcrux-*). It does not ship in any binary and has no runtime attack
+    # surface. The advisory states no safe upgrade exists; it will drop out
+    # when the libcrux stack moves off hax-lib. Reassess on OpenMLS bumps.
+    "RUSTSEC-2026-0173",
+]
 
 [licenses]
 version = 2

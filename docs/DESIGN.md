@@ -81,12 +81,32 @@ achievable with no project-run infrastructure.
   a room view with a Join / Disconnect button. CLI: `/vchannel <root> <name>`,
   `/vc join|leave #<chan>`. e2e-tested (two members connect off one Welcome and
   see each other in presence).
+- **Voice-channel audio *(done — browser WebRTC)*:** unlike 1:1 calls, the SPA
+  itself owns the media. Joining captures the mic with `getUserMedia` and builds
+  a full mesh of browser `RTCPeerConnection`s (one per other participant; the
+  lower fingerprint offers). `dante serve` only relays signalling —
+  `Content::VoiceSignal` (dm tag 22: offer / answer / ICE / bye),
+  `Engine::send_voice_signal`, `Inbound::VoiceSignal`, `POST /api/voice/signal`,
+  and a `voicesignal` stream item. Presence still rides the engine beacon so the
+  mesh knows who to dial. Room view has a mic-mute toggle and a per-peer live
+  dot. STUN comes from `/api/ice`; TURN isn't wired (creds aren't exposed), so
+  it's localhost / same-LAN until a browser TURN path lands.
 - **Voice bitrate *(done — ≥64 kbps)*:** all voice comms (1:1 calls + group /
   voice channels) target ≥64 kbps Opus. `dante-voice` munges the outbound SDP
   fmtp for the Opus payload (`maxaveragebitrate=64000`, `useinbandfec=1`,
   `stereo=1`) on the copy handed to the peer only — webrtc-rs rejects a SDP that
   does not match the one given to `set_local_description`. `dante-audio`'s
   `OpusCodec` sets the encoder to 64 kbps with inband FEC and a 10% loss hint.
+- **Channel rename + #general *(done)*:** `ChannelControl::Renamed` (tag 9),
+  host-signed, updates every member's display name (`Engine::rename_channel`,
+  `POST /api/channel/rename`, `/renamechannel`). Every server is created with a
+  `#general` text channel that can't be renamed or deleted; the create-server
+  flow asks for a join password instead of a first channel name, and changing
+  a join password requires the current one.
+- **SPA context menus *(done)*:** the browser's right-click menu is suppressed
+  inside `#app` and replaced with CSS menus — channel rows (rename / delete /
+  leave / mute / copy id) and messages (reply / edit / delete / pin / forward /
+  copy). The chat header's icon row collapses under a `⋯` button.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 

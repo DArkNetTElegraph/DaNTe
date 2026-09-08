@@ -29,9 +29,11 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{
     gossipsub, identify,
     kad::{self, store::MemoryStore},
-    noise, ping, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
+    noise, ping, tcp, yamux, Swarm, SwarmBuilder,
 };
 use tokio::sync::{mpsc, oneshot};
+
+pub use libp2p::{Multiaddr, PeerId};
 
 /// Protocol string announced over libp2p `identify`.
 const IDENTIFY_PROTO: &str = "/dante/p2p/1.0.0";
@@ -197,9 +199,19 @@ impl Node {
         self.call(|tx| Command::Listen(addr, tx)).await?
     }
 
+    /// [`listen`](Node::listen) with the multiaddr given as a string.
+    pub async fn listen_str(&self, addr: &str) -> Result<(), P2pError> {
+        self.listen(addr.parse()?).await
+    }
+
     /// Dial a peer by multiaddr.
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), P2pError> {
         self.call(|tx| Command::Dial(addr, tx)).await?
+    }
+
+    /// [`dial`](Node::dial) with the multiaddr given as a string.
+    pub async fn dial_str(&self, addr: &str) -> Result<(), P2pError> {
+        self.dial(addr.parse()?).await
     }
 
     /// Teach Kademlia a peer's address without dialing it now.

@@ -502,6 +502,10 @@ pub struct Engine {
     /// one embedded in invite links and server-discovery records; the whole
     /// list is the client's failover set.
     relay_addrs: Vec<String>,
+    /// Optional libp2p node: a decentralised key-directory fallback. `None`
+    /// unless [`enable_p2p`](Engine::enable_p2p) ran. Feature `p2p`.
+    #[cfg(feature = "p2p")]
+    p2p: Option<crate::p2p::P2p>,
     pow: Difficulty,
     last_fetch_since_ms: u64,
     last_announce_ms: u64,
@@ -571,6 +575,8 @@ impl Engine {
             mls_pending: Vec::new(),
             pending_group_calls: HashMap::new(),
             relay_addrs,
+            #[cfg(feature = "p2p")]
+            p2p: None,
             pow,
             last_fetch_since_ms: 0,
             last_announce_ms: 0,
@@ -1545,7 +1551,54 @@ impl Engine {
         }
         let bundle = self.prekeys.bundle(&self.identity).encode();
         sync::publish_prekeys(&mut self.client, &bundle).await?;
+        #[cfg(feature = "p2p")]
+        if let Some(p2p) = &self.p2p {
+            p2p.put_prekey(&self.my_member_id(), &bundle).await;
+        }
         Ok(())
+    }
+
+    /// Start an optional libp2p node so the DHT can serve as a decentralised
+    /// key-directory fallback alongside the relay. `listen` is a multiaddr
+    /// (e.g. `/ip4/0.0.0.0/tcp/0`); `bootstrap` is a list of peer multiaddrs
+    /// each ending `/p2p/<peer-id>`. Returns this node's own dialable addresses.
+    /// Best-effort: on failure the engine keeps working over the relay alone.
+    #[cfg(feature = "p2p")]
+    pub async fn enable_p2p(
+        &mut self,
+        listen: &str,
+        bootstrap: &[String],
+    ) -> Result<Vec<String>, CoreError> {
+        let p2p = crate::p2p::P2p::start(&self.identity.p2p_node_seed(), listen, bootstrap).await?;
+        // Seed the DHT with our current bundle right away.
+        let bundle = self.prekeys.bundle(&self.identity).encode();
+        p2p.put_prekey(&self.my_member_id(), &bundle).await;
+        let addrs = p2p.dial_addrs();
+        self.p2p = Some(p2p);
+        Ok(addrs)
+    }
+
+    /// This client's libp2p `PeerId`, if [`enable_p2p`](Engine::enable_p2p) ran.
+    #[cfg(feature = "p2p")]
+    pub fn p2p_peer_id(&self) -> Option<String> {
+        self.p2p.as_ref().map(|p| p.peer_id())
+    }
+
+    /// This client's dialable libp2p multiaddrs, if p2p is enabled.
+    #[cfg(feature = "p2p")]
+    pub fn p2p_dial_addrs(&self) -> Vec<String> {
+        self.p2p
+            .as_ref()
+            .map(|p| p.dial_addrs())
+            .unwrap_or_default()
+    }
+
+    /// Resolve a peer's prekey bundle straight from the DHT (skips the relay).
+    /// `None` if p2p is not enabled or the record is not found. Exposed mainly
+    /// for tests and diagnostics.
+    #[cfg(feature = "p2p")]
+    pub async fn dht_prekey(&self, peer_id: &[u8; 32]) -> Option<Vec<u8>> {
+        self.p2p.as_ref()?.get_prekey(peer_id).await
     }
 
     // ---- channels / servers -------------------------------------------------
@@ -3559,6 +3612,28 @@ impl Engine {
         Ok(out)
     }
 
+    /// Fetch a peer's prekey bundle: the relay first, then (with the `p2p`
+    /// feature and a node running) the DHT.
+    async fn fetch_prekey_bundle(&mut self, peer_id: &[u8; 32]) -> Result<Vec<u8>, CoreError> {
+        match sync::get_prekeys(&mut self.client, peer_id).await {
+            Ok(Some(blob)) => return Ok(blob),
+            Ok(None) => {}
+            Err(e) => {
+                #[cfg(not(feature = "p2p"))]
+                return Err(e.into());
+                #[cfg(feature = "p2p")]
+                tracing::debug!(error = %e, "relay prekey fetch failed; trying the DHT");
+            }
+        }
+        #[cfg(feature = "p2p")]
+        if let Some(p2p) = &self.p2p {
+            if let Some(blob) = p2p.get_prekey(peer_id).await {
+                return Ok(blob);
+            }
+        }
+        Err(CoreError::NoPrekeys)
+    }
+
     async fn send_content(
         &mut self,
         peer_id: &[u8; 32],
@@ -3616,9 +3691,7 @@ impl Engine {
         let packet = if let Some(session) = self.sessions.get_mut(&peer_idk) {
             Packet::Message(session.encrypt(&plaintext)?)
         } else {
-            let blob = sync::get_prekeys(&mut self.client, &peer_id)
-                .await?
-                .ok_or(CoreError::NoPrekeys)?;
+            let blob = self.fetch_prekey_bundle(&peer_id).await?;
             let bundle = PreKeyBundle::decode(&blob)?;
             if bundle.idk_pub != peer_idk || bundle.identity_id != peer_id {
                 return Err(CoreError::BadPeerPrekeys);

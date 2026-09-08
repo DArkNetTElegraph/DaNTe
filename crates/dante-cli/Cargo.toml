@@ -16,6 +16,11 @@ path = "src/lib.rs"
 name = "dante"
 path = "src/main.rs"
 
+[features]
+# Opt-in libp2p support, forwarded to dante-core. Off by default so a plain
+# build does not pull the libp2p dependency tree.
+p2p = ["dante-core/p2p"]
+
 [dependencies]
 dante-core.workspace = true
 dante-crypto.workspace = true

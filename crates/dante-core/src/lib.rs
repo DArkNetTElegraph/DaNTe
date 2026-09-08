@@ -12,6 +12,8 @@ pub mod channel;
 pub mod engine;
 pub mod error;
 pub mod invite;
+#[cfg(feature = "p2p")]
+mod p2p;
 pub mod roles;
 pub mod store;
 

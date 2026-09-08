@@ -65,6 +65,14 @@ pub enum Content {
         /// The channel the group call belongs to.
         channel_id: [u8; 32],
     },
+    /// The sender wants into a channel's group call that is already running
+    /// (a voice channel someone joins after the call started). The lowest-id
+    /// current participant fetches their KeyPackage, MLS-adds them and sends a
+    /// `GroupCallWelcome` + `GroupCallCommit`.
+    GroupCallJoinRequest {
+        /// The channel whose group call to join.
+        channel_id: [u8; 32],
+    },
     /// Replace the text of an earlier channel message (only its original
     /// author's edit is honoured). Rides the channel log like a normal message.
     Edit {
@@ -198,6 +206,9 @@ impl Content {
             Content::Forward { origin, text } => {
                 w.u8(20).string(origin).string(text);
             }
+            Content::GroupCallJoinRequest { channel_id } => {
+                w.u8(21).fixed(channel_id);
+            }
         }
         w.into_vec()
     }
@@ -259,6 +270,9 @@ impl Content {
             20 => Content::Forward {
                 origin: r.string()?,
                 text: r.string()?,
+            },
+            21 => Content::GroupCallJoinRequest {
+                channel_id: r.fixed::<32>()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -334,6 +348,9 @@ mod tests {
             Content::GroupCallLeave {
                 channel_id: [5u8; 32],
             },
+            Content::GroupCallJoinRequest {
+                channel_id: [6u8; 32],
+            },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }
@@ -387,6 +404,6 @@ mod tests {
 
     #[test]
     fn bad_tag_rejected() {
-        assert!(Content::decode(&[21]).is_err());
+        assert!(Content::decode(&[22]).is_err());
     }
 }

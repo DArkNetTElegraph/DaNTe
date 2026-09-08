@@ -390,6 +390,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     }
     println!(
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
+         /vchannel <root> <name>  /vc join|leave #<chan>  \
          /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
@@ -403,6 +404,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut save_tick = tokio::time::interval(Duration::from_secs(15));
     let mut peer: Option<Target> = None;
+    let mut voice_sig = String::new();
 
     loop {
         tokio::select! {
@@ -507,6 +509,24 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                         u.state);
                 }
                 let _ = engine.poll_group_calls(now).await;
+                let _ = engine.send_voice_presence(now).await;
+                let vps = engine.poll_voice(now).await;
+                let sig: String = vps.iter()
+                    .filter(|v| !v.members.is_empty())
+                    .map(|v| format!("{}:{}", IdentityId::from_bytes(v.channel_id).to_base32(), v.members.len()))
+                    .collect::<Vec<_>>().join("|");
+                if sig != voice_sig {
+                    voice_sig = sig;
+                    for vp in &vps {
+                        if vp.members.is_empty() { continue; }
+                        let cid = IdentityId::from_bytes(vp.channel_id).to_base32();
+                        let who: Vec<String> = vp.members.iter()
+                            .map(|m| IdentityId::from_bytes(*m).to_base32().split('-').next().unwrap_or("").to_string())
+                            .collect();
+                        println!("\u{1f50a} #{} — {}",
+                            cid.split('-').next().unwrap_or(""), who.join(", "));
+                    }
+                }
             }
             line = lines.next_line() => {
                 match line {
@@ -697,6 +717,28 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     _ => println!("usage: /groupcall start|join|leave #<channel>"),
                 }
             }
+            "vc" | "voice" => {
+                let mut parts = a.unwrap_or("").split_whitespace();
+                let sub = parts.next().unwrap_or("");
+                let chan = parts.next().map(|c| c.strip_prefix('#').unwrap_or(c));
+                match (sub, chan) {
+                    ("join" | "leave", Some(c)) => match parse_fingerprint(c) {
+                        Ok(cid) => {
+                            let r = if sub == "join" {
+                                engine.join_voice_channel(&cid, now_ms()).await
+                            } else {
+                                engine.leave_voice_channel(&cid, now_ms()).await
+                            };
+                            match r {
+                                Ok(()) => println!("\u{1f50a} voice {sub} ok"),
+                                Err(e) => println!("voice {sub} failed: {e}"),
+                            }
+                        }
+                        Err(e) => println!("bad channel id: {e}"),
+                    },
+                    _ => println!("usage: /vc join|leave #<voice-channel>"),
+                }
+            }
             "block" | "unblock" => match a {
                 Some(fp) => match parse_fingerprint(fp) {
                     Ok(id) => {
@@ -746,6 +788,20 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     Err(e) => println!("bad server root: {e}"),
                 },
                 _ => println!("usage: /channel <server-root> <name>[ | <password>]"),
+            },
+            "vchannel" => match (a, b) {
+                (Some(sfp), Some(name)) => match parse_fingerprint(sfp) {
+                    Ok(root) => match engine.create_voice_channel(&root, name.trim(), true) {
+                        Ok(id) => println!(
+                            "\u{1f50a} voice channel \"{}\" -> #{}",
+                            name.trim(),
+                            IdentityId::from_bytes(id).to_base32()
+                        ),
+                        Err(e) => println!("create failed: {e}"),
+                    },
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /vchannel <server-root> <name>"),
             },
             "invite" => match (a, b) {
                 (Some(chan), Some(fp)) => {

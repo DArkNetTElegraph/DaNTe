@@ -19,6 +19,7 @@
 //! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
 //! `GET /api/p2p`,
 //! `POST /api/dm/edit {peer,msg_id,text}` (empty text deletes),
+//! `GET /api/voice`, `POST /api/voice/join|leave {channel}`,
 //! `POST /api/forward {to,origin,text}`,
 //! `POST /api/file?to=<fp>&name=<file>` (raw body = bytes, DMs only),
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
@@ -82,6 +83,13 @@ enum Cmd {
         server: String,
         name: String,
         password: String,
+        voice: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Connect to / disconnect from a voice channel (`leave` when `join` false).
+    Voice {
+        channel: String,
+        join: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Edit (or, with empty text, delete) one of our channel messages.
@@ -421,6 +429,18 @@ struct ChanView {
     root: String,
     /// Auto-kick window for this server in days; `0` = off.
     auto_kick_days: u64,
+    /// A voice channel — members join a persistent call instead of chatting.
+    #[serde(default)]
+    voice: bool,
+}
+
+/// One voice channel's live state for the SPA.
+#[derive(Clone, Serialize, Default)]
+struct VoiceRoom {
+    /// Are we connected to this room?
+    joined: bool,
+    /// Fingerprints of everyone currently in the room.
+    participants: Vec<String>,
 }
 
 /// Everything `serve` needs to build the engine once the user has an identity.
@@ -448,6 +468,8 @@ struct Shared {
     calls: Mutex<std::collections::HashMap<String, CallRow>>,
     /// Channel group calls, keyed by channel id (base32). Live-session only.
     group_calls: Mutex<std::collections::HashMap<String, GroupCallRow>>,
+    /// Voice channels, keyed by channel id (base32). Live-session only.
+    voice: Mutex<std::collections::HashMap<String, VoiceRoom>>,
     /// Monotonic id stamped on every inbox item, drawn by both the engine tick
     /// loop and command handlers so the SPA's `since` cursor never regresses.
     next_seq: AtomicU64,
@@ -608,6 +630,7 @@ pub async fn run_on(
         reactions: Mutex::new(std::collections::HashMap::new()),
         calls: Mutex::new(std::collections::HashMap::new()),
         group_calls: Mutex::new(std::collections::HashMap::new()),
+        voice: Mutex::new(std::collections::HashMap::new()),
         next_seq: AtomicU64::new(0),
         me: Mutex::new((String::new(), String::new())),
         ready: AtomicBool::new(false),
@@ -1013,6 +1036,23 @@ async fn engine_task(
                 let _ = engine.poll_group_calls(now).await;
                 refresh_group_calls(&engine, &engine_shared).await;
 
+                // Voice channels: beacon our presence, then refresh who's in each.
+                let _ = engine.send_voice_presence(now).await;
+                {
+                    let vp = engine.poll_voice(now).await;
+                    let mut rooms = engine_shared.voice.lock().await;
+                    rooms.clear();
+                    for p in vp {
+                        rooms.insert(
+                            id_b32(&p.channel_id),
+                            VoiceRoom {
+                                joined: engine.in_group_call(&p.channel_id),
+                                participants: p.members.iter().map(short_id).collect(),
+                            },
+                        );
+                    }
+                }
+
                 if let Ok(events) = engine.poll_typing(now).await {
                     let mut typing = engine_shared.typing.lock().await;
                     for ev in events {
@@ -1056,6 +1096,7 @@ async fn refresh_channels(engine: &Engine, shared: &Shared) {
                 .auto_kick_window(&c.server_root)
                 .map(|ms| ms / 86_400_000)
                 .unwrap_or(0),
+            voice: c.voice,
         })
         .collect();
     *shared.channels.lock().await = views;
@@ -1110,6 +1151,22 @@ async fn refresh_group_calls(engine: &Engine, shared: &Shared) {
             });
     }
     rows.retain(|k, _| live.contains(k));
+}
+
+/// Quick refresh of just the `joined` flag for each voice room (no relay round
+/// trip). The participant lists are filled in by the tick loop's `poll_voice`.
+async fn refresh_voice(engine: &Engine, shared: &Shared) {
+    let voice: Vec<[u8; 32]> = engine
+        .channels()
+        .into_iter()
+        .filter(|c| c.voice)
+        .map(|c| c.channel_id)
+        .collect();
+    let mut rooms = shared.voice.lock().await;
+    rooms.retain(|k, _| voice.iter().any(|c| id_b32(c) == *k));
+    for c in &voice {
+        rooms.entry(id_b32(c)).or_default().joined = engine.in_group_call(c);
+    }
 }
 
 async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
@@ -1327,16 +1384,41 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             server,
             name,
             password,
+            voice,
             reply,
         } => {
             let pw = (!password.is_empty()).then_some(password.as_str());
             let r = match parse_fingerprint(&server) {
+                Ok(root) if voice => engine
+                    .create_voice_channel(&root, &name, true)
+                    .map(|id| id_b32(&id))
+                    .map_err(|e| e.to_string()),
                 Ok(root) => engine
                     .create_channel(&root, &name, true, pw)
                     .map(|id| id_b32(&id))
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             };
+            let _ = reply.send(r);
+        }
+        Cmd::Voice {
+            channel,
+            join,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel).to_string();
+            let r = match parse_fingerprint(&channel) {
+                Ok(cid) => {
+                    let res = if join {
+                        engine.join_voice_channel(&cid, now_ms()).await
+                    } else {
+                        engine.leave_voice_channel(&cid, now_ms()).await
+                    };
+                    res.map(|_| "ok".into()).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            refresh_voice(engine, shared).await;
             let _ = reply.send(r);
         }
         Cmd::Invite {
@@ -2234,6 +2316,9 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 /// Optional: content-protect the channel log with this password.
                 #[serde(default)]
                 password: String,
+                /// Create a voice channel instead of a text one.
+                #[serde(default)]
+                voice: bool,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
@@ -2242,6 +2327,30 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 server: r.server,
                 name: r.name,
                 password: r.password,
+                voice: r.voice,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/voice") => {
+            let rooms = shared.voice.lock().await;
+            let body = serde_json::to_string(&*rooms).unwrap_or_else(|_| "{}".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/voice/join") | ("POST", "/api/voice/leave") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let join = path.ends_with("join");
+            dispatch(&mut stream, &shared, |reply| Cmd::Voice {
+                channel: r.channel,
+                join,
                 reply,
             })
             .await

@@ -38,6 +38,10 @@ use crate::{
 
 /// Domain for the per-epoch key that AEAD-seals channel typing signals.
 const CHANNEL_SIGNAL_LABEL: &str = "dante/channel-signal/v1";
+/// MLS-exporter label for voice-channel presence beacons.
+const VOICE_PRESENCE_LABEL: &str = "dante/voice-presence/v1";
+/// A presence beacon older than this is treated as "left".
+const VOICE_PRESENCE_TTL_MS: u64 = 15_000;
 
 /// Default envelope TTL for DMs: 7 days.
 pub const DM_TTL_MS: u32 = 7 * 24 * 60 * 60 * 1000;
@@ -336,17 +340,16 @@ impl ChannelSession {
     }
 }
 
-/// AEAD-seal a channel typing marker under the group's current epoch secret.
-/// Frame: `member(32) || nonce(24) || ciphertext`.
+/// AEAD-seal a channel side-band signal under a `label`-derived key from the
+/// group's current epoch secret. Frame: `member(32) || nonce(24) || ciphertext`.
 fn seal_channel_signal(
     member: &mls::Member,
     me: &[u8; 32],
     channel_id: &[u8; 32],
+    label: &str,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CoreError> {
-    let key = member
-        .export_key(CHANNEL_SIGNAL_LABEL, 32)
-        .map_err(mls_err)?;
+    let key = member.export_key(label, 32).map_err(mls_err)?;
     let key: [u8; 32] = key[..32].try_into().unwrap();
     let nonce = random_array::<24>();
     let mut aad = Vec::with_capacity(64);
@@ -360,10 +363,11 @@ fn seal_channel_signal(
     Ok(out)
 }
 
-/// Recover `(sender IdentityId, plaintext)` from a channel typing frame.
+/// Recover `(sender IdentityId, plaintext)` from a channel side-band frame.
 fn open_channel_signal(
     member: &mls::Member,
     channel_id: &[u8; 32],
+    label: &str,
     blob: &[u8],
 ) -> Option<([u8; 32], Vec<u8>)> {
     if blob.len() < 56 {
@@ -372,13 +376,23 @@ fn open_channel_signal(
     let sender: [u8; 32] = blob[..32].try_into().ok()?;
     let nonce: [u8; 24] = blob[32..56].try_into().ok()?;
     let ct = &blob[56..];
-    let key = member.export_key(CHANNEL_SIGNAL_LABEL, 32).ok()?;
+    let key = member.export_key(label, 32).ok()?;
     let key: [u8; 32] = key[..32].try_into().ok()?;
     let mut aad = Vec::with_capacity(64);
     aad.extend_from_slice(channel_id);
     aad.extend_from_slice(&sender);
     let pt = aead::xchacha_open(&key, &nonce, ct, &aad).ok()?;
     Some((sender, pt))
+}
+
+/// A snapshot of who is currently in a voice channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoicePresence {
+    /// The voice channel.
+    pub channel_id: [u8; 32],
+    /// `IdentityId` bytes of the members whose presence beacon is still fresh,
+    /// sorted, including ourselves when we are connected.
+    pub members: Vec<[u8; 32]>,
 }
 
 /// A server this client hosts (holds the root key).
@@ -498,6 +512,9 @@ pub struct Engine {
     /// Group-call Welcomes received but not yet joined:
     /// `channel_id -> (inviter id, welcome blob)`. Ephemeral.
     pending_group_calls: HashMap<[u8; 32], ([u8; 32], Vec<u8>)>,
+    /// Voice channels we are trying to connect to: a `GroupCallWelcome` for one
+    /// of these is joined automatically rather than surfaced as an invite.
+    voice_join_intent: HashSet<[u8; 32]>,
     /// Relay endpoints this engine may use, preference order. The first is the
     /// one embedded in invite links and server-discovery records; the whole
     /// list is the client's failover set.
@@ -583,6 +600,7 @@ impl Engine {
             group_calls: HashMap::new(),
             mls_pending: Vec::new(),
             pending_group_calls: HashMap::new(),
+            voice_join_intent: HashSet::new(),
             relay_addrs,
             #[cfg(feature = "p2p")]
             p2p: None,
@@ -1560,6 +1578,171 @@ impl Engine {
         self.pending_group_calls.keys().copied().collect()
     }
 
+    // ---- voice channels ---------------------------------------------------
+
+    /// Relay signal topic for a voice channel's presence beacons (distinct from
+    /// the channel's typing topic, which is `channel_id` itself).
+    fn voice_presence_topic(channel_id: &[u8; 32]) -> [u8; 32] {
+        let mut buf = Vec::with_capacity(VOICE_PRESENCE_LABEL.len() + 32);
+        buf.extend_from_slice(VOICE_PRESENCE_LABEL.as_bytes());
+        buf.extend_from_slice(channel_id);
+        sha256(&buf)
+    }
+
+    /// Connect to a voice channel's persistent group call. If nobody is in the
+    /// room we open it; otherwise we ask the members present to add us and the
+    /// resulting Welcome is joined automatically on the next
+    /// [`receive_all`](Engine::receive_all).
+    pub async fn join_voice_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let ch = self
+            .channels
+            .get(channel_id)
+            .ok_or(CoreError::UnknownChannel)?;
+        if !ch.info.voice {
+            return Err(CoreError::Channel("not a voice channel"));
+        }
+        if self.in_group_call(channel_id) {
+            return Ok(());
+        }
+        if self.pending_group_calls.contains_key(channel_id) {
+            return self.join_group_call(channel_id, now_ms).await;
+        }
+
+        let me = self.my_member_id();
+        let present: Vec<[u8; 32]> = self
+            .voice_participants(channel_id, now_ms)
+            .await
+            .into_iter()
+            .filter(|m| *m != me)
+            .collect();
+
+        if present.is_empty() {
+            // Open the room *solo* — unlike `start_group_call`, a voice channel
+            // does not pre-invite every member; they join on demand and are
+            // added via `GroupCallJoinRequest`.
+            let member = mls::Member::create(&me, channel_id).map_err(mls_err)?;
+            self.group_calls
+                .insert(*channel_id, GroupCall { mls: member });
+            let _ = self.refresh_mls_key_package().await;
+            // Announce presence right away so a near-simultaneous joiner sees us
+            // and asks to be added rather than opening a second room.
+            let _ = self.send_voice_presence(now_ms).await;
+            return Ok(());
+        }
+        self.voice_join_intent.insert(*channel_id);
+        for m in &present {
+            let _ = self
+                .send_content(
+                    m,
+                    Content::GroupCallJoinRequest {
+                        channel_id: *channel_id,
+                    },
+                    now_ms,
+                )
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Disconnect from a voice channel's group call.
+    pub async fn leave_voice_channel(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.voice_join_intent.remove(channel_id);
+        self.leave_group_call(channel_id, now_ms).await
+    }
+
+    /// Post a presence beacon for every voice channel we are currently
+    /// connected to. Call each tick.
+    pub async fn send_voice_presence(&mut self, now_ms: u64) -> Result<(), CoreError> {
+        let me = self.my_member_id();
+        let connected: Vec<[u8; 32]> = self
+            .channels
+            .iter()
+            .filter(|(cid, c)| c.info.voice && self.group_calls.contains_key(*cid))
+            .map(|(cid, _)| *cid)
+            .collect();
+        for cid in connected {
+            let blob = {
+                let Some(ch) = self.channels.get(&cid) else {
+                    continue;
+                };
+                match seal_channel_signal(
+                    &ch.mls,
+                    &me,
+                    &cid,
+                    VOICE_PRESENCE_LABEL,
+                    &now_ms.to_be_bytes(),
+                ) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            };
+            let topic = Self::voice_presence_topic(&cid);
+            let _ = sync::post_signal(&mut self.client, &topic, &blob).await;
+        }
+        Ok(())
+    }
+
+    /// Read the fresh presence beacons for one voice channel — who is in the
+    /// room right now (sorted `IdentityId` bytes, plus ourselves if connected).
+    pub async fn voice_participants(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Vec<[u8; 32]> {
+        let mut out = std::collections::BTreeSet::new();
+        if self.group_calls.contains_key(channel_id) {
+            out.insert(self.my_member_id());
+        }
+        let topic = Self::voice_presence_topic(channel_id);
+        if let Ok(blobs) = sync::fetch_signals(&mut self.client, &topic).await {
+            if let Some(ch) = self.channels.get(channel_id) {
+                for blob in blobs {
+                    let Some((member, pt)) =
+                        open_channel_signal(&ch.mls, channel_id, VOICE_PRESENCE_LABEL, &blob)
+                    else {
+                        continue;
+                    };
+                    if pt.len() < 8 || self.blocked.contains(&member) {
+                        continue;
+                    }
+                    let at = u64::from_be_bytes(pt[..8].try_into().unwrap());
+                    if now_ms.saturating_sub(at) <= VOICE_PRESENCE_TTL_MS {
+                        out.insert(member);
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Presence for every voice channel we belong to. Call each tick alongside
+    /// [`send_voice_presence`](Engine::send_voice_presence).
+    pub async fn poll_voice(&mut self, now_ms: u64) -> Vec<VoicePresence> {
+        let voice_channels: Vec<[u8; 32]> = self
+            .channels
+            .iter()
+            .filter(|(_, c)| c.info.voice)
+            .map(|(cid, _)| *cid)
+            .collect();
+        let mut out = Vec::new();
+        for cid in voice_channels {
+            let members = self.voice_participants(&cid, now_ms).await;
+            out.push(VoicePresence {
+                channel_id: cid,
+                members,
+            });
+        }
+        out
+    }
+
     /// Reconcile the media mesh for every active group call. Call each tick,
     /// alongside [`Engine::poll_calls`].
     pub async fn poll_group_calls(&mut self, now_ms: u64) -> Result<(), CoreError> {
@@ -1725,6 +1908,29 @@ impl Engine {
         private: bool,
         password: Option<&str>,
     ) -> Result<[u8; 32], CoreError> {
+        self.create_channel_inner(server_root, name, private, password, false)
+    }
+
+    /// Create a **voice** channel: members join a persistent group call keyed by
+    /// the channel id ([`join_voice_channel`](Engine::join_voice_channel))
+    /// instead of exchanging text.
+    pub fn create_voice_channel(
+        &mut self,
+        server_root: &[u8; 32],
+        name: &str,
+        private: bool,
+    ) -> Result<[u8; 32], CoreError> {
+        self.create_channel_inner(server_root, name, private, None, true)
+    }
+
+    fn create_channel_inner(
+        &mut self,
+        server_root: &[u8; 32],
+        name: &str,
+        private: bool,
+        password: Option<&str>,
+        voice: bool,
+    ) -> Result<[u8; 32], CoreError> {
         let server_name = self
             .hosted
             .get(server_root)
@@ -1744,6 +1950,7 @@ impl Engine {
             channel_name: name.to_owned(),
             private,
             host_id: me,
+            voice,
         };
         let mut roster = HashSet::new();
         roster.insert(me);
@@ -3618,7 +3825,7 @@ impl Engine {
                 .ok_or(CoreError::UnknownChannel)?;
             let mut pt = now_ms.to_be_bytes().to_vec();
             pt.extend_from_slice(&Content::Typing.encode());
-            seal_channel_signal(&ch.mls, &me, channel_id, &pt)?
+            seal_channel_signal(&ch.mls, &me, channel_id, CHANNEL_SIGNAL_LABEL, &pt)?
         };
         sync::post_signal(&mut self.client, channel_id, &blob).await?;
         Ok(())
@@ -3664,7 +3871,9 @@ impl Engine {
                 continue;
             };
             for blob in blobs {
-                let Some((member, pt)) = open_channel_signal(&ch.mls, &channel_id, &blob) else {
+                let Some((member, pt)) =
+                    open_channel_signal(&ch.mls, &channel_id, CHANNEL_SIGNAL_LABEL, &blob)
+                else {
                     continue;
                 };
                 if member == me || pt.len() < 8 || self.blocked.contains(&member) {
@@ -3755,7 +3964,8 @@ impl Engine {
             | Content::Pin { .. }
             | Content::DmEdit { .. }
             | Content::DmDelete { .. }
-            | Content::Forward { .. } => (None, [0u8; 16]),
+            | Content::Forward { .. }
+            | Content::GroupCallJoinRequest { .. } => (None, [0u8; 16]),
         };
         let plaintext = content.encode();
 
@@ -3957,10 +4167,82 @@ impl Engine {
                     if self.channels.contains_key(&channel_id) {
                         self.pending_group_calls
                             .insert(channel_id, (idk_to_id(&from), blob));
-                        out.push(Inbound::GroupCallInvite {
-                            channel_id,
-                            from_idk: from,
-                        });
+                        if self.voice_join_intent.remove(&channel_id) {
+                            // We asked to join this voice channel — connect now.
+                            match self.join_group_call(&channel_id, now_ms).await {
+                                Ok(()) => {
+                                    let _ = self.send_voice_presence(now_ms).await;
+                                    out.push(Inbound::GroupCallMembersChanged { channel_id });
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "voice auto-join failed");
+                                }
+                            }
+                        } else {
+                            out.push(Inbound::GroupCallInvite {
+                                channel_id,
+                                from_idk: from,
+                            });
+                        }
+                    }
+                }
+                Ok(Content::GroupCallJoinRequest { channel_id }) => {
+                    let requester = idk_to_id(&from);
+                    // Only the lowest-id current participant admits the joiner,
+                    // so N members don't all add at once.
+                    let issue = match self.group_calls.get(&channel_id) {
+                        Some(gc) => {
+                            let me = self.my_member_id();
+                            let mut ids: Vec<[u8; 32]> = gc
+                                .mls
+                                .members()
+                                .into_iter()
+                                .filter_map(|(_, id)| <[u8; 32]>::try_from(id).ok())
+                                .filter(|id| *id != requester)
+                                .collect();
+                            ids.sort_unstable();
+                            ids.first() == Some(&me)
+                        }
+                        None => false,
+                    };
+                    if issue {
+                        if let Ok(Some(kp)) =
+                            sync::get_key_package(&mut self.client, &requester).await
+                        {
+                            let hs = self
+                                .group_calls
+                                .get_mut(&channel_id)
+                                .and_then(|gc| gc.mls.add(&[mls::KeyPkg(kp)]).ok());
+                            if let Some(hs) = hs {
+                                if let Some(welcome) = hs.welcome {
+                                    let _ = self
+                                        .send_content(
+                                            &requester,
+                                            Content::GroupCallWelcome {
+                                                channel_id,
+                                                blob: welcome,
+                                            },
+                                            now_ms,
+                                        )
+                                        .await;
+                                }
+                                let others = self.group_call_peers(&channel_id);
+                                for p in others.iter().filter(|p| **p != requester) {
+                                    let _ = self
+                                        .send_content(
+                                            p,
+                                            Content::GroupCallCommit {
+                                                channel_id,
+                                                blob: hs.commit.clone(),
+                                            },
+                                            now_ms,
+                                        )
+                                        .await;
+                                }
+                                self.reconcile_group_legs(&channel_id, now_ms).await;
+                                out.push(Inbound::GroupCallMembersChanged { channel_id });
+                            }
+                        }
                     }
                 }
                 Ok(Content::GroupCallCommit { channel_id, blob }) => {

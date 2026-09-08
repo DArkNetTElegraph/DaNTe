@@ -22,7 +22,7 @@ pub use dante_identity::RevokeReason;
 pub use dante_voice::{CallEvent, CallState, IceServer};
 pub use engine::{
     CallUpdate, ChannelEdit, ChannelPin, Contact, DmEdit, Engine, Inbound, ReceivedDm, SearchHit,
-    TypingEvent, TypingScope, DM_TTL_MS,
+    TypingEvent, TypingScope, VoicePresence, DM_TTL_MS,
 };
 pub use error::CoreError;
 pub use invite::InviteToken;

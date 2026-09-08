@@ -235,6 +235,89 @@ async fn a_one_to_one_call_connects_over_dm_signalling() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_voice_channel_connects_members_and_tracks_presence() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+    let host_id = *host.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let vchan = host.create_voice_channel(&server, "Lounge", true).unwrap();
+    assert!(host
+        .channels()
+        .iter()
+        .any(|c| c.channel_id == vchan && c.voice));
+    host.invite_to_channel(&vchan, &alice_id, now)
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        for e in [&mut host, &mut alice] {
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
+        }
+    }
+    assert!(alice
+        .channels()
+        .iter()
+        .any(|c| c.channel_id == vchan && c.voice));
+    for e in [&mut host, &mut alice] {
+        e.refresh_mls_key_package().await.unwrap();
+    }
+
+    // Alice connects first — the room is empty, so she opens it.
+    alice.join_voice_channel(&vchan, now).await.unwrap();
+    assert!(alice.in_group_call(&vchan));
+    // Host sees her beacon and asks to be let in.
+    assert_eq!(host.voice_participants(&vchan, now).await, vec![alice_id]);
+    host.join_voice_channel(&vchan, now).await.unwrap();
+
+    // The request → Welcome → auto-join round-trips over the relay.
+    let mut connected = false;
+    for _ in 0..40 {
+        for e in [&mut alice, &mut host] {
+            e.receive_all(now).await.unwrap();
+            let _ = e.send_voice_presence(now).await;
+        }
+        if host.in_group_call(&vchan) && host.group_call_key(&vchan) == alice.group_call_key(&vchan)
+        {
+            connected = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    assert!(
+        connected,
+        "host joined the voice channel and shares the call key"
+    );
+
+    // Presence lists both, from either side.
+    let mut hp = host.voice_participants(&vchan, now).await;
+    hp.sort();
+    let mut want = vec![alice_id, host_id];
+    want.sort();
+    assert_eq!(hp, want);
+
+    // Alice disconnects; the host stays.
+    alice.leave_voice_channel(&vchan, now).await.unwrap();
+    assert!(!alice.in_group_call(&vchan));
+    for _ in 0..20 {
+        host.receive_all(now).await.unwrap();
+        let _ = host.poll_group_calls(now).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(host.in_group_call(&vchan), "host is still connected");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_group_call_shares_an_mls_key_that_rekeys_when_a_member_leaves() {
     let now = now_ms();
     let relay = spawn_relay().await;

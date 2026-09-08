@@ -34,6 +34,10 @@ pub struct ChannelInfo {
     /// `IdentityId` of the host — the only identity whose MLS Commits members
     /// honour on this channel.
     pub host_id: [u8; 32],
+    /// A **voice** channel: members join a persistent group call keyed by
+    /// `channel_id` instead of exchanging text. The MLS group underneath is
+    /// still used for membership and the call key.
+    pub voice: bool,
 }
 
 impl ChannelInfo {
@@ -43,7 +47,8 @@ impl ChannelInfo {
             .fixed(&self.channel_id)
             .string(&self.channel_name)
             .bool(self.private)
-            .fixed(&self.host_id);
+            .fixed(&self.host_id)
+            .bool(self.voice);
     }
     pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self, WireError> {
         Ok(Self {
@@ -53,6 +58,8 @@ impl ChannelInfo {
             channel_name: r.string()?,
             private: r.bool()?,
             host_id: r.fixed::<32>()?,
+            // trailing, added later — old records decode as a text channel
+            voice: if r.remaining() >= 1 { r.bool()? } else { false },
         })
     }
     /// Encode.
@@ -304,12 +311,30 @@ mod tests {
             channel_name: "general".into(),
             private: true,
             host_id: [9u8; 32],
+            voice: false,
         }
     }
 
     #[test]
     fn info_roundtrip() {
         assert_eq!(ChannelInfo::decode(&info().encode()).unwrap(), info());
+        let mut v = info();
+        v.voice = true;
+        assert_eq!(ChannelInfo::decode(&v.encode()).unwrap(), v);
+    }
+
+    #[test]
+    fn info_without_the_voice_byte_decodes_as_text() {
+        // A record written before voice channels existed: no trailing bool.
+        let mut w = Writer::new();
+        w.fixed(&[1u8; 32])
+            .string("srv")
+            .fixed(&[2u8; 32])
+            .string("general")
+            .bool(true)
+            .fixed(&[9u8; 32]);
+        let got = ChannelInfo::decode(&w.into_vec()).unwrap();
+        assert!(!got.voice);
     }
 
     #[test]

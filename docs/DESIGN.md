@@ -226,8 +226,20 @@ DaNTe/
   `--features p2p`) take `--p2p` / `--p2p-listen <multiaddr>` /
   `--bootstrap <a,b>`. e2e: `the_dht_serves_as_a_prekey_directory_fallback`
   (two engines, one resolves the other's bundle purely over the DHT).
-- **Still deferred:** gossipsub fan-out of the ledger and channel logs;
-  learning relay endpoints from `entry_relays`; health-based relay reordering.
+- **Ledger gossip** *(done, opt-in — feature `p2p`)*: `announce` /
+  `prove_liveness` / `revoke_identity` also publish the encoded record to the
+  `dante/ledger/v1` gossipsub topic; `Engine::poll_p2p(now)` (driven each tick
+  by `serve` / `chat`) folds records heard from peers into the local replica
+  via `ledger.append` (rejections — dups, out-of-order liveness — are dropped).
+  So a client can learn a brand-new peer's identity, and revocations, from the
+  mesh before its next relay `sync`. To make this safe, the relay-sync cursor
+  is now an explicit `Engine::relay_ledger_cursor` (was `ledger.len()`) and
+  `sync::pull_records` returns the relay-log position to resume from — gossip
+  appends no longer make `sync` skip relay records. e2e
+  `a_peer_learns_an_identity_from_ledger_gossip`.
+- **Still deferred:** gossipsub fan-out of channel MLS logs (channel delivery
+  leans on the relay's ordered per-channel log); learning relay endpoints from
+  `entry_relays`; health-based relay reordering.
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

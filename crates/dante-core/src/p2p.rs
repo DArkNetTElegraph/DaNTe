@@ -1,19 +1,25 @@
 //! Optional libp2p support (Cargo feature `p2p`).
 //!
-//! A Kademlia DHT used as a **decentralised key-directory fallback**: when the
-//! relay has no prekey bundle for a peer, the engine looks it up here. Prekey
-//! bundles are also mirrored onto the DHT on every `publish_prekeys`, so a
-//! client that has a DHT route can reach a peer whose relay it does not share.
+//! Two roles:
 //!
-//! The relay stays primary and is the only path for the sealed-sender mailbox
-//! (offline delivery needs a storage supernode). Gossip fan-out of the ledger
-//! and channel logs is future work — see `docs/DESIGN.md` Phase 3.
+//! * **Key-directory fallback (Kademlia).** When the relay has no prekey bundle
+//!   for a peer, the engine looks it up on the DHT. Bundles are mirrored onto
+//!   the DHT on every `publish_prekeys`.
+//! * **Ledger gossip (gossipsub).** New identity records (`announce` /
+//!   `prove_liveness` / `revoke`) are also published to a shared topic;
+//!   `Engine::poll_p2p` folds records heard from peers into the local replica.
+//!   This is an accelerant, not a source of truth — the relay remains the
+//!   authoritative, ordered log and the only sealed-sender mailbox.
 
 use std::time::Duration;
 
-use dante_p2p::Node;
+use dante_p2p::{Event, Node};
+use tokio::sync::mpsc;
 
 use crate::error::CoreError;
+
+/// Gossipsub topic carrying encoded ledger [`Record`](dante_proto::record::Record)s.
+pub(crate) const LEDGER_TOPIC: &str = "dante/ledger/v1";
 
 /// Kademlia record key for an identity's prekey bundle: a fixed tag followed by
 /// the 32-byte `IdentityId`.
@@ -33,6 +39,7 @@ fn p2p_err(e: dante_p2p::P2pError) -> CoreError {
 pub(crate) struct P2p {
     node: Node,
     listen_addrs: Vec<String>,
+    events: mpsc::Receiver<Event>,
 }
 
 impl P2p {
@@ -47,15 +54,16 @@ impl P2p {
     ) -> Result<Self, CoreError> {
         let (node, mut events) = Node::spawn(seed).map_err(p2p_err)?;
         node.listen_str(listen).await.map_err(p2p_err)?;
+        node.subscribe(LEDGER_TOPIC).await.map_err(p2p_err)?;
 
         // Collect the concrete listen addresses the OS assigned (needed so a
-        // caller can advertise them), then hand the event stream to a drain
-        // task — the driver's `emit` awaits on this channel, so it must always
-        // be consumed or the node stalls.
+        // caller can advertise them). Events after this stay in the channel for
+        // `Engine::poll_p2p` to drain; the swarm driver drops events rather than
+        // block if that falls behind, so nothing stalls.
         let mut listen_addrs = Vec::new();
         loop {
             match tokio::time::timeout(Duration::from_millis(600), events.recv()).await {
-                Ok(Some(dante_p2p::Event::Listening(a))) => {
+                Ok(Some(Event::Listening(a))) => {
                     let a = a.to_string();
                     if !listen_addrs.contains(&a) {
                         listen_addrs.push(a);
@@ -66,7 +74,6 @@ impl P2p {
                 Err(_) => break, // no more addresses forthcoming
             }
         }
-        tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         for b in bootstrap {
             if let Err(e) = node.dial_str(b).await {
@@ -75,7 +82,11 @@ impl P2p {
         }
         let _ = node.bootstrap().await;
 
-        Ok(P2p { node, listen_addrs })
+        Ok(P2p {
+            node,
+            listen_addrs,
+            events,
+        })
     }
 
     /// Mirror a prekey bundle onto the DHT. Best-effort.
@@ -98,6 +109,27 @@ impl P2p {
                 None
             }
         }
+    }
+
+    /// Broadcast an encoded ledger record to peers. Best-effort.
+    pub(crate) async fn publish_ledger(&self, record: Vec<u8>) {
+        if let Err(e) = self.node.publish(LEDGER_TOPIC, record).await {
+            tracing::debug!(error = %e, "p2p: ledger publish failed");
+        }
+    }
+
+    /// Non-blocking: take every ledger record heard from peers since the last
+    /// call. Other event kinds are discarded.
+    pub(crate) fn drain_ledger_records(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while let Ok(ev) = self.events.try_recv() {
+            if let Event::Message { topic, data, .. } = ev {
+                if topic == LEDGER_TOPIC {
+                    out.push(data);
+                }
+            }
+        }
+        out
     }
 
     /// This node's `PeerId`, rendered as a string.

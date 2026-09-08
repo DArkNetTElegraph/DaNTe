@@ -167,7 +167,9 @@ impl Node {
         swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Server));
 
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
-        let (evt_tx, evt_rx) = mpsc::channel(256);
+        // Generous: the owner drains this on a timer, and `emit` drops rather
+        // than block when it is full, so the swarm driver never stalls.
+        let (evt_tx, evt_rx) = mpsc::channel(1024);
 
         tokio::spawn(Driver::new(swarm, cmd_rx, evt_tx).run());
 
@@ -282,7 +284,7 @@ impl Driver {
                     Some(cmd) => self.on_command(cmd),
                     None => break, // every Node handle dropped
                 },
-                event = self.swarm.select_next_some() => self.on_swarm_event(event).await,
+                event = self.swarm.select_next_some() => self.on_swarm_event(event),
             }
         }
     }
@@ -361,14 +363,20 @@ impl Driver {
         }
     }
 
-    async fn emit(&mut self, e: Event) {
-        let _ = self.evt_tx.send(e).await;
+    /// Push an event to the owner. Non-blocking: if the receiver is not keeping
+    /// up we drop the event rather than stall the swarm driver (which also
+    /// serves commands). Events are advisory — gossip is best-effort and the
+    /// relay is the reliable path.
+    fn emit(&mut self, e: Event) {
+        if self.evt_tx.try_send(e).is_err() {
+            tracing::debug!("p2p: event receiver lagging, dropped an event");
+        }
     }
 
-    async fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
+    fn on_swarm_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
-                self.emit(Event::Listening(address)).await;
+                self.emit(Event::Listening(address));
             }
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
                 peer_id,
@@ -379,7 +387,7 @@ impl Driver {
                 for addr in info.listen_addrs {
                     self.swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                 }
-                self.emit(Event::PeerRoutable(peer_id)).await;
+                self.emit(Event::PeerRoutable(peer_id));
             }
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                 message,
@@ -389,8 +397,7 @@ impl Driver {
                     topic: message.topic.into_string(),
                     source: message.source,
                     data: message.data,
-                })
-                .await;
+                });
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kad(kad::Event::OutboundQueryProgressed {
                 id,

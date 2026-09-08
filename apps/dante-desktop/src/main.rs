@@ -15,6 +15,8 @@
 //!                     startup; otherwise the window shows the onboarding flow
 //!   DANTE_POW_BITS    proof-of-work difficulty for our own records (default 20)
 
+mod audio;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -103,6 +105,11 @@ fn main() -> Result<()> {
             eprintln!("dante-desktop: UI service exited: {e:#}");
         }
     });
+
+    // Bridge the OS mic/speaker to whichever 1:1 call is connected. Runs on its
+    // own thread (cpal streams are !Send) and talks to the service above over
+    // localhost HTTP.
+    let _audio = audio::spawn(port);
 
     let url = format!("http://127.0.0.1:{port}/");
     tauri::Builder::default()

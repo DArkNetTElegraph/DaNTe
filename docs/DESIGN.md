@@ -65,6 +65,28 @@ achievable with no project-run infrastructure.
   key off one Welcome; it rotates when one leaves) and smoke-tested across two
   `dante serve` instances (mesh legs reach `connected`). Media key is not yet
   applied as an SFrame layer — the mesh legs' own DTLS-SRTP protects the audio.
+- **Voice channels *(done — persistent, Discord-style)*:** a channel created
+  with `voice = true` (`ChannelInfo.voice`, back-compat: a blob without the byte
+  decodes as text) has no message log; members join a persistent call in it.
+  `Engine::join_voice_channel` starts a solo MLS call directly when the room is
+  empty, otherwise sends `Content::GroupCallJoinRequest` (dm tag 21) and sets a
+  join-intent flag so the incoming `GroupCallWelcome` auto-joins; the lowest-id
+  current participant issues the add Commit. Presence is beaconed through the
+  relay signal buffer under `sha256("dante/voice-presence/v1" ‖ channel_id)`,
+  sealed per the channel MLS epoch, fresh for 15 s (`send_voice_presence` /
+  `voice_participants` / `poll_voice`). `create_voice_channel`,
+  `leave_voice_channel`. `dante serve`: `GET /api/voice`,
+  `POST /api/voice/{join,leave}`, `voice:` on `POST /api/channel`; the SPA lists
+  voice channels under their own header with a nested participant list and shows
+  a room view with a Join / Disconnect button. CLI: `/vchannel <root> <name>`,
+  `/vc join|leave #<chan>`. e2e-tested (two members connect off one Welcome and
+  see each other in presence).
+- **Voice bitrate *(done — ≥64 kbps)*:** all voice comms (1:1 calls + group /
+  voice channels) target ≥64 kbps Opus. `dante-voice` munges the outbound SDP
+  fmtp for the Opus payload (`maxaveragebitrate=64000`, `useinbandfec=1`,
+  `stereo=1`) on the copy handed to the peer only — webrtc-rs rejects a SDP that
+  does not match the one given to `set_local_description`. `dante-audio`'s
+  `OpusCodec` sets the encoder to 64 kbps with inband FEC and a 10% loss hint.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 

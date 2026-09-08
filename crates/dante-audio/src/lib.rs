@@ -71,9 +71,19 @@ pub struct OpusCodec {
 }
 
 impl OpusCodec {
-    /// A fresh codec configured for voice (48 kHz mono, VoIP application).
+    /// Target Opus bitrate for DaNTe voice. Kept in step with
+    /// `dante_voice::MIN_VOICE_BITRATE`; the `opus` crate default for mono VoIP
+    /// sits around 24–32 kbps, which sounds thin.
+    pub const BITRATE: i32 = 64_000;
+
+    /// A fresh codec configured for voice (48 kHz mono, VoIP application) at
+    /// [`BITRATE`](Self::BITRATE) with in-band FEC for packet-loss resilience.
     pub fn new() -> Result<Self, AudioError> {
-        let enc = opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)?;
+        let mut enc =
+            opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)?;
+        enc.set_bitrate(opus::Bitrate::Bits(Self::BITRATE))?;
+        enc.set_inband_fec(true)?;
+        enc.set_packet_loss_perc(10)?;
         let dec = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono)?;
         Ok(Self {
             enc,

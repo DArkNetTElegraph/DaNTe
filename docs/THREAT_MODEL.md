@@ -60,11 +60,11 @@ with no operator who can be compelled to surveil users**. Concretely:
 | 1:1 call media confidentiality | A1, A2, A3, A5, A6, A8 | WebRTC DTLS-SRTP between the two peers. The SDP offer/answer (carrying each side's DTLS certificate fingerprint) travels inside a sealed-sender, sender-authenticated ratchet DM, so a relay cannot substitute its own DTLS identity for a MITM. Broken only by A7 / A9. Peer IP addresses are exposed to each other (and to any TURN relay, including a `--turn-listen` relay) — see §5.5. |
 | Group call media confidentiality | A1, A2, A3, A5, A6, A8 | A channel group call is a **full mesh** of the 1:1 legs above, each its own DTLS-SRTP, so the relay never sees media. Membership is bound by an MLS group whose exporter secret (`Engine::group_call_key`) rotates on every join/leave; it is not yet applied as an SFrame layer, so today the guarantee is exactly the mesh's per-leg DTLS-SRTP. Every participant learns every other participant's IP (mesh). Not against A4 — a participant is in the call. |
 | Group (channel/voice) content confidentiality | A1, A2, A3, A5, A6, A8 | **Not** against A4 — a member-host is inside the group and sees plaintext by design. |
-| Group forward secrecy within a chain | A1–A3, A5, A6, A8; **partial** vs A7 | The current `dante-group` sender-keys ratchet deletes each message key after use. |
-| Removed member loses access | A (the removed member) | On removal, every remaining member rotates its sender chain and redistributes — O(n). The removed member cannot read messages sent after the rekey. |
-| Group **post-compromise security** | — | **Channel messaging:** not provided by the sender-keys scheme — the main reason it is slated to migrate to MLS (RFC 9420), which also replaces the O(n) rekey with O(log n). **Group calls:** already MLS — the media key rotates on every join/leave with PCS. |
-| Group message authorship (insider forgery) | A4 / any member | Each member signs its channel messages with a per-group Ed25519 key distributed in its `SenderKeyBundle`; another member who holds the symmetric chain key still cannot forge messages as someone else. |
-| Password-protected server history | A3 | `Argon2id(password)` is an MLS PSK; a relay without the password cannot derive epoch secrets. Not against A4 (a member has the password). |
+| Group forward secrecy | A1–A3, A5, A6, A8; **partial** vs A7 | Channels and group calls each run one MLS group (RFC 9420); the MLS secret tree gives per-message forward secrecy. |
+| Group **post-compromise security** | A7 (after access ends) | MLS rekeys the whole group on every add / remove, and any member can force a rekey by committing an update — a compromised member's key stops being useful once the group next changes. |
+| Removed member loses access | A (the removed member) | The host commits an MLS remove; the group rekeys in O(log n) and the removed member is evicted (cannot process further messages). Re-admission works with a fresh KeyPackage. |
+| Group message authorship (insider forgery) | A4 / any member | MLS binds every application message to its sender's leaf signature key; another member cannot forge a message as someone else. Channel membership **commits** are additionally accepted only from the recorded host identity (`process_from`). |
+| Password-protected server history | A3 *(planned)* | `Argon2id(password)` woven into the channel MLS key schedule as a PSK; a relay without the password cannot derive epoch secrets. Unblocked by the MLS migration, not yet wired in — today the password only gates *joining*. Never against A4 (a member has the password). |
 | Recipient authenticity | A2, A3, A6 | Only after out-of-band fingerprint / safety-number verification. Trust-on-first-use (TOFU) before that is vulnerable to A2/A6. |
 | Anonymity of identity | A3, A4, A5 | Identity carries no PII. See §5 for what still leaks. |
 | Key-directory tamper-evidence | A6 | Consistency proofs + gossiped Merkle roots let clients detect a split view. Detection, not prevention — see §6. |
@@ -92,7 +92,7 @@ provide.
    **Channel messages** are worse for metadata than DMs: they go to a per-
    channel relay log keyed by a stable `channel_id` (a 32-byte capability), so a
    relay sees which channel each opaque message belongs to, plus its size class
-   and timing — it just cannot read the content (sender-keys encryption).
+   and timing — it just cannot read the content (MLS encryption).
    Channel-log plaintexts are now padded to size buckets (64 B / 256 B / 1 KiB /
    …) before encryption, so the relay learns only a coarse bucket, not the
    exact length. The `channel_id` is shared only with members, but it does not

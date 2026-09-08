@@ -24,7 +24,7 @@
 //! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`,
 //! `GET /api/calls`, `POST /api/call|call/accept|call/hangup {peer}`,
 //! `GET /api/ice`, `GET /api/call/audio?peer=`,
-//! `POST /api/call/audio {peer,frame_hex,ms}`.
+//! `POST /api/call/audio {peer,frame_hex|frames_hex,ms}`.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.
@@ -216,10 +216,10 @@ enum Cmd {
     Calls { reply: oneshot::Sender<String> },
     /// The ICE servers the engine will use for calls, as a ready JSON array.
     Ice { reply: oneshot::Sender<String> },
-    /// Push one Opus frame onto an active call's audio track.
+    /// Push one or more Opus frames onto an active call's audio track.
     CallAudioSend {
         peer: String,
-        frame: Vec<u8>,
+        frames: Vec<Vec<u8>>,
         ms: u32,
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -1191,16 +1191,21 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
         }
         Cmd::CallAudioSend {
             peer,
-            frame,
+            frames,
             ms,
             reply,
         } => {
             let r = match parse_fingerprint(&peer) {
-                Ok(id) => engine
-                    .send_call_audio(&id, &frame, ms)
-                    .await
-                    .map(|_| "ok".into())
-                    .map_err(|e| e.to_string()),
+                Ok(id) => {
+                    let mut out = Ok("ok".to_string());
+                    for frame in &frames {
+                        if let Err(e) = engine.send_call_audio(&id, frame, ms).await {
+                            out = Err(e.to_string());
+                            break;
+                        }
+                    }
+                    out
+                }
                 Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(r);
@@ -1934,7 +1939,11 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             #[derive(serde::Deserialize)]
             struct Req {
                 peer: String,
+                /// One frame; or use `frames_hex` for a batch.
+                #[serde(default)]
                 frame_hex: String,
+                #[serde(default)]
+                frames_hex: Vec<String>,
                 #[serde(default = "twenty")]
                 ms: u32,
             }
@@ -1944,12 +1953,21 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
             };
-            let Some(frame) = hex_bytes(&r.frame_hex) else {
-                return respond(&mut stream, 400, "text/plain", b"bad frame_hex").await;
+            let hexes = if r.frames_hex.is_empty() {
+                vec![r.frame_hex]
+            } else {
+                r.frames_hex
             };
+            let mut frames = Vec::with_capacity(hexes.len());
+            for h in hexes.iter().filter(|h| !h.is_empty()) {
+                let Some(f) = hex_bytes(h) else {
+                    return respond(&mut stream, 400, "text/plain", b"bad frame_hex").await;
+                };
+                frames.push(f);
+            }
             dispatch(&mut stream, &shared, |reply| Cmd::CallAudioSend {
                 peer: r.peer,
-                frame,
+                frames,
                 ms: r.ms,
                 reply,
             })

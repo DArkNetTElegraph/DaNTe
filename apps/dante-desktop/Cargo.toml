@@ -30,9 +30,14 @@ dante-core = { path = "../../crates/dante-core" }
 dante-crypto = { path = "../../crates/dante-crypto" }
 dante-identity = { path = "../../crates/dante-identity" }
 dante-ledger = { path = "../../crates/dante-ledger" }
+# Mic/speaker for 1:1 calls: Opus + cpal. Also detached (links libopus and the
+# platform audio stack), which is why the audio bridge lives in the desktop
+# build rather than in `dante-cli`.
+dante-audio = { path = "../../crates/dante-audio" }
 
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+serde_json = "1"
 anyhow = "1"
 
 [lints.rust]

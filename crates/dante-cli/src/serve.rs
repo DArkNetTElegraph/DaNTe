@@ -206,6 +206,9 @@ enum Cmd {
     },
     /// The public discovery directory as a ready JSON array.
     DiscoverList { reply: oneshot::Sender<String> },
+    /// `{ "<fingerprint>": "<username>", ... }` for every identity we know a
+    /// self-asserted username for.
+    Usernames { reply: oneshot::Sender<String> },
     React {
         channel: String,
         target_seq: u64,
@@ -507,6 +510,11 @@ struct Shared {
     next_seq: AtomicU64,
     /// `(fingerprint, word-phrase)`; empty until an identity is set up.
     me: Mutex<(String, String)>,
+    /// The username chosen at onboarding (`create`), announced on first connect.
+    onboard_name: Mutex<String>,
+    /// Our own display name once known (chosen at onboarding, or read back from
+    /// the ledger for an unlocked / imported identity).
+    my_name: Mutex<String>,
     /// True once the engine is connected and the tick loop is running.
     ready: AtomicBool,
     cmd: mpsc::Sender<Cmd>,
@@ -665,6 +673,8 @@ pub async fn run_on(
         voice: Mutex::new(std::collections::HashMap::new()),
         next_seq: AtomicU64::new(0),
         me: Mutex::new((String::new(), String::new())),
+        onboard_name: Mutex::new(String::new()),
+        my_name: Mutex::new(String::new()),
         ready: AtomicBool::new(false),
         cmd: cmd_tx,
         boot,
@@ -836,8 +846,9 @@ async fn engine_task(
     }
 
     eprintln!("announcing to the relay ...");
+    let onboard_name = engine_shared.onboard_name.lock().await.clone();
     if let Err(e) = async {
-        engine.announce_if_stale("", now_ms()).await?;
+        engine.announce_if_stale(&onboard_name, now_ms()).await?;
         engine.publish_prekeys().await?;
         engine.sync(now_ms()).await?;
         Ok::<_, dante_core::CoreError>(())
@@ -847,6 +858,9 @@ async fn engine_task(
         eprintln!("engine startup error: {e}");
     } else {
         eprintln!("ready");
+    }
+    if let Some(name) = engine.my_username() {
+        *engine_shared.my_name.lock().await = name;
     }
     refresh_channels(&engine, &engine_shared).await;
 
@@ -1677,6 +1691,18 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 .collect();
             let _ = reply.send(serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()));
         }
+        Cmd::Usernames { reply } => {
+            // Keep our own cached name fresh once the ledger has caught up.
+            if let Some(name) = engine.my_username() {
+                *shared.my_name.lock().await = name;
+            }
+            let map: serde_json::Map<String, serde_json::Value> = engine
+                .known_usernames()
+                .into_iter()
+                .map(|(id, name)| (id_b32(&id), serde_json::Value::String(name)))
+                .collect();
+            let _ = reply.send(serde_json::Value::Object(map).to_string());
+        }
         Cmd::React {
             channel,
             target_seq,
@@ -2149,8 +2175,23 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
 
         ("GET", "/api/me") => {
             let (fp, words) = shared.me.lock().await.clone();
-            let body = serde_json::json!({ "fingerprint": fp, "words": words }).to_string();
+            let username = shared.my_name.lock().await.clone();
+            let body = serde_json::json!({
+                "fingerprint": fp, "words": words, "username": username,
+            })
+            .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/usernames") => {
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::Usernames { reply: tx }).await.is_err() {
+                return respond(&mut stream, 503, "text/plain", b"engine down").await;
+            }
+            match rx.await {
+                Ok(body) => respond(&mut stream, 200, "application/json", body.as_bytes()).await,
+                Err(_) => respond(&mut stream, 503, "text/plain", b"engine down").await,
+            }
         }
 
         ("GET", "/api/state") => {
@@ -2179,6 +2220,10 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 passphrase: String,
                 #[serde(default)]
                 blob: String,
+                /// Chosen at registration (`create` mode); the announced
+                /// display name. Ignored for unlock / import.
+                #[serde(default)]
+                username: String,
             }
             if shared.ready.load(Ordering::Relaxed) {
                 return respond(&mut stream, 409, "text/plain", b"already set up").await;
@@ -2209,6 +2254,11 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 Ok(id) => id,
                 Err(e) => return respond(&mut stream, 400, "text/plain", e.as_bytes()).await,
             };
+            if r.mode == "create" {
+                let name: String = r.username.trim().chars().take(48).collect();
+                *shared.onboard_name.lock().await = name.clone();
+                *shared.my_name.lock().await = name;
+            }
 
             // Persist the keystore so the next run loads it directly.
             match keystore::seal(&identity, r.passphrase.as_bytes()) {

@@ -87,6 +87,9 @@ struct Chain {
     tombstoned: bool,
     /// Set once the chain's own key has published an `IdentityRevoke`.
     revoked: bool,
+    /// The self-asserted display name from the chain's `IdentityAnnounce`
+    /// (`display_hint`). Non-unique, untrusted, empty if none was given.
+    display_hint: String,
 }
 
 impl Chain {
@@ -209,6 +212,35 @@ impl<S: RecordStore> Ledger<S> {
             .map(|pk| IdentityId::of(&pk))
     }
 
+    /// The self-asserted display name (`IdentityAnnounce::display_hint`) for the
+    /// chain containing `idk`. Non-unique and unverified — a display convenience
+    /// only. `None` if unknown or the identity gave no name.
+    pub fn display_name(&self, idk: &[u8; 32]) -> Option<&str> {
+        self.chain_of(idk)
+            .map(|c| c.display_hint.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// [`display_name`](Self::display_name) resolved from stable `IdentityId`
+    /// bytes (a fingerprint) instead of an `idk`.
+    pub fn display_name_by_id(&self, identity_id: &[u8; 32]) -> Option<&str> {
+        let &chain_id = self.id_to_chain.get(identity_id)?;
+        let s = self.chains[chain_id].display_hint.as_str();
+        (!s.is_empty()).then_some(s)
+    }
+
+    /// Every known identity that announced a non-empty display name, as
+    /// `(IdentityId bytes, name)`. For populating a client's name cache.
+    pub fn usernames(&self) -> Vec<([u8; 32], String)> {
+        self.id_to_chain
+            .iter()
+            .filter_map(|(id, &ci)| {
+                let s = &self.chains[ci].display_hint;
+                (!s.is_empty()).then(|| (*id, s.clone()))
+            })
+            .collect()
+    }
+
     /// The current X25519 agreement key for a live identity named by any `idk`
     /// in its chain.
     pub fn agreement_key(&self, idk: &[u8; 32]) -> Option<[u8; 32]> {
@@ -315,6 +347,7 @@ impl<S: RecordStore> Ledger<S> {
             last_activity_ms: record.created_ms,
             tombstoned: false,
             revoked: false,
+            display_hint: body.display_hint.clone(),
         });
         self.idk_to_chain.insert(record.author, chain_id);
         self.id_to_chain
@@ -573,6 +606,27 @@ mod tests {
         assert_eq!(l.agreement_key(&idk), Some(id.agree_public().to_bytes()));
         assert_eq!(l.identity_id(&idk), Some(id.id()));
         assert_eq!(l.len(), 1);
+    }
+
+    #[test]
+    fn announce_carries_a_display_name() {
+        let mut l = ledger();
+        let id = Identity::generate(0);
+        l.append(
+            IdentityAnnounce::build(&id, "captain", D).to_record(&id, 1_000),
+            1_000,
+        )
+        .unwrap();
+        let idk = id.sign_public().to_bytes();
+        assert_eq!(l.display_name(&idk), Some("captain"));
+        assert_eq!(l.display_name_by_id(id.id().as_bytes()), Some("captain"));
+        assert_eq!(l.usernames(), vec![(*id.id().as_bytes(), "captain".into())]);
+
+        // An identity that announced without a name has none.
+        let plain = Identity::generate(1);
+        l.append(announce(&plain, 2_000), 2_000).unwrap();
+        assert_eq!(l.display_name(&plain.sign_public().to_bytes()), None);
+        assert_eq!(l.usernames().len(), 1);
     }
 
     #[test]

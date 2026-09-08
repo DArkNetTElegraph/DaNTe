@@ -44,8 +44,7 @@ pub fn random_array<const N: usize>() -> [u8; N] {
 /// Fill `buf` from the operating system CSPRNG. Same panic contract as
 /// [`random_array`].
 pub fn fill_random(buf: &mut [u8]) {
-    use rand::RngCore;
-    rand::rngs::OsRng.fill_bytes(buf);
+    getrandom::fill(buf).expect("OS CSPRNG unavailable");
 }
 
 pub(crate) use random_array as random_bytes;

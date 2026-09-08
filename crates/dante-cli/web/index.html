@@ -256,6 +256,13 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .msg-line.file { color: var(--link); }
 .msg-line.deleted { color: var(--text-faint); font-style: italic; }
 .edited-tag { color: var(--text-faint); font-size: 11px; }
+.reply-quote { font-size: 12px; color: var(--text-faint); border-left: 2px solid var(--divider);
+  padding-left: 6px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#replybar { display: flex; align-items: center; gap: 8px; padding: 6px 16px; font-size: 12px;
+  color: var(--text-muted); background: var(--bg-active); border-top: 1px solid var(--divider); }
+#replybar .reply-quote { border: 0; padding: 0; margin: 0; flex: 1; }
+#replybar button { border: 0; background: none; color: var(--text-faint); cursor: pointer; font-size: 13px; }
+#replybar button:hover { color: var(--text); }
 .msg-group { position: relative; }
 .msg-actions { position: absolute; top: 2px; right: 6px; display: none; gap: 2px; }
 .msg-group:hover .msg-actions { display: flex; }
@@ -418,6 +425,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
     <div id="gcallbar" hidden></div>
     <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
     <div id="typing"></div>
+    <div id="replybar" hidden></div>
     <div class="composer">
       <form id="composer">
         <input id="text" autocomplete="off" placeholder="Message" disabled />
@@ -525,7 +533,7 @@ const api = {
   channels()  { return this.get("/api/channels"); },
   messages(since) { return this.get("/api/messages?since=" + since); },
   typing()    { return this.get("/api/typing"); },
-  send(to, text)          { return this.post("/api/send", { to, text }); },
+  send(to, text, replyTo) { return this.post("/api/send", replyTo ? { to, text, reply_to: replyTo } : { to, text }); },
   createServer(name)      { return this.post("/api/server", { name }); },
   createChannel(server, name, password) { return this.post("/api/channel", { server, name, password: password || "" }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
@@ -965,6 +973,17 @@ function renderChat() {
       continue;
     }
     const g = groupShell(m, m.from === lastAuthor);
+    if (m.reply_to && !m._deleted) {
+      const tgt = store.messages.find(x => x.kind === "channel" && x._target === target && x.ref_seq === m.reply_to);
+      const q = el("div", "reply-quote");
+      if (tgt) {
+        const who = tgt.from === "you" ? "you" : short(tgt.from);
+        q.textContent = "↩ " + who + ": " + (tgt._deleted ? "(deleted)" : (tgt.text || "").slice(0, 100));
+      } else {
+        q.textContent = "↩ replying to an earlier message";
+      }
+      g.body.appendChild(q);
+    }
     const line = el("div", "msg-line");
     if (m._deleted) {
       line.className = "msg-line deleted";
@@ -986,29 +1005,52 @@ function renderChat() {
   log.scrollTop = log.scrollHeight;
   renderCallbar();
   renderGroupCallbar();
+  renderReplyBar();
 }
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
 
-// Edit / delete affordances on your own channel messages.
+// Reply / edit / delete affordances on channel messages.
 function addMsgActions(body, channelTarget, m) {
-  if (m.from !== "you" || !m.ref_seq) return;
+  if (!m.ref_seq) return;
   const bar = el("div", "msg-actions");
-  const edit = el("button", null, "✎"); edit.title = "Edit";
-  edit.onclick = async () => {
-    const t = await ui.ask("Edit message", m.text);
-    if (t == null || t === m.text) return;
-    try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: t }); }
-    catch (e) { ui.say("Edit failed: " + e.message); }
+  const reply = el("button", null, "↩"); reply.title = "Reply";
+  reply.onclick = () => {
+    store._replyTo = { target: channelTarget, seq: m.ref_seq, from: m.from, text: m.text };
+    renderReplyBar();
+    $("#text").focus();
   };
-  const del = el("button", null, "🗑"); del.title = "Delete";
-  del.onclick = async () => {
-    if (!await ui.confirm("Delete this message for everyone?")) return;
-    try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: "" }); }
-    catch (e) { ui.say("Delete failed: " + e.message); }
-  };
-  bar.append(edit, del);
+  bar.appendChild(reply);
+  if (m.from === "you") {
+    const edit = el("button", null, "✎"); edit.title = "Edit";
+    edit.onclick = async () => {
+      const t = await ui.ask("Edit message", m.text);
+      if (t == null || t === m.text) return;
+      try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: t }); }
+      catch (e) { ui.say("Edit failed: " + e.message); }
+    };
+    const del = el("button", null, "🗑"); del.title = "Delete";
+    del.onclick = async () => {
+      if (!await ui.confirm("Delete this message for everyone?")) return;
+      try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: "" }); }
+      catch (e) { ui.say("Delete failed: " + e.message); }
+    };
+    bar.append(edit, del);
+  }
   body.appendChild(bar);
+}
+
+function renderReplyBar() {
+  const bar = $("#replybar");
+  const r = store._replyTo;
+  if (!r || r.target !== curTarget()) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = "";
+  const who = r.from === "you" ? "yourself" : (dmLabel(r.from) || short(r.from) || "someone");
+  bar.appendChild(el("span", "reply-quote", "↩ " + who + ": " + (r.text || "").slice(0, 80)));
+  const x = el("button", null, "✕"); x.title = "Cancel reply";
+  x.onclick = () => { store._replyTo = null; renderReplyBar(); };
+  bar.appendChild(x);
 }
 
 function renderReactions(body, channelTarget, refSeq) {
@@ -1602,7 +1644,9 @@ $("#composer").addEventListener("submit", async e => {
       const notes = LS.get("notes", []); notes.push({ text: note.text, at: note._at }); LS.set("notes", notes);
       renderChat();
     } else if (t.startsWith("#")) {
-      await api.send(t, text);                 // channel echo comes back via poll
+      const rt = (store._replyTo && store._replyTo.target === t) ? store._replyTo.seq : null;
+      store._replyTo = null; renderReplyBar();
+      await api.send(t, text, rt);             // channel echo comes back via poll
     } else {
       store._pendingDmTarget = t;
       await api.send(t, text);

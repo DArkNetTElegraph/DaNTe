@@ -211,8 +211,10 @@ pub struct ChannelMessage {
     pub sender: [u8; 32],
     /// The message text.
     pub text: String,
-    /// The relay-log sequence number — a stable id reactions point at.
+    /// The relay-log sequence number — a stable id reactions/edits point at.
     pub seq: u64,
+    /// If this message is a reply, the `seq` of the message it replies to.
+    pub reply_to: Option<u64>,
 }
 
 /// A decrypted emoji reaction to a channel message.

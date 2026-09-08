@@ -797,6 +797,27 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     if cmd == "edit" { " <new text>" } else { "" }
                 ),
             },
+            "reply" => match (a, b) {
+                (Some(chan), Some(rest)) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match rest.split_once(char::is_whitespace) {
+                        Some((seq_str, text)) if !text.is_empty() => {
+                            match (parse_fingerprint(chan), seq_str.parse::<u64>()) {
+                                (Ok(cid), Ok(seq)) => {
+                                    match engine.send_channel_reply(&cid, seq, text, now_ms()).await
+                                    {
+                                        Ok(_) => println!("replied"),
+                                        Err(e) => println!("reply failed: {e}"),
+                                    }
+                                }
+                                _ => println!("usage: /reply #<chan> <seq> <text>"),
+                            }
+                        }
+                        _ => println!("usage: /reply #<chan> <seq> <text>"),
+                    }
+                }
+                _ => println!("usage: /reply #<chan> <seq> <text>"),
+            },
             "discover" => {
                 let list = engine.discoverable_servers();
                 if list.is_empty() {

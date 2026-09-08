@@ -64,6 +64,8 @@ enum Cmd {
     Send {
         to: String,
         text: String,
+        /// If set (channel target only), post as a reply to this relay-log seq.
+        reply_to: Option<u64>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     CreateServer {
@@ -296,6 +298,9 @@ enum Item {
         text: String,
         /// The relay-log seq — what reactions / edits point at.
         ref_seq: u64,
+        /// If this is a reply, the ref_seq of the message it replies to.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reply_to: Option<u64>,
     },
     /// An edit or delete of an earlier channel message, folded by the SPA.
     ChannelEdit {
@@ -605,6 +610,7 @@ async fn engine_task(
                 },
                 text: e.text.clone(),
                 ref_seq: 0,
+                reply_to: None,
             });
         }
     }
@@ -700,6 +706,7 @@ async fn engine_task(
                             from,
                             text: m.text,
                             ref_seq: m.seq,
+                            reply_to: m.reply_to,
                         });
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }
                     }
@@ -790,6 +797,7 @@ async fn engine_task(
                                     from: "system".into(),
                                     text: "\u{1f4de} group call membership changed".into(),
                                     ref_seq: 0,
+                                    reply_to: None,
                                 }
                             }
                         };
@@ -918,16 +926,27 @@ async fn refresh_group_calls(engine: &Engine, shared: &Shared) {
 
 async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
     match cmd {
-        Cmd::Send { to, text, reply } => {
+        Cmd::Send {
+            to,
+            text,
+            reply_to: send_reply_to,
+            reply,
+        } => {
             let mut channel_seq: Option<u64> = None;
             let r = match parse_target(&to) {
-                Ok((true, id)) => match engine.send_channel(&id, &text, now_ms()).await {
-                    Ok(seq) => {
-                        channel_seq = Some(seq);
-                        Ok("ok".into())
+                Ok((true, id)) => {
+                    let sent = match send_reply_to {
+                        Some(t) => engine.send_channel_reply(&id, t, &text, now_ms()).await,
+                        None => engine.send_channel(&id, &text, now_ms()).await,
+                    };
+                    match sent {
+                        Ok(seq) => {
+                            channel_seq = Some(seq);
+                            Ok("ok".into())
+                        }
+                        Err(e) => Err(e.to_string()),
                     }
-                    Err(e) => Err(e.to_string()),
-                },
+                }
                 Ok((false, id)) => engine
                     .send_dm(&id, &text, now_ms())
                     .await
@@ -945,6 +964,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                             from: "you".into(),
                             text,
                             ref_seq: channel_seq.unwrap_or(0),
+                            reply_to: send_reply_to,
                         });
                     }
                 }
@@ -1715,6 +1735,8 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             struct Req {
                 to: String,
                 text: String,
+                #[serde(default)]
+                reply_to: Option<u64>,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
@@ -1722,6 +1744,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Send {
                 to: r.to,
                 text: r.text,
+                reply_to: r.reply_to,
                 reply,
             })
             .await

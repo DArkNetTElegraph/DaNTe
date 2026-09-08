@@ -180,6 +180,7 @@ button, a, [role="button"] { -webkit-tap-highlight-color: transparent; }
   gap: 8px;
   overflow-y: auto;
 }
+.rail-btn .ic { width: 20px; height: 20px; }
 .rail-btn {
   position: relative;
   width: 44px; height: 44px;
@@ -390,19 +391,46 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 
 .composer .ghost-icon { border: 0; cursor: pointer; }
 
+/* profile card */
+.avatar.clickable { cursor: pointer; }
+.avatar.clickable:hover { box-shadow: inset 0 0 0 2px var(--cornflower-blue); }
+#profile-card { position: fixed; inset: 0; z-index: 120; background: rgba(0,0,0,.5);
+  display: flex; align-items: center; justify-content: center; animation: fade-in .14s ease; }
+.pc-box { width: min(340px, 92vw); background: var(--bg-pane); border: 1px solid var(--divider);
+  border-radius: var(--radius-lg, 16px); box-shadow: var(--shadow-lg, 0 24px 60px rgba(0,0,0,.5));
+  padding: 22px 20px; text-align: center; }
+.pc-avatar { width: 64px; height: 64px; margin: 0 auto 10px; border-radius: 30%; display: grid; place-items: center;
+  font-size: 20px; font-weight: 800; color: var(--text);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--cornflower-blue) 45%, var(--bg-raised)), var(--bg-raised));
+  box-shadow: inset 0 0 0 1px var(--divider); }
+.pc-name { font-size: 17px; font-weight: 800; color: var(--text); }
+.pc-alias { font-size: 12px; color: var(--text-faint); margin-top: 1px; }
+.pc-id { margin: 10px 0; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-muted); word-break: break-all; cursor: pointer; padding: 6px 8px;
+  background: var(--bg-input); border-radius: 8px; }
+.pc-id:hover { color: var(--link); }
+.pc-desc { font-size: 12px; color: var(--text-faint); margin-bottom: 12px; }
+.pc-verify { font-size: 12px; color: var(--blazing-flame); margin-bottom: 12px; }
+.pc-verify.ok { color: var(--ok, #3ba55d); }
+.pc-acts { display: flex; gap: 8px; }
+.pc-btn { flex: 1; border: 0; border-radius: 8px; padding: 9px; font-weight: 700; cursor: pointer;
+  background: var(--accent); color: #fff; }
+.pc-btn.ghost { background: var(--bg-raised); color: var(--text); border: 1px solid var(--divider); }
+.pc-btn:hover { filter: brightness(1.08); }
+
 /* file / image messages */
 .msg-line.file { margin-top: 2px; }
 .chat-image { max-width: min(380px, 100%); max-height: 320px; border-radius: 10px; display: block;
   border: 1px solid var(--divider); }
 .file-cap { font-size: 11px; color: var(--text-faint); margin-top: 3px; }
 .file-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
-  background: var(--bg-input); border: 1px solid var(--divider); border-radius: 10px; max-width: 340px; }
-.file-row .ic { width: 18px; height: 18px; color: var(--text-faint); }
+  background: var(--bg-input); border: 1px solid var(--divider); border-radius: 10px; max-width: 340px;
+  text-decoration: none; color: inherit; cursor: pointer; }
+a.file-row:hover { border-color: var(--cornflower-blue); }
+.file-row .file-ic .ic { width: 18px; height: 18px; color: var(--text-faint); display: block; }
 .file-meta { flex: 1; min-width: 0; }
 .file-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-dl { font-size: 12px; font-weight: 700; color: var(--cornflower-blue); text-decoration: none;
-  padding: 4px 10px; border: 1px solid var(--cornflower-blue); border-radius: 8px; }
-.file-dl:hover { background: var(--cornflower-blue); color: #fff; }
+.chat-image { cursor: zoom-in; }
 
 /* public-server browser */
 #discover-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55);
@@ -940,6 +968,7 @@ const ICONS = {
   "mic-off": '<path d="m2 2 20 20"/><path d="M15 9.3V6a3 3 0 0 0-5.9-.7M9 9v2a3 3 0 0 0 4.6 2.5"/><path d="M5 11a7 7 0 0 0 10.7 6M19 11a7 7 0 0 1-.6 2.8M12 18v3"/>',
   hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
   volume: '<path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12"/>',
+  compass: '<circle cx="12" cy="12" r="9"/><path d="m16 8-2 6-6 2 2-6 6-2Z"/>',
   reply: '<path d="M9 17 4 12l5-5"/><path d="M4 12h11a5 5 0 0 1 5 5v1"/>',
   forward: '<path d="m15 17 5-5-5-5"/><path d="M20 12H9a5 5 0 0 0-5 5v1"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
@@ -1082,6 +1111,7 @@ const store = {
   seen: 0,
   unread: new Map(),                  // target -> count of unseen messages
   mentions: new Set(),               // targets where I was @-mentioned
+  notices: [],                       // [{tag,text,scope,at}] standalone notices
   muted: new Set(LS.get("muted", [])), // targets with notifications silenced
   view: LS.get("view", { server: "@dm", target: null }),
   typingText: "",
@@ -1117,6 +1147,15 @@ const store = {
   channelName(id) { const c = this.channels.find(c => c.id === id); return c ? c.name : short(id); },
   msgsFor(target) { return this.messages.filter(m => m._target === target); },
   membersFor(target) {
+    // Authoritative: the channel's live MLS roster (minus us). Falls back to
+    // message senders for DMs / channels not yet loaded.
+    if (target && target.startsWith("#")) {
+      const ch = this.channels.find(c => "#" + c.id === target);
+      if (ch && ch.members) {
+        return ch.members.filter(fp => fp !== this.me.fingerprint && short(fp) !== short(this.me.fingerprint))
+          .sort((a, b) => a.localeCompare(b));
+      }
+    }
     const set = new Set();
     for (const m of this.msgsFor(target)) if (m.from && m.from !== "you") set.add(m.from);
     return [...set].sort((a, b) => a.localeCompare(b));
@@ -1334,12 +1373,14 @@ function renderRail() {
   add.onclick = createServerFlow;
   rail.appendChild(add);
 
-  const join = el("button", "rail-btn add", "🔗");
+  const join = el("button", "rail-btn add");
+  join.innerHTML = svgIcon("link");
   join.title = "Join with an invite link";
   join.onclick = redeemFlow;
   rail.appendChild(join);
 
-  const disc = el("button", "rail-btn add", "🧭");
+  const disc = el("button", "rail-btn add");
+  disc.innerHTML = svgIcon("compass");
   disc.title = "Browse public servers";
   disc.onclick = discoverFlow;
   rail.appendChild(disc);
@@ -1376,20 +1417,24 @@ async function discoverFlow() {
     body.appendChild(tags);
     const join = el("button", "disc-join", "Join");
     join.onclick = async () => {
+      const password = await ui.ask(`Join "${s.name}" — server password (leave blank if none):`, "");
+      if (password === null) return;
       join.disabled = true; join.textContent = "Joining…";
-      let password = "";
-      // Only prompt for a password if the first attempt is refused for one.
-      try {
-        await api.post("/api/discover/join", { server: s.root, password });
-      } catch (e) {
-        password = await ui.ask(`"${s.name}" needs a join password:`, "") || "";
-        if (!password) { join.disabled = false; join.textContent = "Join"; return; }
-        try { await api.post("/api/discover/join", { server: s.root, password }); }
-        catch (e2) { ui.say("Join failed: " + e2.message); join.disabled = false; join.textContent = "Join"; return; }
-      }
-      ui.sys(`Joining "${s.name}" — you'll appear once the host is online.`);
-      setTimeout(refreshChannels, 3000);
+      try { await api.post("/api/discover/join", { server: s.root, password }); }
+      catch (e) { ui.say("Join failed: " + e.message); join.disabled = false; join.textContent = "Join"; return; }
+      // The host validates the password and adds us out of band — wait for a
+      // channel to appear, then say if it didn't.
       ov.remove();
+      const before = store.channels.length;
+      let joined = false;
+      for (let i = 0; i < 12 && !joined; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        await refreshChannels();
+        joined = store.channels.some(c => c.root === s.root);
+      }
+      if (joined) ui.sys(`Joined "${s.name}".`);
+      else ui.say(`No response from "${s.name}". The password may be wrong, or the host is offline — try again later.`);
+      void before;
     };
     body.appendChild(join);
     card.append(banner, body);
@@ -1514,6 +1559,46 @@ function renderPane() {
       }
     }
   }
+}
+
+// Profile card for a fingerprint — name, block-id, contact + verify actions.
+function openProfile(fp) {
+  if (!fp) return;
+  document.querySelector("#profile-card")?.remove();
+  const mine = isSelf(fp);
+  const name = mine ? (store.me.username || "You") : (username(fp) || "Unknown user");
+  const pet = petname(fp);
+  const s = store.safety[fp];
+
+  const ov = el("div"); ov.id = "profile-card";
+  const card = el("div", "pc-box");
+  card.appendChild(Object.assign(el("div", "pc-avatar"), { textContent: initials(pet || name) }));
+  card.appendChild(el("div", "pc-name", pet || name));
+  if (pet && username(fp) && pet !== username(fp)) card.appendChild(el("div", "pc-alias", "aka " + username(fp)));
+  const idr = el("div", "pc-id"); idr.textContent = fp; idr.title = "click to copy";
+  idr.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(fp); ui.sys("Block-ID copied."); };
+  card.appendChild(idr);
+  card.appendChild(el("div", "pc-desc", "No description set."));
+  if (!mine && s && s.available) {
+    card.appendChild(el("div", "pc-verify" + (s.verified ? " ok" : ""),
+      s.verified ? "✓ Safety number verified" : "⚠ Safety number not verified"));
+  }
+  if (!mine) {
+    const acts = el("div", "pc-acts");
+    const msg = el("button", "pc-btn", "Message");
+    msg.onclick = () => { ov.remove(); if (!store.dms.some(d => d.fp === fp)) { store.dms.push({ fp }); LS.set("dms", store.dms); } selectTarget("@dm", fp); };
+    const con = el("button", "pc-btn ghost", store.contacts.some(c => c.fp === fp) ? "Edit contact" : "Save contact");
+    con.onclick = () => { ov.remove(); contactFlow(fp); };
+    acts.append(msg, con);
+    card.appendChild(acts);
+  }
+  ov.appendChild(card);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape" && document.querySelector("#profile-card")) { ov.remove(); document.removeEventListener("keydown", esc); }
+  });
+  document.body.appendChild(ov);
+  if (!mine && s === undefined) loadSafety(fp);
 }
 
 // Right-click menu for a channel row.
@@ -2123,35 +2208,37 @@ function renderFile(m) {
     (!m.mime && /\.(png|jpe?g|gif|webp)$/i.test(m.filename || ""));
   if (src && isImg) {
     const wrap = el("div", "msg-line file");
-    const a = el("a"); a.href = src; a.target = "_blank"; a.rel = "noopener";
-    const img = el("img", "chat-image"); img.src = src; img.alt = m.filename || "image";
+    const a = el("a"); a.href = src; a.target = "_blank"; a.rel = "noopener"; a.title = "Open " + m.filename;
+    const img = el("img", "chat-image"); img.src = src; img.alt = m.filename || "image"; img.loading = "lazy";
     a.appendChild(img);
     wrap.appendChild(a);
     wrap.appendChild(Object.assign(el("div", "file-cap"), { textContent: `${m.filename} · ${humanSize(m.size)}` }));
     return wrap;
   }
-  const row = el("div", "msg-line file file-row");
-  row.appendChild(Object.assign(el("span"), { innerHTML: svgIcon("paperclip") }));
+  // Whole row is a link: click opens / downloads the file.
+  const row = el(src ? "a" : "div", "msg-line file file-row");
+  if (src) { row.href = src; row.download = m.filename || "file"; row.target = "_blank"; row.rel = "noopener"; }
+  row.appendChild(Object.assign(el("span", "file-ic"), { innerHTML: svgIcon("paperclip") }));
   const meta = el("div", "file-meta");
   meta.appendChild(Object.assign(el("div", "file-name"), { textContent: m.filename || "file" }));
-  meta.appendChild(Object.assign(el("div", "file-cap"), { textContent: humanSize(m.size) + (src ? "" : " · not held — ask them to resend") }));
+  meta.appendChild(Object.assign(el("div", "file-cap"), {
+    textContent: humanSize(m.size) + (src ? " · click to download" : " · not held — ask them to resend"),
+  }));
   row.appendChild(meta);
-  if (src) {
-    const dl = el("a", "file-dl", "Download");
-    dl.href = src; dl.download = m.filename || "file";
-    row.appendChild(dl);
-  }
   return row;
 }
 
 function groupShell(m, sameAuthor) {
   const node = el("div", "msg-group");
   const name = m.from === "you" ? (store.me.username || short(store.me.fingerprint)) : authorLabel(m.from);
+  const fp = m.from === "you" ? store.me.fingerprint : m.from;
   const av = el("div", "avatar", initials(name));
+  if (fp) { av.classList.add("clickable"); av.onclick = () => openProfile(fp); }
   const body = el("div", "body");
   if (!sameAuthor) {
     const meta = el("div", "meta");
     const a = el("span", "author" + (m.from === "you" ? " you" : ""), name);
+    a.onclick = () => fp && openProfile(fp);
     meta.appendChild(a);
     if (m.from !== "you" && m.from) meta.appendChild(el("span", "fp", short(m.from)));
     meta.appendChild(el("span", "stamp", m._at ? new Date(m._at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""));
@@ -2193,8 +2280,12 @@ function renderMembers() {
       const isMe = fp === store.me.fingerprint;
       const label = isMe ? (store.me.username || "you") : dmLabel(fp);
       const row = el("div", "member-row" + (isMe ? " you" : ""));
-      row.appendChild(el("div", "avatar", initials(label)));
+      const av = el("div", "avatar clickable", initials(label));
+      av.onclick = () => openProfile(fp);
+      row.appendChild(av);
       const nm = el("span", "name", label);
+      nm.style.cursor = "pointer";
+      nm.onclick = () => openProfile(fp);
       if (username(fp) || isMe) nm.appendChild(Object.assign(el("span", "member-id"), { textContent: short(fp) }));
       row.appendChild(nm);
       if (inChannel && !isMe && canRoles) {
@@ -2203,7 +2294,8 @@ function renderMembers() {
         rb.onclick = () => assignRoleFlow(store.view.server, fp);
         row.appendChild(rb);
       }
-      if (inChannel && !isMe && canKick) {
+      const isOwner = root && store.policies[root] && store.policies[root].owner === fp;
+      if (inChannel && !isMe && canKick && !isOwner) {
         const kick = el("button", "kick", "×");
         kick.title = "Remove from channel";
         kick.onclick = () => removeMemberFlow(target, fp);
@@ -2304,7 +2396,10 @@ const EMOJI_CATS = [
 ];
 
 let emojiPop = null;
-function emojiPopClose() { if (emojiPop) { emojiPop.remove(); emojiPop = null; } }
+function emojiPopClose() {
+  if (emojiPop) { emojiPop.remove(); emojiPop = null; }
+  removeEventListener("click", emojiPopOutside);   // always, however we closed
+}
 // Open the picker anchored to `anchor`; `onPick(str)` gets an emoji char or
 // `:shortcode:` for a custom one.
 function openEmojiPicker(anchor, onPick) {
@@ -2361,7 +2456,10 @@ function openEmojiPicker(anchor, onPick) {
   setTimeout(() => addEventListener("click", emojiPopOutside), 0);
 }
 function emojiPopOutside(e) {
-  if (emojiPop && !emojiPop.contains(e.target)) { emojiPopClose(); removeEventListener("click", emojiPopOutside); }
+  // Ignore clicks on the button that opened it (its own handler toggles).
+  if (emojiPop && !emojiPop.contains(e.target) && !e.target.closest("#emoji-pick, .react-chip.add")) {
+    emojiPopClose();
+  }
 }
 addEventListener("keydown", e => { if (e.key === "Escape") emojiPopClose(); });
 
@@ -2444,9 +2542,12 @@ async function createChannelFlow(server) {
   } catch (e) { ui.say("Could not create channel (are you the host?): " + e.message); }
 }
 async function inviteFlow(channelTarget) {
-  const peer = await ui.ask("Invite whom? (fingerprint)");
-  if (!peer) return;
-  try { await api.invite(channelTarget, peer); ui.sys("Invite sent to " + short(peer)); }
+  const raw = await ui.ask("Invite whom? (fingerprint or 24 words)");
+  if (!raw) return;
+  let peer;
+  try { peer = await resolveFp(raw); }
+  catch (e) { return ui.say("Not a valid fingerprint: " + e.message); }
+  try { await api.invite(channelTarget, peer); ui.sys("Invite sent to " + (username(peer) || short(peer))); }
   catch (e) { ui.say("Invite failed: " + e.message); }
 }
 async function inviteLinkFlow(channelTarget) {
@@ -2476,11 +2577,15 @@ async function redeemFlow() {
   ], { ok: "Redeem" });
   if (!f || !f.link) return;
   const { link, password } = f;
-  try {
-    await api.post("/api/redeem", { link, password });
-    ui.sys("Redeemed — you'll join once the host is online.");
-    setTimeout(refreshChannels, 3000);
-  } catch (e) { ui.say("Redeem failed: " + e.message); }
+  try { await api.post("/api/redeem", { link, password }); }
+  catch (e) { return ui.say("Redeem failed: " + e.message); }
+  const before = store.channels.length;
+  for (let i = 0; i < 12; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    await refreshChannels();
+    if (store.channels.length > before) { ui.sys("Joined."); return; }
+  }
+  ui.say("No response — the link may be invalid or expired, the password wrong, or the host offline.");
 }
 async function joinPwFlow(server) {
   const root = store.rootOf(server);
@@ -2495,12 +2600,19 @@ async function joinPwFlow(server) {
     ui.sys(f.pw ? "Join password updated." : "Join password removed.");
   } catch (e) { ui.say("Could not change it: " + e.message); }
 }
+async function resolveFp(input) {
+  const r = await api.post("/api/resolve", { peer: input.trim() });
+  return r.fingerprint;
+}
 async function addDmFlow() {
-  const fp = await ui.ask("Their fingerprint (base32) or 24 words:");
-  if (!fp) return;
+  const raw = await ui.ask("Their fingerprint (base32) or 24 words:");
+  if (!raw) return;
+  let fp;
+  try { fp = await resolveFp(raw); }
+  catch (e) { return ui.say("That doesn't look like a valid fingerprint: " + e.message); }
   if (!store.dms.some(d => d.fp === fp)) { store.dms.push({ fp }); LS.set("dms", store.dms); }
   const nn = await ui.ask("Save as a contact? Enter a petname (or leave blank to skip):", "");
-  if (nn) api.post("/api/contact", { peer: fp, petname: nn }).then(refreshContacts).catch(() => {});
+  if (nn) api.post("/api/contact", { peer: fp, petname: nn }).then(refreshContacts).catch(e => ui.say("Contact not saved: " + e.message));
   selectTarget("@dm", fp);
 }
 
@@ -2830,6 +2942,21 @@ function ingest(items) {
       if (it.channel === voiceRtc.channelId) voiceOnSignal(it.from, it.sig_kind, it.data);
       continue;
     }
+    if (it.kind === "notice") {
+      store.notices.unshift({ tag: it.tag, text: it.text, scope: it.scope || "", at: Date.now() });
+      store.notices = store.notices.slice(0, 50);
+      notify("DaNTe", it.text);
+      if (it.tag === "kicked" && it.scope) {
+        // Drop the removed server's channels and their history right away.
+        const gone = new Set(store.channels.filter(c => c.root === it.scope).map(c => "#" + c.id));
+        store.channels = store.channels.filter(c => c.root !== it.scope);
+        store.messages = store.messages.filter(m => !gone.has(m._target));
+        if (gone.has(curTarget())) selectTarget("@dm", null);
+      }
+      renderNotifButton();
+      render();
+      continue;
+    }
     if (it.kind === "channel") {
       it._target = "#" + it.channel;
       if (!it.from) it.from = "you";
@@ -2891,7 +3018,15 @@ function openStream() {
 async function pollTyping() {
   try {
     const r = await api.typing();
-    if (r.text !== store.typingText) { store.typingText = r.text; renderTyping(); }
+    // `who` carries fingerprints — render with display names.
+    const names = (r.who || []).map(fp => authorLabel(fp));
+    let text = "";
+    if (names.length === 1) text = names[0] + " is typing…";
+    else if (names.length === 2) text = names[0] + " and " + names[1] + " are typing…";
+    else if (names.length === 3) text = names[0] + ", " + names[1] + " and " + names[2] + " are typing…";
+    else if (names.length > 3) text = "several people are typing…";
+    else text = r.text || "";
+    if (text !== store.typingText) { store.typingText = text; renderTyping(); }
   } catch (_) {}
 }
 async function refreshChannels() {
@@ -3083,6 +3218,10 @@ $("#btn-notif").onclick = () => {
   const seen = new Set();
   const label = t => t === store.me.fingerprint ? "Private Note"
     : t.startsWith("#") ? "#" + store.channelName(t.slice(1)) : ("@ " + dmLabel(t));
+  for (const n of store.notices.slice(0, 10)) {
+    items.push({ iconName: "ban", label: n.text, run: () => {} });
+  }
+  if (store.notices.length && (store.mentions.size || [...store.unread].some(([, c]) => c))) items.push("sep");
   for (const t of store.mentions) {
     seen.add(t);
     items.push({ iconName: "bell", label: "Mention · " + label(t), run: () => jumpTo(t) });
@@ -3092,6 +3231,10 @@ $("#btn-notif").onclick = () => {
     items.push({ iconName: "hash", label: `${c} unread · ${label(t)}`, run: () => jumpTo(t) });
   }
   if (!items.length) items.push({ label: "Nothing new", disabled: true, run: () => {} });
+  if (store.notices.length) {
+    items.push("sep");
+    items.push({ iconName: "x", label: "Clear notices", run: () => { store.notices = []; renderNotifButton(); } });
+  }
   ctxAnchor($("#btn-notif"), items);
 };
 function jumpTo(t) {
@@ -3100,7 +3243,7 @@ function jumpTo(t) {
   if (ch) selectTarget(ch.server, t);
 }
 function renderNotifButton() {
-  const n = store.totalUnread() + store.mentions.size;
+  const n = store.totalUnread() + store.mentions.size + store.notices.length;
   $("#btn-notif").classList.toggle("has-dot", n > 0);
 }
 

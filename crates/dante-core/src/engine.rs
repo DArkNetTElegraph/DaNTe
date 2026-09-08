@@ -475,6 +475,9 @@ pub struct Engine {
     seen_envelopes: HashSet<[u8; 32]>,
     history: Vec<HistoryEntry>,
     channel_history: Vec<ChannelHistoryEntry>,
+    /// Channels the host removed us from since the last `take_evicted_channels`
+    /// — `(channel_id, server_root, server_name)`. Not persisted.
+    evicted_channels: Vec<([u8; 32], [u8; 32], String)>,
     /// Redemption counts for invite tokens we minted, keyed by token nonce.
     invite_uses: HashMap<[u8; 8], u32>,
     /// Role configuration per server_root: the one we sign for servers we host,
@@ -603,6 +606,7 @@ impl Engine {
             seen_envelopes: HashSet::new(),
             history: Vec::new(),
             channel_history: Vec::new(),
+            evicted_channels: Vec::new(),
             invite_uses: HashMap::new(),
             server_policies: HashMap::new(),
             new_reactions: Vec::new(),
@@ -1936,6 +1940,21 @@ impl Engine {
     /// Channels this client currently belongs to.
     pub fn channels(&self) -> Vec<ChannelInfo> {
         self.channels.values().map(|c| c.info.clone()).collect()
+    }
+
+    /// The live MLS membership of a channel we're in — `IdentityId` bytes,
+    /// including ourselves. Empty if we don't have the channel.
+    pub fn channel_roster(&self, channel_id: &[u8; 32]) -> Vec<[u8; 32]> {
+        self.channels
+            .get(channel_id)
+            .map(|c| c.roster.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Channels the host has removed us from since the last call —
+    /// `(channel_id, server_root, server_name)`. Drains the queue.
+    pub fn take_evicted_channels(&mut self) -> Vec<([u8; 32], [u8; 32], String)> {
+        std::mem::take(&mut self.evicted_channels)
     }
 
     /// Create a server: mint a root key, register it on the ledger. Returns the
@@ -3373,7 +3392,7 @@ impl Engine {
         #[allow(clippy::type_complexity)]
         let mut pending_edits: Vec<([u8; 32], u64, [u8; 32], Option<String>)> = Vec::new();
         let mut pending_pins: Vec<([u8; 32], u64, [u8; 32], bool)> = Vec::new();
-        let mut evicted: Vec<[u8; 32]> = Vec::new();
+        let mut evicted: Vec<([u8; 32], [u8; 32], String)> = Vec::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
             let entries = sync::fetch_channel(&mut self.client, &id, since).await?;
@@ -3400,7 +3419,7 @@ impl Engine {
                     Ok(mls::Processed::EpochChanged) => {
                         ch.resync_roster();
                         if !ch.roster.contains(&me) {
-                            evicted.push(id); // the host removed us
+                            evicted.push((id, ch.info.server_root, ch.info.server_name.clone()));
                         }
                         self.dirty = true;
                     }
@@ -3483,8 +3502,9 @@ impl Engine {
                 }
             }
         }
-        for cid in evicted {
+        for (cid, root, name) in evicted {
             self.channels.remove(&cid);
+            self.evicted_channels.push((cid, root, name));
         }
         for (cid, seq, emoji, member, removed) in new_reacts {
             self.record_reaction(cid, seq, emoji, member, removed);

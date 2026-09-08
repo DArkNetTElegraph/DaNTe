@@ -432,6 +432,17 @@ enum Item {
         text: String,
         deleted: bool,
     },
+    /// A standalone notice for the notifications tray (e.g. "you were removed
+    /// from a server"). Not tied to a conversation.
+    Notice {
+        seq: u64,
+        /// Short category tag, e.g. "kicked".
+        tag: String,
+        text: String,
+        /// Optional server fingerprint the notice refers to.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        scope: String,
+    },
     /// A relayed WebRTC signalling blob for a voice-channel mesh leg. The SPA
     /// owns the peer connections; this just carries offer / answer / ICE / bye.
     VoiceSignal {
@@ -456,6 +467,7 @@ impl Item {
             | Item::ChannelEdit { seq, .. }
             | Item::ChannelPin { seq, .. }
             | Item::DmEdit { seq, .. }
+            | Item::Notice { seq, .. }
             | Item::VoiceSignal { seq, .. } => *seq,
         }
     }
@@ -473,6 +485,10 @@ struct ChanView {
     /// A voice channel — members join a persistent call instead of chatting.
     #[serde(default)]
     voice: bool,
+    /// Live MLS roster (fingerprints), including us. The authoritative member
+    /// list — not inferred from who has spoken.
+    #[serde(default)]
+    members: Vec<String>,
 }
 
 /// One voice channel's live state for the SPA.
@@ -956,6 +972,32 @@ async fn engine_task(
                     }
                 }
 
+                // The host removed us from a channel — tell the SPA to drop it
+                // and post a notice.
+                {
+                    let evicted = engine.take_evicted_channels();
+                    if !evicted.is_empty() {
+                        let mut inbox = engine_shared.inbox.lock().await;
+                        for (cid, root, name) in evicted {
+                            let where_ = if name.is_empty() {
+                                format!("server {}", &id_b32(&root)[..9])
+                            } else {
+                                format!("{name} ({})", &id_b32(&root)[..9])
+                            };
+                            inbox.push_back(Item::Notice {
+                                seq: engine_shared.next(),
+                                tag: "kicked".into(),
+                                text: format!("You were removed from {where_}."),
+                                scope: id_b32(&root),
+                            });
+                            let _ = cid;
+                        }
+                        while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                        drop(inbox);
+                        refresh_channels(&engine, &engine_shared).await;
+                    }
+                }
+
                 {
                     let reacts = engine.take_reactions();
                     if !reacts.is_empty() {
@@ -1159,6 +1201,9 @@ async fn engine_task(
 
                 let _ = engine.poll_group_calls(now).await;
                 refresh_group_calls(&engine, &engine_shared).await;
+                // Keep the member roster / channel list fresh every tick (a
+                // membership Commit changes it without any explicit command).
+                refresh_channels(&engine, &engine_shared).await;
 
                 // Voice channels: beacon our presence, then refresh who's in each.
                 let _ = engine.send_voice_presence(now).await;
@@ -1221,6 +1266,11 @@ async fn refresh_channels(engine: &Engine, shared: &Shared) {
                 .map(|ms| ms / 86_400_000)
                 .unwrap_or(0),
             voice: c.voice,
+            members: engine
+                .channel_roster(&c.channel_id)
+                .iter()
+                .map(id_b32)
+                .collect(),
         })
         .collect();
     *shared.channels.lock().await = views;
@@ -2261,6 +2311,31 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             }
         }
 
+        ("POST", "/api/resolve") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                peer: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            match parse_fingerprint(&r.peer) {
+                Ok(id) => {
+                    let body = serde_json::json!({ "fingerprint": id_b32(&id) }).to_string();
+                    respond(&mut stream, 200, "application/json", body.as_bytes()).await
+                }
+                Err(_) => {
+                    respond(
+                        &mut stream,
+                        400,
+                        "text/plain",
+                        b"not a valid fingerprint or 24-word phrase",
+                    )
+                    .await
+                }
+            }
+        }
+
         ("GET", "/api/state") => {
             let ready = shared.ready.load(Ordering::Relaxed);
             let fp = shared.me.lock().await.0.clone();
@@ -2361,13 +2436,18 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         }
 
         ("GET", "/api/typing") => {
-            let text = {
+            let (text, who) = {
                 let mut typing = shared.typing.lock().await;
                 let now = now_ms();
                 typing.retain(|(_, seen)| now.saturating_sub(*seen) <= TYPING_FRESH_MS);
-                typing_text(&typing, now)
+                let mut who: Vec<String> = typing.iter().map(|(w, _)| w.clone()).collect();
+                who.sort_unstable();
+                who.dedup();
+                (typing_text(&typing, now), who)
             };
-            let body = serde_json::json!({ "text": text }).to_string();
+            // `who` carries fingerprints so the SPA can render display names;
+            // `text` stays as a fallback.
+            let body = serde_json::json!({ "text": text, "who": who }).to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 
@@ -3393,7 +3473,7 @@ async fn dispatch(
 /// an external script or exfiltrate to another origin.
 const SEC: &str = "Content-Security-Policy: default-src 'none'; \
      script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
-     connect-src 'self'; img-src 'self' data:; base-uri 'none'; \
+     connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; base-uri 'none'; \
      form-action 'none'; frame-ancestors 'none'\r\n\
      X-Content-Type-Options: nosniff\r\n\
      Referrer-Policy: no-referrer\r\n\

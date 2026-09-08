@@ -10,12 +10,13 @@ from `crates/dante-cli` unchanged. The desktop build's job over time is the
 *native* layer: window/menus, OS notifications, tray, deep links, auto-update.
 
 One native piece is already here: **`src/audio.rs`** bridges the OS microphone
-and speaker to a live 1:1 call. It runs on its own thread (`cpal` streams are
-`!Send`), captures + encodes Opus with `crates/dante-audio`, and exchanges
-frames with the local service over `POST`/`GET /api/call/audio`. It starts the
-mic only while a call is in state `connected` and drops it when the call ends.
-This is why `dante-audio` is a dependency here and not in `dante-cli` — it links
-`libopus` and the platform audio stack, absent from CI.
+and speaker to live calls — 1:1 and group. It runs on its own thread (`cpal`
+streams are `!Send`), captures + encodes Opus once with `crates/dante-audio`,
+fans the frames out to every `connected` leg in `/api/calls`, decodes each leg
+with its own Opus decoder, and plays a summed mix. The mic opens only while at
+least one leg is connected and is released when the last one ends. This is why
+`dante-audio` is a dependency here and not in `dante-cli` — it links `libopus`
+and the platform audio stack, absent from CI.
 
 ## Why it's detached from the workspace
 

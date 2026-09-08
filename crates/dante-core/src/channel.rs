@@ -133,6 +133,15 @@ pub enum ChannelControl {
         /// The new display name.
         name: String,
     },
+    /// The host hands a new member a plaintext snapshot of recent channel
+    /// messages — MLS forward secrecy means they can't decrypt the log from
+    /// before their epoch, so the host shares it directly over the DM.
+    History {
+        /// The channel the snapshot belongs to.
+        channel_id: [u8; 32],
+        /// `(sender member id, Unix ms, text)`, oldest first.
+        entries: Vec<([u8; 32], u64, String)>,
+    },
 }
 
 impl ChannelControl {
@@ -167,6 +176,15 @@ impl ChannelControl {
             }
             ChannelControl::Renamed { channel_id, name } => {
                 w.u8(9).fixed(channel_id).string(name);
+            }
+            ChannelControl::History {
+                channel_id,
+                entries,
+            } => {
+                w.u8(10).fixed(channel_id).u32(entries.len() as u32);
+                for (sender, at_ms, text) in entries {
+                    w.fixed(sender).u64(*at_ms).string(text);
+                }
             }
         }
         w.into_vec()
@@ -209,6 +227,18 @@ impl ChannelControl {
                 channel_id: r.fixed::<32>()?,
                 name: r.string()?,
             },
+            10 => {
+                let channel_id = r.fixed::<32>()?;
+                let n = r.u32()? as usize;
+                let mut entries = Vec::with_capacity(n.min(1024));
+                for _ in 0..n {
+                    entries.push((r.fixed::<32>()?, r.u64()?, r.string()?));
+                }
+                ChannelControl::History {
+                    channel_id,
+                    entries,
+                }
+            }
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "ChannelControl",
@@ -379,10 +409,17 @@ mod tests {
                 channel_id: [8u8; 32],
                 name: "off-topic".into(),
             },
+            ChannelControl::History {
+                channel_id: [8u8; 32],
+                entries: vec![
+                    ([1u8; 32], 111, "hi".into()),
+                    ([2u8; 32], 222, "there".into()),
+                ],
+            },
         ] {
             assert_eq!(ChannelControl::decode(&c.encode()).unwrap(), c);
         }
-        assert!(ChannelControl::decode(&[10]).is_err());
+        assert!(ChannelControl::decode(&[11]).is_err());
     }
 
     #[test]

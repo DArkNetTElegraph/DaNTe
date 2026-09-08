@@ -502,6 +502,11 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                 // Voice-channel WebRTC signalling is browser-only;
                                 // the terminal client has no media path.
                                 dante_core::Inbound::VoiceSignal { .. } => {}
+                                dante_core::Inbound::ChannelBacklog { entries, .. } => {
+                                    for (_who, _at, text) in entries {
+                                        println!("  · {text}");
+                                    }
+                                }
                             }
                         }
                     }

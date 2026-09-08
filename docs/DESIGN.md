@@ -437,8 +437,19 @@ infrastructure. Reached. ---**
   `last_seq`, so a replay would not rebuild it) and re-exposed on restart via
   `Engine::reaction_snapshot()`; `serve` seeds its in-memory view from that at
   boot (`GET /api/reactions`, `POST /api/react`), the SPA renders toggle chips
-  under each message. You still cannot react to your own optimistic echo (no
-  `seq` until it round-trips).
+  under each message.
+- **Edit / delete channel messages** *(done)*: `Content::Edit { target_seq,
+  text }` / `Content::Delete { target_seq }` ride the channel log like
+  reactions. Only the recorded author's change is applied (`channel_edits`
+  map, persisted; `take_edits` / `edit_snapshot` mirror the reaction path).
+  `PostToChannel` now answers `Response::Posted(seq)` so `send_channel`
+  returns the relay-log seq — the sender's handle to its own message, which
+  never comes back through `poll_channels`. `serve` `POST /api/edit
+  {channel,seq,text}` (empty text deletes); own sent messages now carry a
+  real `ref_seq`; the SPA folds the edit in, shows `(edited)` / `(message
+  deleted)`, and hover ✎/🗑 on your own lines. CLI `/edit` `/delete`. Same
+  restart caveat as reactions (authorship of a pre-restart message isn't
+  re-derivable).
 - **Custom per-server emoji** *(done)*: `ServerPolicy` gained an `emojis:
   Vec<(shortcode, [u8;32])>` tail field (back-compat: only written when
   non-empty, so pre-emoji signatures still verify). `Engine::set_server_emoji`

@@ -146,29 +146,31 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .chan-row.blocked .name { text-decoration: line-through; opacity: .55; }
 #btn-contact.on { color: var(--orange); }
 #btn-block.on { color: var(--blazing-flame); }
-#btn-call.active { color: var(--cornflower-blue); }
+#btn-call.active, #btn-groupcall.active { color: var(--cornflower-blue); }
 
-#callbar { display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+#callbar, #gcallbar { display: flex; align-items: center; gap: 10px; padding: 8px 16px;
   background: var(--bg-active); border-bottom: 1px solid var(--divider);
   font-size: 13px; color: var(--text); }
-#callbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cornflower-blue);
-  animation: pulse 1.2s ease-in-out infinite; }
-#callbar.connected .dot { background: #3fbf6f; animation: none; }
-#callbar .spacer { flex: 1; }
-#callbar button { border: 0; border-radius: 6px; padding: 6px 12px; font-weight: 700;
-  font-size: 12px; cursor: pointer; }
-#callbar button.accept { background: #3fbf6f; color: #08240f; }
-#callbar button.hangup { background: var(--blazing-flame); color: #fff; }
+#callbar .dot, #gcallbar .dot { width: 8px; height: 8px; border-radius: 50%;
+  background: var(--cornflower-blue); animation: pulse 1.2s ease-in-out infinite; }
+#callbar.connected .dot, #gcallbar.joined .dot { background: #3fbf6f; animation: none; }
+#callbar .spacer, #gcallbar .spacer { flex: 1; }
+#callbar button, #gcallbar button { border: 0; border-radius: 6px; padding: 6px 12px;
+  font-weight: 700; font-size: 12px; cursor: pointer; }
+#callbar button.accept, #gcallbar button.accept { background: #3fbf6f; color: #08240f; }
+#callbar button.hangup, #gcallbar button.hangup { background: var(--blazing-flame); color: #fff; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
 
-#call-toast { position: fixed; right: 18px; bottom: 18px; z-index: 90;
+#call-toast, #gcall-toast { position: fixed; right: 18px; z-index: 90;
   background: var(--bg-pane); border: 1px solid var(--divider); border-radius: 10px;
   box-shadow: 0 16px 40px rgba(0,0,0,.45); padding: 14px 16px; display: flex;
   gap: 10px; align-items: center; font-size: 13px; color: var(--text); }
-#call-toast button { border: 0; border-radius: 6px; padding: 6px 12px; font-weight: 700;
-  font-size: 12px; cursor: pointer; }
-#call-toast .accept { background: #3fbf6f; color: #08240f; }
-#call-toast .decline { background: var(--blazing-flame); color: #fff; }
+#call-toast { bottom: 18px; }
+#gcall-toast { bottom: 92px; }
+#call-toast button, #gcall-toast button { border: 0; border-radius: 6px; padding: 6px 12px;
+  font-weight: 700; font-size: 12px; cursor: pointer; }
+#call-toast .accept, #gcall-toast .accept { background: #3fbf6f; color: #08240f; }
+#call-toast .decline, #gcall-toast .decline { background: var(--blazing-flame); color: #fff; }
 
 .pane-scroll { flex: 1; overflow-y: auto; padding: 10px 8px; }
 .group-label {
@@ -392,6 +394,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
       <button class="icon-btn" id="btn-call" title="Start a voice call" hidden>📞</button>
+      <button class="icon-btn" id="btn-groupcall" title="Start a group call" hidden>📞👥</button>
       <button class="icon-btn" id="btn-contact" title="Save as contact" hidden>☆</button>
       <button class="icon-btn" id="btn-leave" title="Leave channel" hidden>🚪</button>
       <button class="icon-btn" id="btn-delchan" title="Delete channel" hidden>🗑</button>
@@ -404,6 +407,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <input type="file" id="emoji-file" accept="image/*" hidden>
     </header>
     <div id="callbar" hidden></div>
+    <div id="gcallbar" hidden></div>
     <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
     <div id="typing"></div>
     <div class="composer">
@@ -423,6 +427,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 </div>
 
 <div id="call-toast" hidden></div>
+<div id="gcall-toast" hidden></div>
 
 <script>
 "use strict";
@@ -470,6 +475,7 @@ const store = {
   contacts: [],                       // [{fp,petname,verified,added_ms}]
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
+  groupCalls: [],                     // [{channel,channel_name,joined,participants,invited_by}]
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -836,7 +842,10 @@ function renderChat() {
   delChanBtn.hidden = true;
   const callBtn = $("#btn-call");
   callBtn.hidden = true;
+  const gcallBtn = $("#btn-groupcall");
+  gcallBtn.hidden = true;
   $("#callbar").hidden = true;
+  $("#gcallbar").hidden = true;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
@@ -855,6 +864,15 @@ function renderChat() {
     linkBtn.onclick = () => inviteLinkFlow(target);
     emojiBtn.hidden = false;
     emojiBtn.onclick = () => emojiFlow(store.rootOf(store.view.server));
+    const gc = groupCallFor(target.slice(1));
+    gcallBtn.hidden = false;
+    gcallBtn.classList.toggle("active", !!(gc && gc.joined));
+    gcallBtn.title = gc && gc.joined ? "In the group call — open the bar to leave"
+      : gc ? "Join the group call" : "Start a group call";
+    gcallBtn.onclick = () => {
+      if (gc && gc.joined) return;
+      groupCallAction(target.slice(1), gc ? "join" : "start");
+    };
     const root = store.rootOf(store.view.server);
     const iOwn = root && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
     if (iOwn) {
@@ -923,7 +941,11 @@ function renderChat() {
 
   const msgs = store.msgsFor(target);
   log.innerHTML = "";
-  if (!msgs.length) { log.appendChild(el("div", "empty", "No messages yet — say hello.")); return; }
+  if (!msgs.length) {
+    log.appendChild(el("div", "empty", "No messages yet — say hello."));
+    renderCallbar(); renderGroupCallbar();
+    return;
+  }
 
   let lastAuthor = null;
   for (const m of msgs) {
@@ -944,6 +966,7 @@ function renderChat() {
   }
   log.scrollTop = log.scrollHeight;
   renderCallbar();
+  renderGroupCallbar();
 }
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
@@ -1181,7 +1204,7 @@ async function removeMemberFlow(channelTarget, memberFp) {
 
 function renderTyping() { $("#typing").textContent = store.typingText || ""; }
 
-function render() { renderRail(); renderPane(); renderChat(); renderMembers(); renderTyping(); }
+function render() { renderRail(); renderPane(); renderChat(); renderMembers(); renderTyping(); renderGroupCallToast(); }
 const esc = s => { const d = el("div"); d.textContent = s; return d.innerHTML; };
 
 /* custom-emoji map for the server currently in view: { shortcode: hexhash } */
@@ -1368,6 +1391,69 @@ function renderCallToast() {
   acc.onclick = () => { selectTarget("@dm", ring.peer); callAction(ring.peer, "accept"); };
   const dec = el("button", "decline", "Decline");
   dec.onclick = () => callAction(ring.peer, "hangup");
+  toast.appendChild(acc);
+  toast.appendChild(dec);
+}
+
+async function refreshGroupCalls() {
+  try {
+    const g = await api.get("/api/groupcalls");
+    if (JSON.stringify(g) !== JSON.stringify(store.groupCalls)) {
+      store.groupCalls = g;
+      render();
+    }
+  } catch (_) {}
+}
+
+function groupCallFor(channelId) {
+  return store.groupCalls.find(g => g.channel === channelId) || null;
+}
+
+async function groupCallAction(channelId, action) {
+  try { await api.post("/api/groupcall/" + action, { channel: channelId }); await refreshGroupCalls(); }
+  catch (e) { ui.sys("group call: " + e.message); }
+}
+
+function renderGroupCallbar() {
+  const bar = $("#gcallbar");
+  const t = curTarget();
+  const g = (t && t.startsWith("#")) ? groupCallFor(t.slice(1)) : null;
+  if (!g) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.className = g.joined ? "joined" : "";
+  bar.innerHTML = "";
+  bar.appendChild(el("span", "dot"));
+  const who = g.joined ? `In a group call · ${g.participants + 1} on the line`
+    : g.invited_by ? `${short(g.invited_by)} invited you to a group call`
+    : "Group call ringing";
+  bar.appendChild(el("span", null, "📞👥 " + who));
+  bar.appendChild(el("span", "spacer"));
+  if (!g.joined) {
+    const acc = el("button", "accept", "Join");
+    acc.onclick = () => groupCallAction(g.channel, "join");
+    bar.appendChild(acc);
+  }
+  const leave = el("button", "hangup", g.joined ? "Leave" : "Dismiss");
+  leave.onclick = () => groupCallAction(g.channel, "leave");
+  bar.appendChild(leave);
+}
+
+function renderGroupCallToast() {
+  const toast = $("#gcall-toast");
+  const inv = store.groupCalls.find(g => !g.joined && g.invited_by
+    && ("#" + g.channel) !== curTarget());
+  if (!inv) { toast.hidden = true; return; }
+  toast.hidden = false;
+  toast.innerHTML = "";
+  toast.appendChild(el("span", null, "📞👥 " + (store.channelName(inv.channel) || "a channel")));
+  const acc = el("button", "accept", "Join");
+  acc.onclick = () => {
+    const ch = store.channels.find(c => c.id === inv.channel);
+    if (ch) selectTarget(ch.server, "#" + inv.channel);
+    groupCallAction(inv.channel, "join");
+  };
+  const dec = el("button", "decline", "Dismiss");
+  dec.onclick = () => groupCallAction(inv.channel, "leave");
   toast.appendChild(acc);
   toast.appendChild(dec);
 }
@@ -1582,6 +1668,7 @@ async function init() {
   refreshContacts();
   refreshBlocked();
   refreshCalls();
+  refreshGroupCalls();
   setInterval(poll, 700);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
@@ -1590,6 +1677,7 @@ async function init() {
   setInterval(refreshContacts, 8000);
   setInterval(refreshBlocked, 8000);
   setInterval(refreshCalls, 1200);
+  setInterval(refreshGroupCalls, 1500);
 }
 init();
 </script>

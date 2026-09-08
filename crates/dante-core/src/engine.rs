@@ -3782,7 +3782,19 @@ impl Engine {
                     return Ok(());
                 };
                 let requester = *IdentityId::of(&pk).as_bytes();
-                if self.member_perms(&server_root, &requester) & roles::PERM_KICK != 0 {
+                let owner = self.server_policies.get(&server_root).map(|p| p.owner_id);
+                // Staff (kick / manage-roles power) can only be removed by the
+                // owner; the owner is never removable this way.
+                let target_is_staff = self.member_perms(&server_root, &member)
+                    & (roles::PERM_KICK | roles::PERM_MANAGE_ROLES)
+                    != 0;
+                let requester_is_owner = owner == Some(requester);
+                if Some(member) == owner {
+                    return Ok(());
+                }
+                if self.member_perms(&server_root, &requester) & roles::PERM_KICK != 0
+                    && (requester_is_owner || !target_is_staff)
+                {
                     self.remove_from_channel(&channel_id, &member, now_ms)
                         .await?;
                 }

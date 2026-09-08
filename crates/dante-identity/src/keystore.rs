@@ -12,7 +12,7 @@ use dante_crypto::{
     random_array,
 };
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{error::IdentityError, identity::Identity};
 
@@ -25,6 +25,13 @@ pub(crate) const CONTEXT_KEYSTORE: &[u8] = b"dante-keystore-v1";
 pub(crate) const CONTEXT_BACKUP: &[u8] = b"dante-key-backup-v1";
 
 const SALT_LEN: usize = 16;
+
+/// Ceiling on the Argon2 memory cost accepted from a keystore/backup file's
+/// header (2 GiB). Well above the honest [`pwhash::KEYSTORE`] 256 MiB, but
+/// bounds the allocation a hostile file can force on the importer.
+const MAX_KEYSTORE_M_COST_KIB: u32 = 2 * 1024 * 1024;
+/// Ceiling on the Argon2 time cost accepted from a file header.
+const MAX_KEYSTORE_T_COST: u32 = 16;
 
 /// Serialized KDF description stored in the clear.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +115,9 @@ pub(crate) fn seal_with_context(
         ratchet_db_key: *identity.ratchet_db_key(),
         created_ms: identity.created_ms(),
     };
-    let plaintext = cbor_to_vec(&inner)?;
+    // The serialized secrets must be wiped too, not just the struct — a bare
+    // Vec would otherwise linger in freed heap (core dumps, swap).
+    let plaintext = Zeroizing::new(cbor_to_vec(&inner)?);
     inner.zeroize();
 
     let nonce = random_array::<XNONCE_LEN>();
@@ -142,6 +151,13 @@ pub(crate) fn open_with_context(
         return Err(IdentityError::KeystoreOpen);
     }
 
+    // These cost parameters come from the file, which may be hostile (a pasted
+    // "recovery blob"). Reject absurd values before handing them to Argon2, or a
+    // crafted header could OOM or wedge the importer. The ceilings sit well
+    // above the honest KEYSTORE params (256 MiB / 3 passes).
+    if file.kdf.m_cost_kib > MAX_KEYSTORE_M_COST_KIB || file.kdf.t_cost > MAX_KEYSTORE_T_COST {
+        return Err(IdentityError::KeystoreOpen);
+    }
     let params = Argon2idParams {
         m_cost_kib: file.kdf.m_cost_kib,
         t_cost: file.kdf.t_cost,
@@ -158,7 +174,8 @@ pub(crate) fn open_with_context(
     )
     .map_err(|_| IdentityError::KeystoreOpen);
     wrapping_key.zeroize();
-    let plaintext = plaintext?;
+    // Decrypted secrets: wipe the buffer once we've parsed it out.
+    let plaintext = Zeroizing::new(plaintext?);
 
     let inner: KeystoreInner = cbor_from_slice(&plaintext)?;
     Ok(Identity::from_parts(
@@ -238,6 +255,19 @@ mod tests {
         let file = seal_with_params(&id, b"pw", FAST).unwrap();
         // Same bytes, wrong container context -> AAD mismatch -> failure.
         assert!(open_with_context(&file, b"pw", CONTEXT_BACKUP).is_err());
+    }
+
+    #[test]
+    fn a_hostile_kdf_header_is_refused_before_hashing() {
+        // A crafted file demanding an enormous Argon2 cost must be rejected up
+        // front rather than driving the importer into an OOM or a multi-year
+        // hash. This returns fast because argon2id is never called.
+        let id = Identity::generate(0);
+        let mut file: KeystoreFile =
+            cbor_from_slice(&seal_with_params(&id, b"pw", FAST).unwrap()).unwrap();
+        file.kdf.m_cost_kib = u32::MAX;
+        let bytes = cbor_to_vec(&file).unwrap();
+        assert!(matches!(open(&bytes, b"pw"), Err(IdentityError::KeystoreOpen)));
     }
 
     #[test]

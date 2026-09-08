@@ -87,6 +87,14 @@ pub enum Content {
         /// The reply text.
         text: String,
     },
+    /// Pin (or, with `unpin`, un-pin) an earlier channel message. Rides the
+    /// channel log; honoured from the channel host or the message's author.
+    Pin {
+        /// The relay-log `seq` of the message being pinned.
+        target_seq: u64,
+        /// True to remove an existing pin.
+        unpin: bool,
+    },
 }
 
 impl Content {
@@ -143,6 +151,9 @@ impl Content {
             Content::Reply { target_seq, text } => {
                 w.u8(15).u64(*target_seq).string(text);
             }
+            Content::Pin { target_seq, unpin } => {
+                w.u8(16).u64(*target_seq).bool(*unpin);
+            }
         }
         w.into_vec()
     }
@@ -185,6 +196,10 @@ impl Content {
             15 => Content::Reply {
                 target_seq: r.u64()?,
                 text: r.string()?,
+            },
+            16 => Content::Pin {
+                target_seq: r.u64()?,
+                unpin: r.bool()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -276,6 +291,14 @@ mod tests {
             Content::Reply {
                 target_seq: 12,
                 text: "agreed".into(),
+            },
+            Content::Pin {
+                target_seq: 5,
+                unpin: false,
+            },
+            Content::Pin {
+                target_seq: 5,
+                unpin: true,
             },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);

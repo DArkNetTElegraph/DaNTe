@@ -472,6 +472,16 @@ infrastructure. Reached. ---**
   `Engine::send_channel_reply`. `serve` `POST /api/send` takes an optional
   `reply_to`; the SPA has a ↩ hover action → a reply bar over the composer and
   a quoted line above the reply; CLI `/reply #<chan> <seq> <text>`.
+- **Pinned messages** *(done)*: `Content::Pin { target_seq, unpin }` rides the
+  channel log. A pin is honoured only from the channel host or the pinned
+  message's recorded author (`Engine::may_pin`). Folded into a standing
+  `channel_id -> seq -> {by, at_ms}` map, persisted as `store::StoredPin`;
+  `take_pins` / `pin_snapshot` / `pinned_messages` mirror the reaction/edit
+  path. `serve` `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
+  `Item::ChannelPin`. SPA: 📌 hover action, a `📌 pinned` tag on the message,
+  and a 📌 header button opening a pinned-messages panel that jumps to the
+  message. CLI `/pin` `/unpin` `/pins`. Same pre-restart-authorship caveat as
+  edits (a message whose author was never seen this run can't be pinned).
 - **@mentions** *(done, client-side)*: no protocol change — the SPA's
   `richText` renders `@<fingerprint>` (full, or an unambiguous prefix resolved
   against channel members + contacts) as a pill; a mention of your own

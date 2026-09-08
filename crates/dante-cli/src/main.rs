@@ -321,7 +321,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off>  \
          /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
-         /react #<chan> <seq> <emoji> [-]  \
+         /react #<chan> <seq> <emoji> [-]  /pin|/unpin #<chan> <seq>  /pins #<chan>  \
          /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
     );
 
@@ -359,6 +359,12 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                     } else {
                         println!("  [#{cid} {}] (edited) {}", e.target_seq, e.text.unwrap_or_default());
                     }
+                }
+                for p in engine.take_pins() {
+                    let cid = IdentityId::from_bytes(p.channel_id).to_base32();
+                    let cid = cid.split('-').next().unwrap_or("");
+                    println!("  [#{cid} {}] {}", p.target_seq,
+                        if p.pinned { "\u{1f4cc} pinned" } else { "unpinned" });
                 }
                 match engine.receive_all(now).await {
                     Ok(items) => {
@@ -796,6 +802,52 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     "usage: /{cmd} #<chan> <seq>{}",
                     if cmd == "edit" { " <new text>" } else { "" }
                 ),
+            },
+            "pin" | "unpin" => match (a, b) {
+                (Some(chan), Some(seq_str)) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match (parse_fingerprint(chan), seq_str.trim().parse::<u64>()) {
+                        (Ok(cid), Ok(seq)) => {
+                            let r = if cmd == "pin" {
+                                engine.pin_channel_message(&cid, seq, now_ms()).await
+                            } else {
+                                engine.unpin_channel_message(&cid, seq, now_ms()).await
+                            };
+                            match r {
+                                Ok(()) => println!("{cmd} ok"),
+                                Err(e) => println!("{cmd} failed: {e}"),
+                            }
+                        }
+                        _ => println!("usage: /{cmd} #<chan> <seq>"),
+                    }
+                }
+                _ => println!("usage: /{cmd} #<chan> <seq>"),
+            },
+            "pins" => match a {
+                Some(chan) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match parse_fingerprint(chan) {
+                        Ok(cid) => {
+                            let pins = engine.pinned_messages(&cid);
+                            if pins.is_empty() {
+                                println!("(no pinned messages)");
+                            }
+                            for p in pins {
+                                println!(
+                                    "  seq {}  pinned by {}",
+                                    p.target_seq,
+                                    IdentityId::from_bytes(p.by)
+                                        .to_base32()
+                                        .split('-')
+                                        .next()
+                                        .unwrap_or("")
+                                );
+                            }
+                        }
+                        Err(e) => println!("bad channel: {e}"),
+                    }
+                }
+                None => println!("usage: /pins #<chan>"),
             },
             "reply" => match (a, b) {
                 (Some(chan), Some(rest)) => {

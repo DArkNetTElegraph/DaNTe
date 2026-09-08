@@ -65,6 +65,9 @@ achievable with no project-run infrastructure.
   key off one Welcome; it rotates when one leaves) and smoke-tested across two
   `dante serve` instances (mesh legs reach `connected`). Media key is not yet
   applied as an SFrame layer — the mesh legs' own DTLS-SRTP protects the audio.
+  **The SPA no longer surfaces group calls** — persistent voice channels (with
+  real browser audio) replaced the ad-hoc "group call in a text channel" model;
+  the engine/serve endpoints stay for the CLI and a future SFU path.
 - **Voice channels *(done — persistent, Discord-style)*:** a channel created
   with `voice = true` (`ChannelInfo.voice`, back-compat: a blob without the byte
   decodes as text) has no message log; members join a persistent call in it.
@@ -103,6 +106,23 @@ achievable with no project-run infrastructure.
   `#general` text channel that can't be renamed or deleted; the create-server
   flow asks for a join password instead of a first channel name, and changing
   a join password requires the current one.
+- **Join backlog *(done)*:** MLS forward secrecy hides the pre-join channel log
+  from a new member, so the host sends a plaintext snapshot of the last ~200
+  messages over the authenticated DM right after the Welcome —
+  `ChannelControl::History` (tag 10), accepted only from the recorded channel
+  host and only once, surfaced as `Inbound::ChannelBacklog`.
+- **Public-server browser *(done)*:** `discoverFlow` renders a card grid (a
+  25%-height banner over a coloured body with name / description / tags / Join)
+  instead of a numbered prompt; the join password is only asked if the first
+  attempt is refused for one.
+- **Received files *(done)*:** `dante serve` holds received file bytes in memory
+  for the session and serves them at `GET /api/recv-file?id=…` (sniffed MIME);
+  the SPA renders images inline and gives other files a Download button.
+  Outgoing files preview via an object URL. `Item::File` gained `url` + `mime`.
+- **Notifications *(done, client-side)*:** a bell in the pane header opens a
+  list of unread conversations + @mentions (click to jump); a dot marks unseen.
+  A different identity reusing the same localhost origin no longer inherits the
+  previous one's DM list / notes / mutes.
 - **SPA context menus *(done)*:** the browser's right-click menu is suppressed
   inside `#app` and replaced with CSS menus — channel rows (rename / delete /
   leave / mute / copy id) and messages (reply / edit / delete / pin / forward /

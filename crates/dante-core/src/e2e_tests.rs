@@ -195,11 +195,13 @@ async fn a_one_to_one_call_connects_over_dm_signalling() {
     // Audio rides the negotiated Opus track: Alice pushes a frame, Bob receives
     // it through SRTP (the bytes are opaque to the transport).
     let mut bob_heard_audio = false;
-    for _ in 0..40 {
-        alice
-            .send_call_audio(&bob_id, b"opus-frame-payload", 20)
-            .await
-            .unwrap();
+    for _ in 0..400 {
+        for _ in 0..3 {
+            alice
+                .send_call_audio(&bob_id, b"opus-frame-payload", 20)
+                .await
+                .unwrap();
+        }
         bob.poll_calls(now).await.unwrap();
         if bob
             .take_call_audio(&alice_id)

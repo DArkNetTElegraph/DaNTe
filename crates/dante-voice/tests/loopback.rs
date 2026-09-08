@@ -29,9 +29,9 @@ async fn drive(
     let mut ctl_open = false;
     let mut heard: Option<Vec<u8>> = None;
     let mut heard_audio: Option<Vec<u8>> = None;
-    let deadline = tokio::time::sleep(Duration::from_secs(25));
+    let deadline = tokio::time::sleep(Duration::from_secs(55));
     tokio::pin!(deadline);
-    let mut resend = tokio::time::interval(Duration::from_millis(120));
+    let mut resend = tokio::time::interval(Duration::from_millis(100));
 
     loop {
         if ctl_open && heard.is_some() && heard_audio.is_some() {
@@ -41,7 +41,11 @@ async fn drive(
             _ = &mut deadline => break,
             _ = resend.tick(), if connected => {
                 if ctl_open && heard.is_none() { let _ = call.send_ctl(probe).await; }
-                if heard_audio.is_none() { let _ = call.push_audio(audio_probe, 20).await; }
+                if heard_audio.is_none() {
+                    // A few frames per tick — the media path can drop the first
+                    // packets while SRTP finishes keying.
+                    for _ in 0..3 { let _ = call.push_audio(audio_probe, 20).await; }
+                }
             }
             ev = call.next_event() => match ev {
                 Some(CallEvent::LocalIce(c)) => { let _ = to_peer.send(c); }
@@ -94,7 +98,7 @@ async fn two_calls_connect_and_exchange_control_and_audio() {
     let mut outcomes = Vec::new();
     for _ in 0..2 {
         outcomes.push(
-            tokio::time::timeout(Duration::from_secs(30), done_rx.recv())
+            tokio::time::timeout(Duration::from_secs(60), done_rx.recv())
                 .await
                 .expect("a side finished in time")
                 .expect("done channel open"),

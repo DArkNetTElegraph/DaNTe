@@ -183,8 +183,16 @@ fn pump_track(track: Arc<dyn TrackRemote>, tx: mpsc::UnboundedSender<CallEvent>)
     });
 }
 
+/// Minimum Opus bitrate for DaNTe voice, advertised in the SDP and applied by
+/// the encoder (`dante-audio`). Voice-grade Opus defaults to ~24–32 kbps; this
+/// asks for full-band 64 kbps so calls and voice channels sound clear.
+pub const MIN_VOICE_BITRATE: u32 = 64_000;
+
 /// Build the local Opus audio track (48 kHz stereo, PT 111, fixed SSRC).
 fn opus_track() -> Result<Arc<TrackLocalStaticSample>, VoiceError> {
+    // Keep this matching `register_default_codecs`' Opus entry so `add_track`
+    // negotiates cleanly; the higher bitrate is signalled by `tune_opus` on the
+    // outbound SDP and applied by the encoder (`dante-audio`).
     let codec = RTCRtpCodec {
         mime_type: "audio/opus".to_owned(),
         clock_rate: 48_000,
@@ -209,6 +217,67 @@ fn opus_track() -> Result<Arc<TrackLocalStaticSample>, VoiceError> {
     Ok(Arc::new(
         TrackLocalStaticSample::new(Instant::now(), mst).map_err(VoiceError::from)?,
     ))
+}
+
+/// Raise the Opus quality on a generated SDP: register-default-codecs advertises
+/// a bare `useinbandfec=1`, which lets the encoder sit at ~24–32 kbps. Add the
+/// stereo + `maxaveragebitrate` fmtp params so both ends agree on full-band
+/// [`MIN_VOICE_BITRATE`]. Only touches the `a=fmtp:` line for the Opus payload
+/// type — safe to feed back into `set_local_description`.
+fn tune_opus(sdp: &str) -> String {
+    // Find the Opus dynamic payload type from its rtpmap line.
+    let pt = sdp.lines().find_map(|l| {
+        l.strip_prefix("a=rtpmap:").and_then(|rest| {
+            let (pt, codec) = rest.split_once(' ')?;
+            codec
+                .to_ascii_lowercase()
+                .starts_with("opus/")
+                .then(|| pt.to_owned())
+        })
+    });
+    let Some(pt) = pt else { return sdp.to_owned() };
+    let fmtp_prefix = format!("a=fmtp:{pt} ");
+    let rtpmap_prefix = format!("a=rtpmap:{pt} ");
+    let mabr = MIN_VOICE_BITRATE.to_string();
+    let wanted: [(&str, &str); 4] = [
+        ("useinbandfec", "1"),
+        ("stereo", "1"),
+        ("sprop-stereo", "1"),
+        ("maxaveragebitrate", &mabr),
+    ];
+    let apply = |params: &str| -> String {
+        let mut kvs: Vec<String> = params
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        for (k, v) in &wanted {
+            let key_eq = format!("{k}=");
+            match kvs.iter_mut().find(|p| p.starts_with(&key_eq)) {
+                Some(slot) => *slot = format!("{k}={v}"),
+                None => kvs.push(format!("{k}={v}")),
+            }
+        }
+        format!("{fmtp_prefix}{}", kvs.join(";"))
+    };
+
+    let has_fmtp = sdp.lines().any(|l| l.starts_with(&fmtp_prefix));
+    let mut out: Vec<String> = Vec::with_capacity(sdp.lines().count() + 1);
+    for line in sdp.lines() {
+        if let Some(params) = line.strip_prefix(&fmtp_prefix) {
+            out.push(apply(params));
+        } else {
+            out.push(line.to_owned());
+            if !has_fmtp && line.starts_with(&rtpmap_prefix) {
+                out.push(apply(""));
+            }
+        }
+    }
+    // SDP lines are CRLF-terminated, including a trailing one.
+    let mut s = out.join("\r\n");
+    s.push_str("\r\n");
+    s
 }
 
 /// Spawn a task that forwards inbound control-channel messages as [`CallEvent::Ctl`].
@@ -302,6 +371,9 @@ impl Call {
 
         let offer = pc.create_offer(None).await?;
         pc.set_local_description(offer.clone()).await?;
+        // webrtc-rs rejects a munged *local* description, so raise the Opus
+        // quality only on the copy the peer receives — the encoder bitrate
+        // (dante-audio) is the real lever; this signals the ceiling.
         Ok((
             Call {
                 pc,
@@ -309,7 +381,7 @@ impl Call {
                 audio: Some(audio),
                 events,
             },
-            offer.sdp,
+            tune_opus(&offer.sdp),
         ))
     }
 
@@ -332,7 +404,7 @@ impl Call {
                 audio: Some(audio),
                 events,
             },
-            answer.sdp,
+            tune_opus(&answer.sdp),
         ))
     }
 
@@ -400,5 +472,41 @@ impl Call {
     /// Tear the call down.
     pub async fn close(&self) {
         let _ = self.pc.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tune_opus_raises_the_bitrate_and_keeps_other_params() {
+        let sdp = "v=0\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+            a=rtpmap:9 G722/8000\r\n";
+        let out = tune_opus(sdp);
+        let fmtp = out.lines().find(|l| l.starts_with("a=fmtp:111 ")).unwrap();
+        assert!(fmtp.contains("maxaveragebitrate=64000"), "{fmtp}");
+        assert!(fmtp.contains("stereo=1"));
+        assert!(fmtp.contains("minptime=10"), "existing params kept: {fmtp}");
+        // The non-Opus codec line is untouched.
+        assert!(out.contains("a=rtpmap:9 G722/8000"));
+    }
+
+    #[test]
+    fn tune_opus_adds_an_fmtp_line_when_absent() {
+        let sdp = "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n";
+        let out = tune_opus(sdp);
+        assert!(out
+            .lines()
+            .any(|l| l.starts_with("a=fmtp:111 ") && l.contains("maxaveragebitrate=64000")));
+    }
+
+    #[test]
+    fn tune_opus_is_a_noop_without_opus() {
+        let sdp = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\n";
+        assert_eq!(tune_opus(sdp), sdp);
     }
 }

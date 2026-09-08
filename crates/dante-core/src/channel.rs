@@ -1,96 +1,14 @@
-//! Channel (server) wiring on top of `dante-group`.
+//! Channel (server) wiring on top of `dante-mls`.
 //!
 //! A **server** is a `server_root` Ed25519 keypair (registered on the ledger).
-//! A **channel** is a random 32-byte id; each member runs a
-//! [`dante_group::Group`] for it. The server host is the key-distribution hub:
-//! members ship their [`dante_group::SenderKeyBundle`] to each other over
-//! authenticated DMs, carried inside [`ChannelControl`] messages
-//! (`dante_dm::Content::Channel`). Channel messages themselves go to a per-
-//! channel log on the relay (opaque; the relay never decrypts them).
+//! A **channel** is a random 32-byte id backed by one MLS group (RFC 9420),
+//! created by the server host. The host is the sole committer: it adds and
+//! removes members with MLS Commits, which travel in the channel's relay log
+//! interleaved with the encrypted messages (both opaque to the relay). A new
+//! member receives an MLS **Welcome** over an authenticated DM
+//! ([`ChannelControl::MlsWelcome`]) and then catches up from the log.
 
-use dante_crypto::{
-    hash::sha256,
-    sign::{SignPublic, SignSecret, SIG_LEN},
-};
 use dante_proto::enc::{Reader, WireError, Writer};
-
-use crate::error::CoreError;
-
-const REMOVE_SIG_DOMAIN: &[u8] = b"dante/channel-remove/v1";
-
-/// A server-root-signed order to eject one member from a channel. Verifiable by
-/// any member, so it can propagate member-to-member.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoveOrder {
-    /// The owning server's root public key (the signature verifier).
-    pub server_root: [u8; 32],
-    /// The channel the member is being removed from.
-    pub channel_id: [u8; 32],
-    /// `IdentityId` of the member to eject.
-    pub member: [u8; 32],
-    /// When the order was issued (Unix ms) — also its epoch, for dedup.
-    pub issued_ms: u64,
-    /// `server_root` over `SHA-256(REMOVE_SIG_DOMAIN || body)`.
-    pub sig: [u8; SIG_LEN],
-}
-
-impl RemoveOrder {
-    /// Mint and sign with the server root secret.
-    pub fn mint(root: &SignSecret, channel_id: [u8; 32], member: [u8; 32], issued_ms: u64) -> Self {
-        let mut o = Self {
-            server_root: root.public().to_bytes(),
-            channel_id,
-            member,
-            issued_ms,
-            sig: [0u8; SIG_LEN],
-        };
-        o.sig = root.sign(&o.challenge());
-        o
-    }
-
-    fn challenge(&self) -> [u8; 32] {
-        let mut w = Writer::new();
-        w.bytes(REMOVE_SIG_DOMAIN)
-            .fixed(&self.server_root)
-            .fixed(&self.channel_id)
-            .fixed(&self.member)
-            .u64(self.issued_ms);
-        sha256(&w.into_vec())
-    }
-
-    /// Check the signature against the embedded server root key.
-    pub fn verify(&self) -> Result<(), CoreError> {
-        let pk = SignPublic::from_bytes(&self.server_root)
-            .map_err(|_| CoreError::Invite("bad server key"))?;
-        pk.verify(&self.challenge(), &self.sig)
-            .map_err(|_| CoreError::Invite("bad remove-order signature"))
-    }
-
-    /// Encode.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.fixed(&self.server_root)
-            .fixed(&self.channel_id)
-            .fixed(&self.member)
-            .u64(self.issued_ms)
-            .fixed(&self.sig);
-        w.into_vec()
-    }
-
-    /// Decode.
-    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let mut r = Reader::new(bytes);
-        let out = Self {
-            server_root: r.fixed::<32>()?,
-            channel_id: r.fixed::<32>()?,
-            member: r.fixed::<32>()?,
-            issued_ms: r.u64()?,
-            sig: r.fixed::<SIG_LEN>()?,
-        };
-        r.finish()?;
-        Ok(out)
-    }
-}
 
 /// Public description of a channel a client belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,23 +23,28 @@ pub struct ChannelInfo {
     pub channel_name: String,
     /// Whether the channel is private (omitted from any discovery).
     pub private: bool,
+    /// `IdentityId` of the host — the only identity whose MLS Commits members
+    /// honour on this channel.
+    pub host_id: [u8; 32],
 }
 
 impl ChannelInfo {
-    fn write(&self, w: &mut Writer) {
+    pub(crate) fn write(&self, w: &mut Writer) {
         w.fixed(&self.server_root)
             .string(&self.server_name)
             .fixed(&self.channel_id)
             .string(&self.channel_name)
-            .bool(self.private);
+            .bool(self.private)
+            .fixed(&self.host_id);
     }
-    fn read(r: &mut Reader<'_>) -> Result<Self, WireError> {
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self, WireError> {
         Ok(Self {
             server_root: r.fixed::<32>()?,
             server_name: r.string()?,
             channel_id: r.fixed::<32>()?,
             channel_name: r.string()?,
             private: r.bool()?,
+            host_id: r.fixed::<32>()?,
         })
     }
     /// Encode.
@@ -139,25 +62,20 @@ impl ChannelInfo {
     }
 }
 
-/// A control message exchanged between channel members over DM.
+/// A control message exchanged between channel members over DM. Membership
+/// changes themselves are MLS Commits carried in the channel log; these
+/// messages set up or tear down a member's participation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChannelControl {
-    /// The host adds a member: everything needed to join, including every
-    /// current member's sender-key bundle.
-    Invite {
-        /// The channel being joined.
+    /// The host welcomes a member into the channel's MLS group.
+    MlsWelcome {
+        /// The channel being joined (carries `host_id`, server metadata, name).
         info: ChannelInfo,
-        /// Current member ids (`IdentityId` bytes).
-        roster: Vec<[u8; 32]>,
-        /// Encoded `dante_group::SenderKeyBundle` for each roster member.
-        bundles: Vec<Vec<u8>>,
-    },
-    /// One member hands another its (updated) sender key.
-    KeyBundle {
-        /// The channel.
-        channel_id: [u8; 32],
-        /// Encoded `dante_group::SenderKeyBundle`.
-        bundle: Vec<u8>,
+        /// The opaque MLS Welcome (a `dante_mls` handshake blob).
+        welcome: Vec<u8>,
+        /// The channel-log sequence the joiner should start reading from —
+        /// the host's view at the time it committed the add.
+        since_seq: u64,
     },
     /// A joiner presents a signed invite token (and, if the server is
     /// password-gated, the password) to the host to be added.
@@ -166,11 +84,6 @@ pub enum ChannelControl {
         token: Vec<u8>,
         /// The server join password, or empty if none.
         pw: String,
-    },
-    /// Eject a member: everyone drops them and rotates their own sender chain.
-    Remove {
-        /// Encoded [`RemoveOrder`].
-        order: Vec<u8>,
     },
     /// The host broadcasts the current server role configuration.
     Policy {
@@ -184,10 +97,14 @@ pub enum ChannelControl {
         /// The member to remove.
         member: [u8; 32],
     },
-    /// A member tells the channel it is leaving. The host treats it as a
-    /// self-[`ChannelControl::Remove`] (mint a `RemoveOrder`, rekey everyone).
+    /// A member tells the host it is leaving; the host commits its removal.
     Leave {
         /// The channel being left.
+        channel_id: [u8; 32],
+    },
+    /// The host has deleted the whole channel; recipients drop it.
+    Closed {
+        /// The channel being closed.
         channel_id: [u8; 32],
     },
 }
@@ -197,30 +114,17 @@ impl ChannelControl {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
-            ChannelControl::Invite {
+            ChannelControl::MlsWelcome {
                 info,
-                roster,
-                bundles,
+                welcome,
+                since_seq,
             } => {
                 w.u8(1);
                 info.write(&mut w);
-                w.u32(roster.len() as u32);
-                for m in roster {
-                    w.fixed(m);
-                }
-                w.u32(bundles.len() as u32);
-                for b in bundles {
-                    w.bytes(b);
-                }
-            }
-            ChannelControl::KeyBundle { channel_id, bundle } => {
-                w.u8(2).fixed(channel_id).bytes(bundle);
+                w.bytes(welcome).u64(*since_seq);
             }
             ChannelControl::Redeem { token, pw } => {
                 w.u8(3).bytes(token).string(pw);
-            }
-            ChannelControl::Remove { order } => {
-                w.u8(4).bytes(order);
             }
             ChannelControl::Policy { policy } => {
                 w.u8(5).bytes(policy);
@@ -230,6 +134,9 @@ impl ChannelControl {
             }
             ChannelControl::Leave { channel_id } => {
                 w.u8(7).fixed(channel_id);
+            }
+            ChannelControl::Closed { channel_id } => {
+                w.u8(8).fixed(channel_id);
             }
         }
         w.into_vec()
@@ -241,24 +148,17 @@ impl ChannelControl {
         let out = match r.u8()? {
             1 => {
                 let info = ChannelInfo::read(&mut r)?;
-                let roster = read_fixed_list(&mut r)?;
-                let bundles = read_bytes_list(&mut r)?;
-                ChannelControl::Invite {
+                let welcome = r.bytes()?.to_vec();
+                let since_seq = r.u64()?;
+                ChannelControl::MlsWelcome {
                     info,
-                    roster,
-                    bundles,
+                    welcome,
+                    since_seq,
                 }
             }
-            2 => ChannelControl::KeyBundle {
-                channel_id: r.fixed::<32>()?,
-                bundle: r.bytes()?.to_vec(),
-            },
             3 => ChannelControl::Redeem {
                 token: r.bytes()?.to_vec(),
                 pw: r.string()?,
-            },
-            4 => ChannelControl::Remove {
-                order: r.bytes()?.to_vec(),
             },
             5 => ChannelControl::Policy {
                 policy: r.bytes()?.to_vec(),
@@ -268,6 +168,9 @@ impl ChannelControl {
                 member: r.fixed::<32>()?,
             },
             7 => ChannelControl::Leave {
+                channel_id: r.fixed::<32>()?,
+            },
+            8 => ChannelControl::Closed {
                 channel_id: r.fixed::<32>()?,
             },
             other => {
@@ -312,28 +215,21 @@ pub struct ChannelReaction {
     pub removed: bool,
 }
 
-fn read_fixed_list(r: &mut Reader<'_>) -> Result<Vec<[u8; 32]>, WireError> {
-    let n = r.u32()? as usize;
-    if n > r.remaining() {
-        return Err(WireError::LengthTooLarge(n as u64));
-    }
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        out.push(r.fixed::<32>()?);
-    }
-    Ok(out)
+/// Channel-log frame tags: an application message vs. an MLS handshake Commit.
+pub(crate) const FRAME_APP: u8 = 1;
+pub(crate) const FRAME_COMMIT: u8 = 2;
+
+/// Wrap an MLS payload for the channel log.
+pub(crate) fn frame(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + payload.len());
+    v.push(tag);
+    v.extend_from_slice(payload);
+    v
 }
 
-fn read_bytes_list(r: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, WireError> {
-    let n = r.u32()? as usize;
-    if n > r.remaining() {
-        return Err(WireError::LengthTooLarge(n as u64));
-    }
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        out.push(r.bytes()?.to_vec());
-    }
-    Ok(out)
+/// Split a channel-log frame into `(tag, payload)`.
+pub(crate) fn unframe(blob: &[u8]) -> Option<(u8, &[u8])> {
+    blob.split_first().map(|(t, rest)| (*t, rest))
 }
 
 #[cfg(test)]
@@ -347,6 +243,7 @@ mod tests {
             channel_id: [2u8; 32],
             channel_name: "general".into(),
             private: true,
+            host_id: [9u8; 32],
         }
     }
 
@@ -357,46 +254,37 @@ mod tests {
 
     #[test]
     fn control_roundtrips() {
-        let invite = ChannelControl::Invite {
-            info: info(),
-            roster: vec![[3u8; 32], [4u8; 32]],
-            bundles: vec![vec![9, 9], vec![1]],
-        };
-        assert_eq!(ChannelControl::decode(&invite.encode()).unwrap(), invite);
-
-        let kb = ChannelControl::KeyBundle {
-            channel_id: [7u8; 32],
-            bundle: vec![5, 6, 7],
-        };
-        assert_eq!(ChannelControl::decode(&kb.encode()).unwrap(), kb);
-
-        let rm = ChannelControl::Remove {
-            order: vec![1, 2, 3, 4],
-        };
-        assert_eq!(ChannelControl::decode(&rm.encode()).unwrap(), rm);
-
-        let leave = ChannelControl::Leave {
-            channel_id: [8u8; 32],
-        };
-        assert_eq!(ChannelControl::decode(&leave.encode()).unwrap(), leave);
-
+        for c in [
+            ChannelControl::MlsWelcome {
+                info: info(),
+                welcome: vec![9, 9, 9],
+                since_seq: 12,
+            },
+            ChannelControl::Redeem {
+                token: vec![1, 2, 3],
+                pw: "hunter2".into(),
+            },
+            ChannelControl::Policy { policy: vec![7] },
+            ChannelControl::KickRequest {
+                channel_id: [4u8; 32],
+                member: [5u8; 32],
+            },
+            ChannelControl::Leave {
+                channel_id: [8u8; 32],
+            },
+            ChannelControl::Closed {
+                channel_id: [8u8; 32],
+            },
+        ] {
+            assert_eq!(ChannelControl::decode(&c.encode()).unwrap(), c);
+        }
         assert!(ChannelControl::decode(&[9]).is_err());
     }
 
     #[test]
-    fn remove_order_sign_verify_roundtrip() {
-        use dante_crypto::sign::SignSecret;
-        let root = SignSecret::from_bytes(&[5u8; 32]);
-        let o = RemoveOrder::mint(&root, [1u8; 32], [2u8; 32], 42);
-        o.verify().unwrap();
-        assert_eq!(RemoveOrder::decode(&o.encode()).unwrap(), o);
-
-        let mut bad = o.clone();
-        bad.member[0] ^= 1;
-        assert!(bad.verify().is_err());
-
-        let mut wrong = o.clone();
-        wrong.server_root = SignSecret::from_bytes(&[6u8; 32]).public().to_bytes();
-        assert!(wrong.verify().is_err());
+    fn frame_roundtrip() {
+        let f = frame(FRAME_COMMIT, &[1, 2, 3]);
+        assert_eq!(unframe(&f), Some((FRAME_COMMIT, &[1u8, 2, 3][..])));
+        assert_eq!(unframe(&[]), None);
     }
 }

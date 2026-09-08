@@ -274,18 +274,24 @@ impl RelayState {
                 }
             }
 
-            Request::PublishKeyPackage {
+            Request::PublishKeyPackages {
                 identity,
-                key_package,
+                key_packages,
             } => {
+                // One rate-limit charge for the whole batch.
                 if !self.record_rl.check(&ip, now, 1.0) {
                     return Response::Error("rate limited".into());
                 }
-                if key_package.is_empty() || key_package.len() > MAX_KEYPKG_BYTES {
+                if key_packages
+                    .iter()
+                    .any(|kp| kp.is_empty() || kp.len() > MAX_KEYPKG_BYTES)
+                {
                     return Response::Error("bad key package".into());
                 }
                 let q = self.key_packages.entry(identity).or_default();
-                q.push_back(key_package);
+                for kp in key_packages {
+                    q.push_back(kp);
+                }
                 while q.len() > MAX_KEYPKGS_PER_IDENTITY {
                     q.pop_front();
                 }
@@ -621,19 +627,17 @@ mod tests {
         let mut s = state();
         let id = [42u8; 32];
 
-        for kp in [b"kp-a".to_vec(), b"kp-b".to_vec()] {
-            assert_eq!(
-                s.handle(
-                    Request::PublishKeyPackage {
-                        identity: id,
-                        key_package: kp,
-                    },
-                    IP,
-                    0
-                ),
-                Response::Ok
-            );
-        }
+        assert_eq!(
+            s.handle(
+                Request::PublishKeyPackages {
+                    identity: id,
+                    key_packages: vec![b"kp-a".to_vec(), b"kp-b".to_vec()],
+                },
+                IP,
+                0
+            ),
+            Response::Ok
+        );
 
         // First fetch consumes the oldest.
         assert_eq!(

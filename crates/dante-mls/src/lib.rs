@@ -1,24 +1,18 @@
 //! `dante-mls` — MLS (RFC 9420) groups for DaNTe, via [OpenMLS].
 //!
-//! This is the building block for migrating channels off the sender-keys
-//! ratchet in `dante-group` and for **group calls**: MLS gives post-compromise
-//! security, O(log n) rekey, and — the part group calls need — a shared
-//! per-epoch secret every member can derive independently
-//! ([`Member::call_key`]). Delivery of the handshake messages this produces
-//! (Commits, Welcomes, KeyPackages) still rides DaNTe's authenticated pairwise
-//! DMs / channel log; this crate is transport-agnostic and hands back opaque
-//! byte blobs.
+//! Used by `dante-core` for **channels** (message confidentiality with
+//! post-compromise security and O(log n) rekey) and for **group calls** (a
+//! shared per-epoch media key every member derives independently,
+//! [`Member::call_key`]). Delivery of the handshake messages this produces
+//! (Commits, Welcomes, KeyPackages) rides DaNTe's authenticated pairwise DMs /
+//! channel log; this crate is transport-agnostic and hands back opaque byte
+//! blobs.
 //!
-//! Scope: create a group, publish a [`KeyPkg`] to be added, add / remove
-//! members, process inbound handshake + application messages, export the
-//! group-call key for the current epoch, and [`export`](Member::export) /
-//! [`import`](Member::import) the whole member so a call / channel survives a
-//! restart. Not yet driven by `dante-core` — the group-call orchestration
-//! (fetching members' KeyPackages, carrying Welcome / Commit over the channel
-//! log, opening the media mesh) is the next step.
-//!
-//! This crate declares `rust-version = 1.91` (OpenMLS 0.9's floor); the rest of
-//! the workspace still builds on 1.85.
+//! Surface: create a group, publish [`KeyPkg`]s to be added, add / remove
+//! members, [`process`](Member::process) / [`process_from`](Member::process_from)
+//! inbound handshake + application messages, [`export_key`](Member::export_key)
+//! per-epoch secrets, and [`export`](Member::export) / [`import`](Member::import)
+//! the whole member so a channel / call survives a restart.
 //!
 //! [OpenMLS]: https://openmls.tech
 
@@ -64,13 +58,19 @@ pub struct Handshake {
 /// The outcome of [`Member::process`]ing an inbound message.
 #[derive(Debug)]
 pub enum Processed {
-    /// An application message's plaintext.
-    Application(Vec<u8>),
+    /// An application message: the sender's identity bytes and the plaintext.
+    Application {
+        /// The sender's credential identity (what they joined with).
+        sender: Vec<u8>,
+        /// The decrypted payload.
+        plaintext: Vec<u8>,
+    },
     /// A staged commit was merged; the epoch advanced. Re-derive
     /// [`Member::call_key`].
     EpochChanged,
-    /// A protocol message that changed nothing observable (e.g. a bare
-    /// proposal awaiting its commit).
+    /// A protocol message that changed nothing observable (a bare proposal, an
+    /// own message echoed back, or — for [`Member::process_from`] — a commit
+    /// from an unauthorized committer that was dropped).
     Ignored,
 }
 
@@ -86,23 +86,36 @@ pub struct Pending {
 
 impl Pending {
     /// Consume the Welcome produced by [`Member::add`] and become a full
-    /// [`Member`].
-    pub fn join(self, welcome: &[u8]) -> Result<Member, MlsError> {
-        let msg = MlsMessageIn::tls_deserialize_exact(welcome)
-            .map_err(|e| MlsError::Codec(e.to_string()))?;
+    /// [`Member`]. On failure (e.g. this Welcome was built for a *different*
+    /// KeyPackage) the `Pending` is handed back (boxed) in the error so the
+    /// caller can try it against another Welcome.
+    #[allow(clippy::result_large_err)] // the Ok side (Member) is large too
+    pub fn join(self, welcome: &[u8]) -> Result<Member, (Box<Self>, MlsError)> {
+        let msg = match MlsMessageIn::tls_deserialize_exact(welcome) {
+            Ok(m) => m,
+            Err(e) => return Err((Box::new(self), MlsError::Codec(e.to_string()))),
+        };
         let welcome = match msg.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Err(MlsError::Unexpected("expected a Welcome message")),
+            _ => {
+                return Err((
+                    Box::new(self),
+                    MlsError::Unexpected("expected a Welcome message"),
+                ))
+            }
         };
 
         let config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
-        let staged = StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None)
-            .map_err(|e| MlsError::Group(e.to_string()))?;
-        let group = staged
-            .into_group(&self.provider)
-            .map_err(|e| MlsError::Group(e.to_string()))?;
+        let staged = match StagedWelcome::new_from_welcome(&self.provider, &config, welcome, None) {
+            Ok(s) => s,
+            Err(e) => return Err((Box::new(self), MlsError::Group(e.to_string()))),
+        };
+        let group = match staged.into_group(&self.provider) {
+            Ok(g) => g,
+            Err(e) => return Err((Box::new(self), MlsError::Group(e.to_string()))),
+        };
 
         Ok(Member {
             provider: self.provider,
@@ -235,8 +248,21 @@ impl Member {
     }
 
     /// Process an inbound protocol message: an application message, or a Commit
-    /// that advances the epoch.
+    /// that advances the epoch. Any member's commit is accepted.
     pub fn process(&mut self, wire: &[u8]) -> Result<Processed, MlsError> {
+        self.process_from(wire, None)
+    }
+
+    /// Like [`process`](Self::process), but if `allowed_committer` is `Some(id)`
+    /// a Commit is applied only when its committer's identity equals `id` —
+    /// otherwise it is dropped (`Processed::Ignored`) and the epoch does not
+    /// advance. Application messages are unaffected. DaNTe uses this so a
+    /// channel only honours membership commits from its host.
+    pub fn process_from(
+        &mut self,
+        wire: &[u8],
+        allowed_committer: Option<&[u8]>,
+    ) -> Result<Processed, MlsError> {
         let msg = MlsMessageIn::tls_deserialize_exact(wire)
             .map_err(|e| MlsError::Codec(e.to_string()))?;
         let protocol: ProtocolMessage = msg
@@ -248,11 +274,19 @@ impl Member {
             .process_message(&self.provider, protocol)
             .map_err(|e| MlsError::Group(e.to_string()))?;
 
+        let sender = processed.credential().serialized_content().to_vec();
+
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                Ok(Processed::Application(app.into_bytes()))
-            }
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(Processed::Application {
+                sender,
+                plaintext: app.into_bytes(),
+            }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                if let Some(allowed) = allowed_committer {
+                    if sender != allowed {
+                        return Ok(Processed::Ignored);
+                    }
+                }
                 self.group
                     .merge_staged_commit(&self.provider, *staged)
                     .map_err(|e| MlsError::Group(e.to_string()))?;
@@ -298,14 +332,20 @@ impl Member {
         &self.identity
     }
 
-    /// Derive the group-call media key for the current epoch. All members in
-    /// the epoch get identical bytes; it changes on every add / remove — the
-    /// post-compromise-security property group calls rely on.
+    /// Derive an application secret for the current epoch under `label`. Every
+    /// member in the same epoch gets identical bytes; it changes on every
+    /// add / remove (post-compromise security). Use distinct labels for
+    /// distinct purposes.
+    pub fn export_key(&self, label: &str, len: usize) -> Result<Vec<u8>, MlsError> {
+        self.group
+            .export_secret(self.provider.crypto(), label, &[], len)
+            .map_err(|e| MlsError::Group(e.to_string()))
+    }
+
+    /// The group-call media key for the current epoch (a fixed-label
+    /// [`export_key`](Self::export_key)).
     pub fn call_key(&self) -> Result<[u8; CALL_KEY_LEN], MlsError> {
-        let secret = self
-            .group
-            .export_secret(self.provider.crypto(), CALL_KEY_LABEL, &[], CALL_KEY_LEN)
-            .map_err(|e| MlsError::Group(e.to_string()))?;
+        let secret = self.export_key(CALL_KEY_LABEL, CALL_KEY_LEN)?;
         let mut out = [0u8; CALL_KEY_LEN];
         out.copy_from_slice(&secret);
         Ok(out)

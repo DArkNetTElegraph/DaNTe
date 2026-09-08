@@ -11,7 +11,6 @@ use std::{fs, io, path::Path};
 
 use dante_crypto::{aead, kdf, random_array};
 use dante_dm::{PreKeySecretsState, SessionState};
-use dante_group::GroupState;
 use dante_identity::Identity;
 use dante_proto::enc::{Reader, WireError, Writer};
 
@@ -69,8 +68,8 @@ pub struct ChannelHistoryEntry {
 pub struct StoredChannel {
     /// Channel description.
     pub info: ChannelInfo,
-    /// The sender-keys group snapshot.
-    pub group: GroupState,
+    /// The channel's MLS member state (`dante_mls::Member::export`).
+    pub mls: Vec<u8>,
     /// Known member ids.
     pub roster: Vec<[u8; 32]>,
     /// Last consumed channel-log sequence number.
@@ -146,9 +145,6 @@ pub enum StoreError {
     /// The decrypted payload did not parse.
     #[error("store payload is corrupt")]
     Payload(#[from] WireError),
-    /// A persisted group snapshot did not parse.
-    #[error("store group state is corrupt")]
-    Group(#[from] dante_group::GroupError),
 }
 
 fn derive_key(identity: &Identity, salt: &[u8; SALT_LEN]) -> [u8; 32] {
@@ -211,7 +207,7 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     w.u32(s.channels.len() as u32);
     for c in &s.channels {
         w.bytes(&c.info.encode())
-            .bytes(&c.group.encode())
+            .bytes(&c.mls)
             .u64(c.last_seq)
             .u32(c.roster.len() as u32);
         for m in &c.roster {
@@ -324,7 +320,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
     let mut channels = Vec::with_capacity(n);
     for _ in 0..n {
         let info = ChannelInfo::decode(r.bytes()?)?;
-        let group = GroupState::decode(r.bytes()?)?;
+        let mls = r.bytes()?.to_vec();
         let last_seq = r.u64()?;
         let rc = bounded_count(&mut r)?;
         let mut roster = Vec::with_capacity(rc);
@@ -333,7 +329,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
         channels.push(StoredChannel {
             info,
-            group,
+            mls,
             roster,
             last_seq,
         });

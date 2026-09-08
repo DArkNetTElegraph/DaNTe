@@ -40,11 +40,13 @@ pub enum Request {
     PutBlob(Vec<u8>),
     /// Retrieve a blob by its `SHA-256`.
     GetBlob([u8; 32]),
-    /// Append an (opaque, E2E-encrypted) message to a channel's log.
+    /// Append an (opaque, E2E-encrypted) message to a channel's log. The blob
+    /// is a `dante-core` channel frame (an MLS application message or Commit);
+    /// the relay never decrypts it.
     PostToChannel {
         /// The channel id (a shared 32-byte capability).
         channel_id: [u8; 32],
-        /// The encoded `dante_group::GroupMessage`.
+        /// The opaque channel-log frame.
         blob: Vec<u8>,
     },
     /// Read a channel's log from `since_seq` (exclusive).
@@ -72,15 +74,16 @@ pub enum Request {
     /// (STUN URLs, plus short-lived TURN credentials if the relay has a TURN
     /// secret configured).
     GetIceConfig,
-    /// Publish an MLS `KeyPackage` (opaque bytes) for `identity`, so other
-    /// members can add that identity to a channel's MLS group / a group call.
-    /// The relay keeps a small per-identity queue and hands them out one at a
-    /// time (last one is reusable).
-    PublishKeyPackage {
+    /// Publish one or more MLS `KeyPackage`s (opaque bytes) for `identity`, so
+    /// other members can add that identity to a channel's MLS group / a group
+    /// call. Each KeyPackage is single-use; the relay keeps a bounded
+    /// per-identity queue and hands them out one at a time (the last one is
+    /// reusable as a fallback).
+    PublishKeyPackages {
         /// The publisher's identity id.
         identity: [u8; 32],
-        /// One encoded MLS `KeyPackage`.
-        key_package: Vec<u8>,
+        /// Encoded MLS `KeyPackage`s.
+        key_packages: Vec<Vec<u8>>,
     },
     /// Take one published MLS `KeyPackage` for `identity`.
     GetKeyPackage([u8; 32]),
@@ -274,11 +277,12 @@ impl Request {
             Request::GetIceConfig => {
                 w.u8(REQ_GET_ICE);
             }
-            Request::PublishKeyPackage {
+            Request::PublishKeyPackages {
                 identity,
-                key_package,
+                key_packages,
             } => {
-                w.u8(REQ_PUBLISH_KEYPKG).fixed(identity).bytes(key_package);
+                w.u8(REQ_PUBLISH_KEYPKG).fixed(identity);
+                write_blob_list(&mut w, key_packages);
             }
             Request::GetKeyPackage(id) => {
                 w.u8(REQ_GET_KEYPKG).fixed(id);
@@ -320,9 +324,9 @@ impl Request {
                 topic: r.fixed::<32>()?,
             },
             REQ_GET_ICE => Request::GetIceConfig,
-            REQ_PUBLISH_KEYPKG => Request::PublishKeyPackage {
+            REQ_PUBLISH_KEYPKG => Request::PublishKeyPackages {
                 identity: r.fixed::<32>()?,
-                key_package: r.bytes()?.to_vec(),
+                key_packages: read_blob_list(&mut r)?,
             },
             REQ_GET_KEYPKG => Request::GetKeyPackage(r.fixed::<32>()?),
             REQ_FETCH => {
@@ -368,7 +372,7 @@ impl Request {
             Request::PostSignal { .. } => "PostSignal",
             Request::FetchSignals { .. } => "FetchSignals",
             Request::GetIceConfig => "GetIceConfig",
-            Request::PublishKeyPackage { .. } => "PublishKeyPackage",
+            Request::PublishKeyPackages { .. } => "PublishKeyPackages",
             Request::GetKeyPackage(_) => "GetKeyPackage",
         }
     }
@@ -544,9 +548,9 @@ mod tests {
         });
         rt_req(Request::FetchSignals { topic: [6u8; 32] });
         rt_req(Request::GetIceConfig);
-        rt_req(Request::PublishKeyPackage {
+        rt_req(Request::PublishKeyPackages {
             identity: [8u8; 32],
-            key_package: vec![1, 2, 3, 4],
+            key_packages: vec![vec![1, 2, 3, 4], vec![5, 6]],
         });
         rt_req(Request::GetKeyPackage([9u8; 32]));
     }

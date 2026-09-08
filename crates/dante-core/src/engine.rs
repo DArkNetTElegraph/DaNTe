@@ -8,13 +8,13 @@ use std::{
 };
 
 use dante_crypto::{
+    aead,
     hash::{sha256, sha512},
     pow::Difficulty,
     random_array,
     sign::{SignPublic, SignSecret},
 };
 use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Session};
-use dante_group::{Group, GroupMessage, SenderKeyBundle};
 use dante_identity::{
     id::IdentityId,
     records::{IdentityAnnounce, IdentityRevoke, LivenessProof, RevokeReason},
@@ -30,11 +30,14 @@ use dante_proto::{envelope::recipient_hint, Envelope, Record};
 use dante_voice::{Call, CallEvent, CallState, IceServer};
 
 use crate::{
-    channel::{ChannelControl, ChannelInfo, ChannelMessage},
+    channel::{self, ChannelControl, ChannelInfo, ChannelMessage},
     error::CoreError,
     roles::{self, ServerPolicy},
     store::{self, ChannelHistoryEntry, HistoryEntry, HistoryKind, PersistedState},
 };
+
+/// Domain for the per-epoch key that AEAD-seals channel typing signals.
+const CHANNEL_SIGNAL_LABEL: &str = "dante/channel-signal/v1";
 
 /// Default envelope TTL for DMs: 7 days.
 pub const DM_TTL_MS: u32 = 7 * 24 * 60 * 60 * 1000;
@@ -189,17 +192,85 @@ fn mls_err(e: mls::MlsError) -> CoreError {
     CoreError::Voice(format!("mls: {e}"))
 }
 
-/// One channel this client belongs to.
+/// One channel this client belongs to, backed by an MLS group.
 pub(crate) struct ChannelSession {
     pub info: ChannelInfo,
-    pub group: Group,
+    /// This client's MLS view of the channel group.
+    pub mls: mls::Member,
+    /// Cached member `IdentityId`s (mirrors `mls.members()`; kept for the UI
+    /// member list and quick membership checks).
     pub roster: HashSet<[u8; 32]>,
+    /// Last consumed channel-log sequence.
     pub last_seq: u64,
-    /// Members ejected from this channel: `member -> removal `issued_ms``. We
-    /// refuse to re-key them and drop their messages. Re-admitting a removed
-    /// member is not supported by the sender-keys scheme (MLS migration will
-    /// fix this) — recreate the channel instead.
+    /// Members the host has ejected: `member -> when (Unix ms)`. Used to hide
+    /// their still-cached backlog messages after removal.
     pub removed: HashMap<[u8; 32], u64>,
+}
+
+impl ChannelSession {
+    /// Refresh `roster` from the live MLS membership.
+    fn resync_roster(&mut self) {
+        self.roster = self
+            .mls
+            .members()
+            .into_iter()
+            .filter_map(|(_, id)| <[u8; 32]>::try_from(id).ok())
+            .collect();
+    }
+
+    /// The leaf index of `member` in the MLS group, if present.
+    fn leaf_of(&self, member: &[u8; 32]) -> Option<u32> {
+        self.mls
+            .members()
+            .into_iter()
+            .find(|(_, id)| id.as_slice() == member)
+            .map(|(leaf, _)| leaf)
+    }
+}
+
+/// AEAD-seal a channel typing marker under the group's current epoch secret.
+/// Frame: `member(32) || nonce(24) || ciphertext`.
+fn seal_channel_signal(
+    member: &mls::Member,
+    me: &[u8; 32],
+    channel_id: &[u8; 32],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CoreError> {
+    let key = member
+        .export_key(CHANNEL_SIGNAL_LABEL, 32)
+        .map_err(mls_err)?;
+    let key: [u8; 32] = key[..32].try_into().unwrap();
+    let nonce = random_array::<24>();
+    let mut aad = Vec::with_capacity(64);
+    aad.extend_from_slice(channel_id);
+    aad.extend_from_slice(me);
+    let ct = aead::xchacha_seal(&key, &nonce, plaintext, &aad);
+    let mut out = Vec::with_capacity(56 + ct.len());
+    out.extend_from_slice(me);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Recover `(sender IdentityId, plaintext)` from a channel typing frame.
+fn open_channel_signal(
+    member: &mls::Member,
+    channel_id: &[u8; 32],
+    blob: &[u8],
+) -> Option<([u8; 32], Vec<u8>)> {
+    if blob.len() < 56 {
+        return None;
+    }
+    let sender: [u8; 32] = blob[..32].try_into().ok()?;
+    let nonce: [u8; 24] = blob[32..56].try_into().ok()?;
+    let ct = &blob[56..];
+    let key = member.export_key(CHANNEL_SIGNAL_LABEL, 32).ok()?;
+    let key: [u8; 32] = key[..32].try_into().ok()?;
+    let mut aad = Vec::with_capacity(64);
+    aad.extend_from_slice(channel_id);
+    aad.extend_from_slice(&sender);
+    let pt = aead::xchacha_open(&key, &nonce, ct, &aad).ok()?;
+    Some((sender, pt))
 }
 
 /// A server this client hosts (holds the root key).
@@ -398,11 +469,22 @@ impl Engine {
                 let removed = removed_by_chan
                     .remove(&c.info.channel_id)
                     .unwrap_or_default();
+                let mls = match mls::Member::import(&c.mls) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %IdentityId::from_bytes(c.info.channel_id).to_base32(),
+                            error = %e,
+                            "dropping a channel whose MLS state could not be restored"
+                        );
+                        continue;
+                    }
+                };
                 engine.channels.insert(
                     c.info.channel_id,
                     ChannelSession {
                         info: c.info,
-                        group: Group::import(&c.group)?,
+                        mls,
                         roster: c.roster.into_iter().collect(),
                         last_seq: c.last_seq,
                         removed,
@@ -526,7 +608,7 @@ impl Engine {
                 .values()
                 .map(|c| store::StoredChannel {
                     info: c.info.clone(),
-                    group: c.group.export(),
+                    mls: c.mls.export().unwrap_or_default(),
                     roster: c.roster.iter().copied().collect(),
                     last_seq: c.last_seq,
                 })
@@ -921,15 +1003,44 @@ impl Engine {
     // existing 1:1 `Call`s for the media itself (each leg is its own
     // DTLS-SRTP). Handshake messages (Welcome, Commit) ride sealed-sender DMs.
 
-    /// Mint a fresh MLS KeyPackage and publish it to the relay so other members
-    /// can add this identity to a group call. Keeps the private half locally.
-    /// Called at connect and again after each Welcome is consumed.
+    /// How many unused MLS KeyPackages to keep published so peers can add this
+    /// identity to channels / group calls. Each is single-use.
+    const MLS_KEYPKG_POOL: usize = 12;
+
+    /// Try every outstanding published-KeyPackage private half against a
+    /// Welcome, returning the joined [`mls::Member`] and keeping the rest.
+    fn try_join_pending(&mut self, welcome: &[u8]) -> Option<mls::Member> {
+        let mut kept: Vec<mls::Pending> = Vec::with_capacity(self.mls_pending.len());
+        let mut joined: Option<mls::Member> = None;
+        for pending in std::mem::take(&mut self.mls_pending) {
+            if joined.is_some() {
+                kept.push(pending);
+                continue;
+            }
+            match pending.join(welcome) {
+                Ok(m) => joined = Some(m),
+                Err((p, _)) => kept.push(*p),
+            }
+        }
+        self.mls_pending = kept;
+        joined
+    }
+
+    /// Top the published-KeyPackage pool back up to [`MLS_KEYPKG_POOL`]. Each
+    /// KeyPackage can be used to join exactly one group, so a member that joins
+    /// several channels needs several. Called at connect and after each join.
     pub async fn refresh_mls_key_package(&mut self) -> Result<(), CoreError> {
         let me = self.my_member_id();
-        let (pending, kp) = mls::Member::publish_key_package(&me).map_err(mls_err)?;
-        sync::publish_key_package(&mut self.client, &me, &kp.0).await?;
-        self.mls_pending.push(pending);
-        while self.mls_pending.len() > 4 {
+        let mut fresh = Vec::new();
+        while self.mls_pending.len() + fresh.len() < Self::MLS_KEYPKG_POOL {
+            let (pending, kp) = mls::Member::publish_key_package(&me).map_err(mls_err)?;
+            self.mls_pending.push(pending);
+            fresh.push(kp.0);
+        }
+        if !fresh.is_empty() {
+            sync::publish_key_packages(&mut self.client, &me, fresh).await?;
+        }
+        while self.mls_pending.len() > Self::MLS_KEYPKG_POOL * 2 {
             self.mls_pending.remove(0);
         }
         Ok(())
@@ -1009,21 +1120,7 @@ impl Engine {
             return Err(CoreError::Voice("already in this group call".into()));
         }
 
-        // Try each outstanding KeyPackage private half against the Welcome.
-        let mut joined: Option<mls::Member> = None;
-        let mut leftover: Vec<mls::Pending> = Vec::new();
-        for pending in std::mem::take(&mut self.mls_pending) {
-            if joined.is_none() {
-                match pending.join(&welcome) {
-                    Ok(m) => joined = Some(m),
-                    Err(_) => { /* not the matching KeyPackage */ }
-                }
-            } else {
-                leftover.push(pending);
-            }
-        }
-        self.mls_pending = leftover;
-        let member = joined.ok_or_else(|| {
+        let member = self.try_join_pending(&welcome).ok_or_else(|| {
             CoreError::Voice("no KeyPackage matched the Welcome (re-publish and retry)".into())
         })?;
 
@@ -1237,21 +1334,23 @@ impl Engine {
             .name
             .clone();
         let channel_id = random_array::<32>();
-        let (group, _my_bundle) = Group::create(channel_id, self.my_member_id());
+        let me = self.my_member_id();
+        let mls = mls::Member::create(&me, &channel_id).map_err(mls_err)?;
         let info = ChannelInfo {
             server_root: *server_root,
             server_name,
             channel_id,
             channel_name: name.to_owned(),
             private,
+            host_id: me,
         };
         let mut roster = HashSet::new();
-        roster.insert(self.my_member_id());
+        roster.insert(me);
         self.channels.insert(
             channel_id,
             ChannelSession {
                 info,
-                group,
+                mls,
                 roster,
                 last_seq: 0,
                 removed: HashMap::new(),
@@ -1266,8 +1365,10 @@ impl Engine {
         Ok(channel_id)
     }
 
-    /// Add `peer_id` to a channel (host only): DM them an invite carrying every
-    /// current member's sender-key bundle, and add them to the local roster.
+    /// Add `peer_id` to a channel (host only): commit an MLS add to the channel
+    /// log and DM the joiner the Welcome (plus the current role policy). The
+    /// peer must have a published MLS KeyPackage — i.e. have connected at least
+    /// once.
     pub async fn invite_to_channel(
         &mut self,
         channel_id: &[u8; 32],
@@ -1281,25 +1382,60 @@ impl Engine {
         if !self.hosted.contains_key(&ch.info.server_root) {
             return Err(CoreError::NotServerHost);
         }
-        let server_root = ch.info.server_root;
-        let info = ch.info.clone();
-        let roster: Vec<[u8; 32]> = ch.roster.iter().copied().collect();
-        // Hand the joiner our bundle plus a reconstructed bundle for every other
-        // member we already know, so they can decrypt everyone from the start.
-        // Those members learn the joiner's key from the `KeyBundle` it sends
-        // back (and reply in kind — see `handle_channel_control`).
-        let mut bundles = vec![ch.group.my_bundle().encode()];
-        bundles.extend(ch.group.peer_bundles().iter().map(|b| b.encode()));
+        self.mls_add_member(channel_id, peer_id, now_ms).await?;
+        if let Some(ch) = self.channels.get_mut(channel_id) {
+            ch.removed.remove(peer_id); // re-admit clears the old tombstone
+        }
+        Ok(())
+    }
 
-        let invite = ChannelControl::Invite {
-            info,
-            roster: roster.clone(),
-            bundles,
+    /// Host side of adding one member: fetch their KeyPackage, commit the MLS
+    /// add to the channel log, and DM them the Welcome + policy.
+    async fn mls_add_member(
+        &mut self,
+        channel_id: &[u8; 32],
+        peer_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let kp = sync::get_key_package(&mut self.client, peer_id)
+            .await?
+            .ok_or(CoreError::Channel(
+                "that identity has no published MLS KeyPackage — they must connect first",
+            ))?;
+
+        let (commit, welcome, info, since_seq, server_root) = {
+            let ch = self
+                .channels
+                .get_mut(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            let hs = ch.mls.add(&[mls::KeyPkg(kp)]).map_err(mls_err)?;
+            let welcome = hs
+                .welcome
+                .ok_or_else(|| CoreError::Voice("MLS add produced no Welcome".into()))?;
+            ch.resync_roster();
+            (
+                hs.commit,
+                welcome,
+                ch.info.clone(),
+                ch.last_seq,
+                ch.info.server_root,
+            )
         };
-        self.send_content(peer_id, Content::Channel(invite.encode()), now_ms)
-            .await?;
 
-        // Hand the joiner the current role configuration too.
+        sync::post_to_channel(
+            &mut self.client,
+            channel_id,
+            &channel::frame(channel::FRAME_COMMIT, &commit),
+        )
+        .await?;
+
+        let wc = ChannelControl::MlsWelcome {
+            info,
+            welcome,
+            since_seq,
+        };
+        self.send_content(peer_id, Content::Channel(wc.encode()), now_ms)
+            .await?;
         if let Some(policy) = self.server_policies.get(&server_root).cloned() {
             let pol = ChannelControl::Policy {
                 policy: policy.encode(),
@@ -1307,10 +1443,6 @@ impl Engine {
             let _ = self
                 .send_content(peer_id, Content::Channel(pol.encode()), now_ms)
                 .await;
-        }
-
-        if let Some(ch) = self.channels.get_mut(channel_id) {
-            ch.roster.insert(*peer_id);
         }
         self.dirty = true;
         Ok(())
@@ -1468,11 +1600,10 @@ impl Engine {
         self.redeem_invite(&link, password, now_ms).await
     }
 
-    /// Eject a member from a channel this client hosts. Issues a server-root-
-    /// signed [`crate::channel::RemoveOrder`] to every remaining member, drops
-    /// the member locally, and rotates our own sender chain. Each remaining
-    /// member does the same on receipt, so the removed member's cached keys go
-    /// stale — an O(n) rekey.
+    /// Eject a member from a channel this client hosts: commit an MLS remove to
+    /// the channel log. Every remaining member applies the commit and the group
+    /// rekeys (O(log n)); the removed member is evicted and can no longer read
+    /// the channel. Re-admitting them later works (a fresh KeyPackage).
     pub async fn remove_from_channel(
         &mut self,
         channel_id: &[u8; 32],
@@ -1482,62 +1613,36 @@ impl Engine {
         if *member_id == self.my_member_id() {
             return Err(CoreError::Channel("cannot remove yourself"));
         }
-        let (server_root, targets) = {
+        let commit = {
             let ch = self
                 .channels
-                .get(channel_id)
+                .get_mut(channel_id)
                 .ok_or(CoreError::UnknownChannel)?;
             if !self.hosted.contains_key(&ch.info.server_root) {
                 return Err(CoreError::NotServerHost);
             }
-            let me = self.my_member_id();
-            let targets: Vec<[u8; 32]> = ch
-                .roster
-                .iter()
-                .copied()
-                .filter(|m| *m != *member_id && *m != me)
-                .collect();
-            (ch.info.server_root, targets)
-        };
-
-        let order = crate::channel::RemoveOrder::mint(
-            &self.hosted[&server_root].root,
-            *channel_id,
-            *member_id,
-            now_ms,
-        )
-        .encode();
-
-        let new_bundle = {
-            let ch = self.channels.get_mut(channel_id).unwrap();
+            let Some(leaf) = ch.leaf_of(member_id) else {
+                return Ok(()); // not a member (already gone)
+            };
+            let hs = ch.mls.remove(&[leaf]).map_err(mls_err)?;
             ch.removed.insert(*member_id, now_ms);
-            ch.roster.remove(member_id);
-            ch.group.remove_member(member_id).encode()
+            ch.resync_roster();
+            hs.commit
         };
         self.dirty = true;
 
-        for t in targets {
-            let rm = ChannelControl::Remove {
-                order: order.clone(),
-            };
-            let _ = self
-                .send_content(&t, Content::Channel(rm.encode()), now_ms)
-                .await;
-            let kb = ChannelControl::KeyBundle {
-                channel_id: *channel_id,
-                bundle: new_bundle.clone(),
-            };
-            let _ = self
-                .send_content(&t, Content::Channel(kb.encode()), now_ms)
-                .await;
-        }
+        sync::post_to_channel(
+            &mut self.client,
+            channel_id,
+            &channel::frame(channel::FRAME_COMMIT, &commit),
+        )
+        .await?;
         Ok(())
     }
 
-    /// Delete a channel this client hosts: tell every member (a server-root-
-    /// signed [`crate::channel::RemoveOrder`] with the all-zeros sentinel
-    /// member) and drop it locally. The channel log on the relay is left to
-    /// expire.
+    /// Delete a channel this client hosts: DM every member a
+    /// [`ChannelControl::Closed`] and drop it locally. The relay log expires on
+    /// its own.
     pub async fn delete_channel(
         &mut self,
         channel_id: &[u8; 32],
@@ -1556,21 +1661,14 @@ impl Engine {
             (ch.info.server_root, members)
         };
 
-        let order = crate::channel::RemoveOrder::mint(
-            &self.hosted[&server_root].root,
-            *channel_id,
-            [0u8; 32],
-            now_ms,
-        )
-        .encode();
+        let msg = Content::Channel(
+            ChannelControl::Closed {
+                channel_id: *channel_id,
+            }
+            .encode(),
+        );
         for m in members {
-            let msg = Content::Channel(
-                ChannelControl::Remove {
-                    order: order.clone(),
-                }
-                .encode(),
-            );
-            let _ = self.send_content(&m, msg, now_ms).await;
+            let _ = self.send_content(&m, msg.clone(), now_ms).await;
         }
 
         self.channels.remove(channel_id);
@@ -1612,8 +1710,8 @@ impl Engine {
         Ok(())
     }
 
-    /// Leave a channel this client joined. Notifies every other member with a
-    /// [`ChannelControl::Leave`] (the host turns it into a rekey so post-leave
+    /// Leave a channel this client joined. Tells the host with a
+    /// [`ChannelControl::Leave`] (the host commits the MLS removal so post-leave
     /// messages stay private) and drops all local state for the channel. The
     /// host cannot "leave" its own server this way.
     pub async fn leave_channel(
@@ -1621,14 +1719,12 @@ impl Engine {
         channel_id: &[u8; 32],
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (server_root, others) = {
+        let (server_root, host_id) = {
             let ch = self
                 .channels
                 .get(channel_id)
                 .ok_or(CoreError::UnknownChannel)?;
-            let me = self.my_member_id();
-            let others: Vec<[u8; 32]> = ch.roster.iter().copied().filter(|m| *m != me).collect();
-            (ch.info.server_root, others)
+            (ch.info.server_root, ch.info.host_id)
         };
         if self.hosted.contains_key(&server_root) {
             return Err(CoreError::Channel(
@@ -1642,9 +1738,7 @@ impl Engine {
             }
             .encode(),
         );
-        for other in others {
-            let _ = self.send_content(&other, msg.clone(), now_ms).await;
-        }
+        let _ = self.send_content(&host_id, msg, now_ms).await;
 
         self.channels.remove(channel_id);
         // Drop the server's policy if we no longer share any of its channels.
@@ -2079,14 +2173,21 @@ impl Engine {
         text: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let ch = self
-            .channels
-            .get_mut(channel_id)
-            .ok_or(CoreError::UnknownChannel)?;
-        let gm = ch
-            .group
-            .encrypt(&pad_channel(&Content::Text(text.to_owned()).encode()));
-        sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
+        let ct = {
+            let ch = self
+                .channels
+                .get_mut(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            ch.mls
+                .encrypt(&pad_channel(&Content::Text(text.to_owned()).encode()))
+                .map_err(mls_err)?
+        };
+        sync::post_to_channel(
+            &mut self.client,
+            channel_id,
+            &channel::frame(channel::FRAME_APP, &ct),
+        )
+        .await?;
         self.push_channel_history(ChannelHistoryEntry {
             channel_id: *channel_id,
             sender: self.my_member_id(),
@@ -2106,44 +2207,57 @@ impl Engine {
         }
     }
 
-    /// Poll every channel's relay log and return newly decrypted messages
-    /// (excluding our own).
+    /// Poll every channel's relay log: apply MLS Commits from the host, and
+    /// return newly decrypted messages (excluding our own).
     pub async fn poll_channels(&mut self, now_ms: u64) -> Result<Vec<ChannelMessage>, CoreError> {
         let me = self.my_member_id();
         let ids: Vec<[u8; 32]> = self.channels.keys().copied().collect();
         let mut out = Vec::new();
         let mut new_history = Vec::new();
         let mut new_reacts: Vec<PendingReaction> = Vec::new();
+        let mut evicted: Vec<[u8; 32]> = Vec::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
             let entries = sync::fetch_channel(&mut self.client, &id, since).await?;
             for (seq, blob) in entries {
-                if let Some(ch) = self.channels.get_mut(&id) {
-                    ch.last_seq = ch.last_seq.max(seq);
-                    let Ok(gm) = GroupMessage::decode(&blob) else {
-                        continue;
-                    };
-                    if gm.sender == me
-                        || ch.removed.contains_key(&gm.sender)
-                        || self.blocked.contains(&gm.sender)
-                    {
-                        continue;
+                let Some(ch) = self.channels.get_mut(&id) else {
+                    continue;
+                };
+                ch.last_seq = ch.last_seq.max(seq);
+                let Some((tag, payload)) = channel::unframe(&blob) else {
+                    continue;
+                };
+                let host_id = ch.info.host_id;
+                let processed = ch.mls.process_from(payload, Some(&host_id));
+                let _ = tag; // both tags route through process_from
+                match processed {
+                    Ok(mls::Processed::EpochChanged) => {
+                        ch.resync_roster();
+                        if !ch.roster.contains(&me) {
+                            evicted.push(id); // the host removed us
+                        }
+                        self.dirty = true;
                     }
-                    // Roles: drop messages from a member without PERM_SEND
-                    // (muted role, announcement channel, …).
-                    if self
-                        .server_policies
-                        .get(&ch.info.server_root)
-                        .is_some_and(|p| p.effective_perms(&gm.sender) & roles::PERM_SEND == 0)
-                    {
-                        continue;
-                    }
-                    match ch.group.decrypt(&gm) {
-                        Ok(pt) => match unpad_channel(&pt).map(Content::decode) {
+                    Ok(mls::Processed::Application { sender, plaintext }) => {
+                        let Ok(sender) = <[u8; 32]>::try_from(sender) else {
+                            continue;
+                        };
+                        if ch.removed.contains_key(&sender) || self.blocked.contains(&sender) {
+                            continue;
+                        }
+                        // Roles: drop messages from a member without PERM_SEND.
+                        if self
+                            .server_policies
+                            .get(&ch.info.server_root)
+                            .is_some_and(|p| p.effective_perms(&sender) & roles::PERM_SEND == 0)
+                        {
+                            continue;
+                        }
+                        match unpad_channel(&plaintext).map(Content::decode) {
                             Some(Ok(Content::Text(text))) => {
                                 new_history.push(ChannelHistoryEntry {
                                     channel_id: id,
-                                    sender: gm.sender,
+                                    sender,
                                     outgoing: false,
                                     ts_ms: now_ms,
                                     text: text.clone(),
@@ -2151,7 +2265,7 @@ impl Engine {
                                 out.push(ChannelMessage {
                                     channel_id: id,
                                     channel_name: ch.info.channel_name.clone(),
-                                    sender: gm.sender,
+                                    sender,
                                     text,
                                     seq,
                                 });
@@ -2161,14 +2275,18 @@ impl Engine {
                                 emoji,
                                 remove,
                             })) => {
-                                new_reacts.push((id, target_seq, emoji, gm.sender, remove));
+                                new_reacts.push((id, target_seq, emoji, sender, remove));
                             }
                             _ => {}
-                        },
-                        Err(e) => tracing::debug!(error = %e, "undecryptable channel message"),
+                        }
                     }
+                    Ok(mls::Processed::Ignored) => {}
+                    Err(e) => tracing::debug!(error = %e, "undecryptable channel log entry"),
                 }
             }
+        }
+        for cid in evicted {
+            self.channels.remove(&cid);
         }
         for (cid, seq, emoji, member, removed) in new_reacts {
             self.record_reaction(cid, seq, emoji, member, removed);
@@ -2192,21 +2310,28 @@ impl Engine {
         remove: bool,
         _now_ms: u64,
     ) -> Result<(), CoreError> {
-        let gm = {
+        let ct = {
             let ch = self
                 .channels
                 .get_mut(channel_id)
                 .ok_or(CoreError::UnknownChannel)?;
-            ch.group.encrypt(&pad_channel(
-                &Content::Reaction {
-                    target_seq,
-                    emoji: emoji.to_owned(),
-                    remove,
-                }
-                .encode(),
-            ))
+            ch.mls
+                .encrypt(&pad_channel(
+                    &Content::Reaction {
+                        target_seq,
+                        emoji: emoji.to_owned(),
+                        remove,
+                    }
+                    .encode(),
+                ))
+                .map_err(mls_err)?
         };
-        sync::post_to_channel(&mut self.client, channel_id, &gm.encode()).await?;
+        sync::post_to_channel(
+            &mut self.client,
+            channel_id,
+            &channel::frame(channel::FRAME_APP, &ct),
+        )
+        .await?;
         let me = self.my_member_id();
         self.record_reaction(*channel_id, target_seq, emoji.to_owned(), me, remove);
         Ok(())
@@ -2282,86 +2407,36 @@ impl Engine {
         now_ms: u64,
     ) -> Result<(), CoreError> {
         match ChannelControl::decode(blob)? {
-            ChannelControl::Invite {
+            ChannelControl::MlsWelcome {
                 info,
-                roster,
-                bundles,
+                welcome,
+                since_seq,
             } => {
                 let channel_id = info.channel_id;
-                if !self.channels.contains_key(&channel_id) {
-                    let (mut group, _) = Group::create(channel_id, self.my_member_id());
-                    for b in &bundles {
-                        if let Ok(bundle) = SenderKeyBundle::decode(b) {
-                            let _ = group.upsert_member(&bundle);
-                        }
-                    }
-                    let mut roster_set: HashSet<[u8; 32]> = roster.iter().copied().collect();
-                    roster_set.insert(self.my_member_id());
-                    self.channels.insert(
-                        channel_id,
-                        ChannelSession {
-                            info,
-                            group,
-                            roster: roster_set,
-                            last_seq: 0,
-                            removed: HashMap::new(),
-                        },
-                    );
+                if self.channels.contains_key(&channel_id) {
+                    return Ok(());
                 }
-                // Send our bundle to every other roster member.
-                let my_bundle = self.channels[&channel_id].group.my_bundle().encode();
-                let kb = ChannelControl::KeyBundle {
-                    channel_id,
-                    bundle: my_bundle,
+                let Some(mls) = self.try_join_pending(&welcome) else {
+                    tracing::debug!("no KeyPackage matched a channel Welcome");
+                    return Ok(());
                 };
-                let targets: Vec<[u8; 32]> = roster
+                let roster: HashSet<[u8; 32]> = mls
+                    .members()
                     .into_iter()
-                    .filter(|m| *m != self.my_member_id())
+                    .filter_map(|(_, id)| <[u8; 32]>::try_from(id).ok())
                     .collect();
-                for m in targets {
-                    let _ = self
-                        .send_content(&m, Content::Channel(kb.encode()), now_ms)
-                        .await;
-                }
+                self.channels.insert(
+                    channel_id,
+                    ChannelSession {
+                        info,
+                        mls,
+                        roster,
+                        last_seq: since_seq,
+                        removed: HashMap::new(),
+                    },
+                );
+                let _ = self.refresh_mls_key_package().await;
                 self.dirty = true;
-            }
-            ChannelControl::KeyBundle { channel_id, bundle } => {
-                let Ok(b) = SenderKeyBundle::decode(&bundle) else {
-                    return Ok(());
-                };
-                let member = b.member;
-                let me = self.my_member_id();
-                // Never re-key a member we've ejected (guards against a stale
-                // bundle that was already in flight when they were removed).
-                if self
-                    .channels
-                    .get(&channel_id)
-                    .is_some_and(|ch| ch.removed.contains_key(&member))
-                {
-                    return Ok(());
-                }
-                let mut reply_to = None;
-                if let Some(ch) = self.channels.get_mut(&channel_id) {
-                    let is_new = !ch.group.known_members().any(|m| *m == member);
-                    ch.roster.insert(member);
-                    ch.group.upsert_member(&b)?;
-                    self.dirty = true;
-                    // First time we hear from this member: hand them our bundle
-                    // back so every pair of members ends up mutually keyed, not
-                    // just each member and the host.
-                    if is_new && member != me {
-                        reply_to = Some(ch.group.my_bundle().encode());
-                    }
-                }
-                if let Some(my_bundle) = reply_to {
-                    let kb = ChannelControl::KeyBundle {
-                        channel_id,
-                        bundle: my_bundle,
-                    };
-                    let _ = self
-                        .send_content(&member, Content::Channel(kb.encode()), now_ms)
-                        .await;
-                }
             }
             ChannelControl::Redeem { token, pw } => {
                 let token = crate::invite::InviteToken::decode(&token)?;
@@ -2369,7 +2444,6 @@ impl Engine {
                 if token.is_expired(now_ms) || token.host_id != self.my_member_id() {
                     return Ok(());
                 }
-                // We must actually host this channel's server.
                 let Some(ch) = self.channels.get(&token.channel_id) else {
                     return Ok(());
                 };
@@ -2378,90 +2452,43 @@ impl Engine {
                 {
                     return Ok(());
                 }
-                // Password gate.
                 if let Some(want) = self.hosted[&token.server_root].join_pw_hash {
                     if join_pw_hash(&token.server_root, &pw) != want {
-                        return Ok(()); // wrong / missing password — ignore
+                        return Ok(());
                     }
                 }
                 let used = *self.invite_uses.get(&token.nonce).unwrap_or(&0);
                 if token.max_uses != 0 && used >= token.max_uses {
-                    return Ok(()); // link is used up — silently ignore
+                    return Ok(());
                 }
-                // `from` is the redeemer's Ed25519 key; channel membership is
-                // keyed by IdentityId.
                 let Ok(pk) = SignPublic::from_bytes(from) else {
                     return Ok(());
                 };
                 let redeemer_id = *IdentityId::of(&pk).as_bytes();
                 self.invite_uses.insert(token.nonce, used + 1);
                 self.dirty = true;
-                self.invite_to_channel(&token.channel_id, &redeemer_id, now_ms)
+                self.mls_add_member(&token.channel_id, &redeemer_id, now_ms)
                     .await?;
+                if let Some(ch) = self.channels.get_mut(&token.channel_id) {
+                    ch.removed.remove(&redeemer_id);
+                }
             }
-            ChannelControl::Remove { order } => {
-                let order = crate::channel::RemoveOrder::decode(&order)?;
-                order.verify()?;
-                let me = self.my_member_id();
-                // Sentinel member = all-zeros: the host closed the whole channel.
-                if order.member == [0u8; 32] {
-                    if let Some(ch) = self.channels.get(&order.channel_id) {
-                        if ch.info.server_root == order.server_root {
-                            let server_root = ch.info.server_root;
-                            self.channels.remove(&order.channel_id);
-                            if !self
-                                .channels
-                                .values()
-                                .any(|c| c.info.server_root == server_root)
-                            {
-                                self.server_policies.remove(&server_root);
-                            }
-                            self.dirty = true;
-                        }
-                    }
-                    return Ok(());
-                }
-                if order.member == me {
-                    return Ok(()); // a removal of us — nothing to rotate
-                }
-                let targets = {
-                    let Some(ch) = self.channels.get(&order.channel_id) else {
-                        return Ok(());
-                    };
-                    if ch.info.server_root != order.server_root {
-                        return Ok(());
-                    }
-                    // Already applied this removal (or a newer one) for member.
-                    if ch
-                        .removed
-                        .get(&order.member)
-                        .is_some_and(|&t| t >= order.issued_ms)
+            ChannelControl::Closed { channel_id } => {
+                let is_host = self
+                    .channels
+                    .get(&channel_id)
+                    .is_some_and(|c| c.info.host_id == idk_to_id(from));
+                if is_host {
+                    let server_root = self.channels[&channel_id].info.server_root;
+                    self.channels.remove(&channel_id);
+                    if !self
+                        .channels
+                        .values()
+                        .any(|c| c.info.server_root == server_root)
                     {
-                        return Ok(());
+                        self.server_policies.remove(&server_root);
                     }
-                    ch.roster
-                        .iter()
-                        .copied()
-                        .filter(|m| *m != order.member && *m != me)
-                        .collect::<Vec<_>>()
-                };
-
-                let new_bundle = {
-                    let ch = self.channels.get_mut(&order.channel_id).unwrap();
-                    ch.removed.insert(order.member, order.issued_ms);
-                    ch.roster.remove(&order.member);
-                    ch.group.remove_member(&order.member).encode()
-                };
-                self.dirty = true;
-
-                for t in targets {
-                    let kb = ChannelControl::KeyBundle {
-                        channel_id: order.channel_id,
-                        bundle: new_bundle.clone(),
-                    };
-                    let _ = self
-                        .send_content(&t, Content::Channel(kb.encode()), now_ms)
-                        .await;
+                    self.dirty = true;
                 }
             }
             ChannelControl::Policy { policy } => {
@@ -2604,13 +2631,14 @@ impl Engine {
     }
 
     /// Broadcast a short-lived "I am typing" signal to a channel. Stateless:
-    /// [`Group::seal_signal`] AEADs the marker under the member's static signal
-    /// key without advancing the message chain, so nothing is persisted.
+    /// AEAD-sealed under the channel group's current epoch secret, so it never
+    /// touches the message log and nothing is persisted.
     pub async fn send_typing_channel(
         &mut self,
         channel_id: &[u8; 32],
         now_ms: u64,
     ) -> Result<(), CoreError> {
+        let me = self.my_member_id();
         let blob = {
             let ch = self
                 .channels
@@ -2618,7 +2646,7 @@ impl Engine {
                 .ok_or(CoreError::UnknownChannel)?;
             let mut pt = now_ms.to_be_bytes().to_vec();
             pt.extend_from_slice(&Content::Typing.encode());
-            ch.group.seal_signal(&pt)
+            seal_channel_signal(&ch.mls, &me, channel_id, &pt)?
         };
         sync::post_signal(&mut self.client, channel_id, &blob).await?;
         Ok(())
@@ -2664,7 +2692,7 @@ impl Engine {
                 continue;
             };
             for blob in blobs {
-                let Some((member, pt)) = ch.group.open_signal(&blob) else {
+                let Some((member, pt)) = open_channel_signal(&ch.mls, &channel_id, &blob) else {
                     continue;
                 };
                 if member == me || pt.len() < 8 || self.blocked.contains(&member) {

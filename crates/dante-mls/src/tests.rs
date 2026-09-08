@@ -11,8 +11,12 @@ fn group_shares_a_call_key_that_rekeys_on_leave() {
 
     let hs = alice.add(&[bob_kp, carol_kp]).unwrap();
     let welcome = hs.welcome.clone().unwrap();
-    let mut bob = bob_pending.join(&welcome).unwrap();
-    let carol = carol_pending.join(&welcome).unwrap();
+    let mut bob = bob_pending
+        .join(&welcome)
+        .unwrap_or_else(|(_, e)| panic!("join: {e}"));
+    let carol = carol_pending
+        .join(&welcome)
+        .unwrap_or_else(|(_, e)| panic!("join: {e}"));
 
     assert_eq!(alice.epoch(), bob.epoch());
     assert_eq!(alice.epoch(), carol.epoch());
@@ -50,7 +54,9 @@ fn member_survives_export_import() {
     let mut alice = Member::create(b"alice", b"chan").unwrap();
     let (bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
     let hs = alice.add(&[bob_kp]).unwrap();
-    let mut bob = bob_pending.join(&hs.welcome.unwrap()).unwrap();
+    let mut bob = bob_pending
+        .join(&hs.welcome.unwrap())
+        .unwrap_or_else(|(_, e)| panic!("join: {e}"));
 
     let blob = alice.export().unwrap();
     let mut alice = Member::import(&blob).unwrap();
@@ -61,7 +67,7 @@ fn member_survives_export_import() {
     // The reloaded member can still originate traffic...
     let ct = alice.encrypt(b"after reload").unwrap();
     match bob.process(&ct).unwrap() {
-        Processed::Application(pt) => assert_eq!(pt, b"after reload"),
+        Processed::Application { plaintext, .. } => assert_eq!(plaintext, b"after reload"),
         other => panic!("expected application message, got {other:?}"),
     }
 
@@ -72,7 +78,9 @@ fn member_survives_export_import() {
         bob.process(&hs.commit).unwrap(),
         Processed::EpochChanged
     ));
-    let carol = carol_pending.join(&hs.welcome.unwrap()).unwrap();
+    let carol = carol_pending
+        .join(&hs.welcome.unwrap())
+        .unwrap_or_else(|(_, e)| panic!("join: {e}"));
     assert_eq!(alice.call_key().unwrap(), carol.call_key().unwrap());
 }
 
@@ -83,18 +91,20 @@ fn members_exchange_application_messages() {
     let (bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
 
     let hs = alice.add(&[bob_kp]).unwrap();
-    let mut bob = bob_pending.join(&hs.welcome.unwrap()).unwrap();
+    let mut bob = bob_pending
+        .join(&hs.welcome.unwrap())
+        .unwrap_or_else(|(_, e)| panic!("join: {e}"));
 
     let ct = alice.encrypt(b"hello bob").unwrap();
     match bob.process(&ct).unwrap() {
-        Processed::Application(pt) => assert_eq!(pt, b"hello bob"),
+        Processed::Application { plaintext, .. } => assert_eq!(plaintext, b"hello bob"),
         other => panic!("expected application message, got {other:?}"),
     }
 
     // And the other direction.
     let ct = bob.encrypt(b"hi alice").unwrap();
     match alice.process(&ct).unwrap() {
-        Processed::Application(pt) => assert_eq!(pt, b"hi alice"),
+        Processed::Application { plaintext, .. } => assert_eq!(plaintext, b"hi alice"),
         other => panic!("expected application message, got {other:?}"),
     }
 }

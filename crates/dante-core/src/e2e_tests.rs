@@ -602,11 +602,13 @@ async fn three_channel_members_all_key_each_other() {
     host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
     host.invite_to_channel(&chan, &bob_id, now).await.unwrap();
 
-    // Let the invite + bundle-exchange settle.
+    // Let the Welcomes land and the members catch up on the MLS commits in
+    // the channel log so everyone converges on the same epoch.
     for _ in 0..8 {
         for e in [&mut host, &mut alice, &mut bob] {
             e.sync(now).await.unwrap();
             e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
         }
     }
     assert!(
@@ -618,8 +620,7 @@ async fn three_channel_members_all_key_each_other() {
         "bob joined"
     );
 
-    // Alice posts; BOTH host and bob decrypt it (bob<->alice were never
-    // directly introduced by the host).
+    // Alice posts; BOTH host and bob decrypt it.
     alice
         .send_channel(&chan, "hello from alice", now)
         .await
@@ -960,6 +961,7 @@ async fn host_removes_a_member_from_a_channel() {
     for _ in 0..8 {
         for e in [&mut host, &mut alice, &mut bob] {
             e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
         }
     }
 
@@ -985,10 +987,17 @@ async fn host_removes_a_member_from_a_channel() {
     for _ in 0..6 {
         for e in [&mut host, &mut alice, &mut bob] {
             e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
         }
     }
 
-    // Post-kick: Alice still reads the host; Bob is locked out.
+    // Bob learned he was removed — the channel dropped out of his view.
+    assert!(
+        !bob.channels().iter().any(|c| c.channel_id == chan),
+        "removed member's channel is gone"
+    );
+
+    // Post-kick: Alice still reads the host.
     host.send_channel(&chan, "after the kick", now)
         .await
         .unwrap();
@@ -1001,17 +1010,12 @@ async fn host_removes_a_member_from_a_channel() {
             .map(|m| m.text.clone()),
         Some("after the kick".to_string())
     );
-    assert!(
-        bob.poll_channels(now).await.unwrap().is_empty(),
-        "removed member cannot decrypt new messages"
-    );
 
-    // And Bob is muted: his messages are dropped by the others.
-    bob.send_channel(&chan, "let me back in", now)
+    // And Bob can no longer post — he is not in the channel.
+    assert!(bob
+        .send_channel(&chan, "let me back in", now)
         .await
-        .unwrap();
-    assert!(host.poll_channels(now).await.unwrap().is_empty());
-    assert!(alice.poll_channels(now).await.unwrap().is_empty());
+        .is_err());
 }
 
 #[tokio::test]

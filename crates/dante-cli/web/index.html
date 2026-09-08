@@ -196,6 +196,12 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .chan-row .hash { color: var(--text-faint); font-weight: 700; }
 .chan-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chan-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: 0 0 8px; }
+.chan-row .badge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--blazing-flame); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px;
+  text-align: center; flex: 0 0 auto; }
+.chan-row .badge.muted { background: var(--text-faint); }
+.chan-row.muted .name { opacity: .55; }
+.chan-row.muted .hash { opacity: .55; }
 .chan-row .avatar { width: 20px; height: 20px; font-size: 10px; }
 
 /* user panel */
@@ -461,6 +467,7 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
       <span class="title" id="chat-title"><span class="hash">#</span> …</span>
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
+      <button class="icon-btn" id="btn-mute" title="Mute notifications" hidden>🔔</button>
       <button class="icon-btn" id="btn-call" title="Start a voice call" hidden>📞</button>
       <button class="icon-btn" id="btn-groupcall" title="Start a group call" hidden>📞👥</button>
       <button class="icon-btn" id="btn-contact" title="Save as contact" hidden>☆</button>
@@ -536,8 +543,9 @@ const store = {
   dms: LS.get("dms", []),             // [{fp}]
   messages: [],                       // flat inbox, each tagged with _target
   seen: 0,
-  unread: new Set(),                  // targets with unseen messages
+  unread: new Map(),                  // target -> count of unseen messages
   mentions: new Set(),               // targets where I was @-mentioned
+  muted: new Set(LS.get("muted", [])), // targets with notifications silenced
   view: LS.get("view", { server: "@dm", target: null }),
   typingText: "",
   policies: {},                       // server root -> policy JSON
@@ -575,6 +583,15 @@ const store = {
     const set = new Set();
     for (const m of this.msgsFor(target)) if (m.from && m.from !== "you") set.add(m.from);
     return [...set].sort((a, b) => a.localeCompare(b));
+  },
+
+  unreadFor(t) { return this.unread.get(t) || 0; },
+  bumpUnread(t) { this.unread.set(t, this.unreadFor(t) + 1); },
+  totalUnread() { let n = 0; for (const [t, c] of this.unread) if (!this.muted.has(t)) n += c; return n; },
+  isMuted(t) { return this.muted.has(t); },
+  toggleMute(t) {
+    if (this.muted.has(t)) this.muted.delete(t); else this.muted.add(t);
+    LS.set("muted", [...this.muted]);
   },
 };
 
@@ -843,7 +860,6 @@ function renderPane() {
     const noteRow = el("button", "chan-row" + (curTarget() === meFp ? " active" : ""));
     noteRow.appendChild(Object.assign(el("div", "avatar"), { textContent: "📝" }));
     noteRow.appendChild(el("span", "name", "Private Note"));
-    if (store.unread.has(meFp)) noteRow.appendChild(el("span", "dot"));
     noteRow.onclick = () => selectTarget("@dm", meFp);
     list.appendChild(noteRow);
 
@@ -851,11 +867,11 @@ function renderPane() {
     for (const c of store.contacts) if (!isSelf(c.fp)) fps.push(c.fp);
     for (const d of store.dms) if (!isSelf(d.fp) && !fps.includes(d.fp)) fps.push(d.fp);
     for (const fp of fps) {
-      const row = el("button", "chan-row" + (curTarget() === fp ? " active" : "") + (isBlocked(fp) ? " blocked" : ""));
+      const row = el("button", "chan-row" + (curTarget() === fp ? " active" : "") + (isBlocked(fp) ? " blocked" : "") + (store.isMuted(fp) ? " muted" : ""));
       row.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(dmLabel(fp)) }));
       row.appendChild(el("span", "name", dmLabel(fp)));
       if (store.contacts.find(c => c.fp === fp && c.verified)) row.appendChild(Object.assign(el("span", "tag"), { textContent: "✓" }));
-      if (store.unread.has(fp)) row.appendChild(el("span", "dot"));
+      unreadBadge(row, fp);
       row.onclick = () => selectTarget("@dm", fp);
       list.appendChild(row);
     }
@@ -889,14 +905,22 @@ function renderPane() {
 
   for (const c of store.channelsOf(server)) {
     const t = "#" + c.id;
-    const row = el("button", "chan-row" + (curTarget() === t ? " active" : ""));
+    const row = el("button", "chan-row" + (curTarget() === t ? " active" : "") + (store.isMuted(t) ? " muted" : ""));
     row.appendChild(el("span", "hash", "#"));
     row.appendChild(el("span", "name", c.name));
     if (store.mentions.has(t)) row.appendChild(Object.assign(el("span", "tag mention-badge"), { textContent: "@" }));
-    if (store.unread.has(t)) row.appendChild(el("span", "dot"));
+    unreadBadge(row, t);
     row.onclick = () => selectTarget(server, t);
     list.appendChild(row);
   }
+}
+
+// Append an unread-count badge (or nothing) to a sidebar row.
+function unreadBadge(row, t) {
+  const n = store.unreadFor(t);
+  if (!n) return;
+  const b = el("span", "badge" + (store.isMuted(t) ? " muted" : ""), n > 99 ? "99+" : String(n));
+  row.appendChild(b);
 }
 
 function renderChat() {
@@ -919,6 +943,8 @@ function renderChat() {
   delChanBtn.hidden = true;
   const pinsBtn = $("#btn-pins");
   pinsBtn.hidden = true;
+  const muteBtn = $("#btn-mute");
+  muteBtn.hidden = true;
   const callBtn = $("#btn-call");
   callBtn.hidden = true;
   const gcallBtn = $("#btn-groupcall");
@@ -932,6 +958,14 @@ function renderChat() {
     inviteBtn.hidden = true; linkBtn.hidden = true;
     log.innerHTML = '<div class="empty">Pick a channel or start a DM.</div>';
     return;
+  }
+
+  if (!isSelf(target)) {
+    muteBtn.hidden = false;
+    const m = store.isMuted(target);
+    muteBtn.textContent = m ? "🔕" : "🔔";
+    muteBtn.title = m ? "Notifications muted — click to unmute" : "Mute notifications";
+    muteBtn.onclick = () => { store.toggleMute(target); render(); };
   }
 
   if (target.startsWith("#")) {
@@ -1391,7 +1425,12 @@ async function removeMemberFlow(channelTarget, memberFp) {
 
 function renderTyping() { $("#typing").textContent = store.typingText || ""; }
 
-function render() { renderRail(); renderPane(); renderChat(); renderMembers(); renderTyping(); renderGroupCallToast(); }
+function render() { renderRail(); renderPane(); renderChat(); renderMembers(); renderTyping(); renderGroupCallToast(); updateTitle(); }
+
+function updateTitle() {
+  const n = store.totalUnread();
+  document.title = n > 0 ? `(${n > 99 ? "99+" : n}) DaNTe` : "DaNTe";
+}
 const esc = s => { const d = el("div"); d.textContent = s; return d.innerHTML; };
 
 /* custom-emoji map for the server currently in view: { shortcode: hexhash } */
@@ -1721,13 +1760,19 @@ function ingest(items) {
       it._target = it.peer || (it.from === "you" ? (store._pendingDmTarget || curTarget()) : it.from);
     }
     store.messages.push(it);
-    if (it._target && it._target !== curTarget()) store.unread.add(it._target);
+    const elsewhere = it._target && it._target !== curTarget();
+    const fromOther = it.from && it.from !== "you";
+    if (elsewhere && fromOther) store.bumpUnread(it._target);
     // Mention: a channel message from someone else naming my fingerprint.
-    if (it.kind === "channel" && it.from !== "you" && it.text
+    if (it.kind === "channel" && fromOther && it.text
         && it.text.includes("@" + store.me.fingerprint)) {
       store.mentions.add(it._target);
-      if (it._target !== curTarget())
+      if (it._target !== curTarget() && !store.isMuted(it._target))
         notify("Mentioned in " + store.channelName(it.channel), it.text);
+    } else if (elsewhere && fromOther && it.kind !== "channel" && it.text
+        && document.hidden && !store.isMuted(it._target)) {
+      // A DM while the tab is in the background.
+      notify(dmLabel(it._target), it.text);
     }
     // auto-list an unknown DM partner
     if (it.kind !== "channel" && it.from !== "you" && it.from && !store.dms.some(d => short(d.fp) === it.from || d.fp === it.from)) {

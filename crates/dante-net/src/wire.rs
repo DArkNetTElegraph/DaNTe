@@ -182,6 +182,15 @@ const RES_KEYPKG: u8 = 11;
 const RES_POSTED: u8 = 12;
 const RES_P2P_PEERS: u8 = 13;
 
+/// Upper bound on how many elements a length-prefixed list decoder will
+/// pre-reserve. A count field is untrusted `u32` wire data and each element is
+/// several bytes, so `Vec::with_capacity(n)` would let a small frame demand a
+/// huge up-front allocation (e.g. an `IceCfg` is ~72 bytes → 72x). Capping only
+/// the *reservation* — the vec still grows to hold whatever actually decodes,
+/// which is bounded by the input length — kills the amplification without
+/// rejecting any legitimately large list.
+const LIST_PREALLOC_CAP: usize = 1024;
+
 fn write_ice_list(w: &mut Writer, list: &[IceCfg]) {
     w.u32(list.len() as u32);
     for c in list {
@@ -198,13 +207,13 @@ fn read_ice_list(r: &mut Reader<'_>) -> Result<Vec<IceCfg>, WireError> {
     if n > r.remaining() {
         return Err(WireError::LengthTooLarge(n as u64));
     }
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(LIST_PREALLOC_CAP));
     for _ in 0..n {
         let un = r.u32()? as usize;
         if un > r.remaining() {
             return Err(WireError::LengthTooLarge(un as u64));
         }
-        let mut urls = Vec::with_capacity(un);
+        let mut urls = Vec::with_capacity(un.min(LIST_PREALLOC_CAP));
         for _ in 0..un {
             urls.push(r.string()?);
         }
@@ -236,7 +245,7 @@ fn read_str_list(r: &mut Reader<'_>) -> Result<Vec<String>, WireError> {
     if n > r.remaining() {
         return Err(WireError::LengthTooLarge(n as u64));
     }
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(LIST_PREALLOC_CAP));
     for _ in 0..n {
         out.push(r.string()?);
     }
@@ -248,7 +257,7 @@ fn read_blob_list(r: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, WireError> {
     if n > r.remaining() {
         return Err(WireError::LengthTooLarge(n as u64));
     }
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(LIST_PREALLOC_CAP));
     for _ in 0..n {
         out.push(r.bytes()?.to_vec());
     }
@@ -378,7 +387,7 @@ impl Request {
                 if n > r.remaining() {
                     return Err(WireError::LengthTooLarge(n as u64));
                 }
-                let mut hints = Vec::with_capacity(n);
+                let mut hints = Vec::with_capacity(n.min(LIST_PREALLOC_CAP));
                 for _ in 0..n {
                     hints.push(r.fixed::<8>()?);
                 }
@@ -536,7 +545,7 @@ impl Response {
                 if n > r.remaining() {
                     return Err(WireError::LengthTooLarge(n as u64));
                 }
-                let mut out = Vec::with_capacity(n);
+                let mut out = Vec::with_capacity(n.min(LIST_PREALLOC_CAP));
                 for _ in 0..n {
                     out.push((r.u64()?, r.bytes()?.to_vec()));
                 }

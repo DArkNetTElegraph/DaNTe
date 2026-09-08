@@ -232,6 +232,9 @@ button, a, [role="button"] { -webkit-tap-highlight-color: transparent; }
   display: grid; place-items: center; font-size: 16px; line-height: 1;
 }
 .icon-btn:hover { color: var(--text); background: var(--bg-hover); }
+.icon-btn.has-dot { position: relative; }
+.icon-btn.has-dot::after { content: ""; position: absolute; top: 3px; right: 3px;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--blazing-flame); }
 #btn-verify.verified { color: var(--cornflower-blue); }
 /* monochrome UI icons */
 .ic { width: 18px; height: 18px; display: block; pointer-events: none; }
@@ -313,7 +316,10 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 /* voice channel: the room view that replaces the message log */
 .voice-room { display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; min-height: 100%; padding: 40px 20px; text-align: center; }
-.voice-room-icon { font-size: 44px; opacity: .9; }
+.voice-room-icon { opacity: .8; color: var(--text-faint); }
+.voice-room-icon .ic { width: 40px; height: 40px; }
+.chan-row .hash .ic { width: 15px; height: 15px; display: block; }
+#chat-title .hash .ic { width: 16px; height: 16px; vertical-align: -3px; }
 .voice-room-name { font-size: 20px; font-weight: 700; color: var(--text); }
 .voice-room-sub { font-size: 13px; color: var(--text-faint); }
 .voice-stage { display: flex; flex-wrap: wrap; gap: 18px; justify-content: center; margin: 14px 0 4px; }
@@ -382,15 +388,47 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 }
 .emoji-cell:hover { background: var(--bg-hover); }
 
-/* composer ghost icon buttons (attach / emoji) */
-.composer .ghost-icon {
-  border: 0; background: transparent; color: var(--text-faint); cursor: pointer;
-  width: 32px; height: 32px; border-radius: var(--radius-sm, 8px);
-  display: grid; place-items: center; flex: 0 0 auto;
-}
-.composer .ghost-icon:hover:not(:disabled) { color: var(--text); background: var(--bg-hover); }
-.composer .ghost-icon:disabled { opacity: .4; cursor: default; }
-.composer .ghost-icon .ic { width: 19px; height: 19px; }
+.composer .ghost-icon { border: 0; cursor: pointer; }
+
+/* file / image messages */
+.msg-line.file { margin-top: 2px; }
+.chat-image { max-width: min(380px, 100%); max-height: 320px; border-radius: 10px; display: block;
+  border: 1px solid var(--divider); }
+.file-cap { font-size: 11px; color: var(--text-faint); margin-top: 3px; }
+.file-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: var(--bg-input); border: 1px solid var(--divider); border-radius: 10px; max-width: 340px; }
+.file-row .ic { width: 18px; height: 18px; color: var(--text-faint); }
+.file-meta { flex: 1; min-width: 0; }
+.file-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-dl { font-size: 12px; font-weight: 700; color: var(--cornflower-blue); text-decoration: none;
+  padding: 4px 10px; border: 1px solid var(--cornflower-blue); border-radius: 8px; }
+.file-dl:hover { background: var(--cornflower-blue); color: #fff; }
+
+/* public-server browser */
+#discover-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55);
+  display: flex; align-items: flex-start; justify-content: center; padding: 8vh 16px; animation: fade-in .16s ease; }
+.disc-box { width: min(880px, 96vw); max-height: 84vh; overflow: auto;
+  background: var(--bg-pane); border: 1px solid var(--divider); border-radius: var(--radius-lg, 16px);
+  box-shadow: var(--shadow-lg, 0 24px 60px rgba(0,0,0,.5)); padding: 18px 20px 22px; }
+.disc-box h3 { margin: 0 0 14px; font-size: 15px; }
+.disc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+.disc-empty { color: var(--text-faint); font-size: 13px; padding: 20px; grid-column: 1 / -1; text-align: center; }
+.disc-card { border-radius: var(--radius, 12px); overflow: hidden; border: 1px solid var(--divider);
+  background: var(--cornflower-blue); display: flex; flex-direction: column; min-height: 180px; }
+.disc-banner { height: 25%; min-height: 46px; display: flex; align-items: center; padding: 0 12px;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--blazing-flame) 55%, var(--cornflower-blue)), var(--cornflower-blue)); }
+.disc-avatar { width: 34px; height: 34px; border-radius: 30%; display: grid; place-items: center;
+  font-size: 13px; font-weight: 800; color: #fff; background: rgba(0,0,0,.22); }
+.disc-body { flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 12px 12px 14px;
+  background: var(--cornflower-blue); color: #fff; }
+.disc-name { font-size: 15px; font-weight: 800; }
+.disc-desc { font-size: 12px; line-height: 1.4; color: rgba(255,255,255,.85); flex: 1; }
+.disc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.disc-tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: rgba(255,255,255,.2); }
+.disc-join { margin-top: 6px; border: 0; border-radius: 8px; padding: 8px; font-weight: 800; cursor: pointer;
+  background: #fff; color: var(--cornflower-blue); }
+.disc-join:hover:not(:disabled) { background: rgba(255,255,255,.9); }
+.disc-join:disabled { opacity: .6; cursor: default; }
 
 /* user panel */
 #user-panel {
@@ -556,13 +594,16 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
   padding: 8px 14px;
   margin: 5px 0;
 }
-.composer button:hover { background: var(--accent-warm); color: #1b1832; }
+.composer button:not(.ghost-icon):hover { background: var(--accent-warm); color: #1b1832; }
 .composer button:disabled { opacity: .4; cursor: default; }
-.composer #attach {
+/* attach + emoji: identical borderless square icon buttons on each side */
+.composer .ghost-icon {
   background: transparent; color: var(--text-faint); font-weight: 400;
-  font-size: 17px; padding: 6px 4px; margin: 0;
+  width: 34px; height: 34px; padding: 0; margin: 0; border-radius: var(--radius-sm, 8px);
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
 }
-.composer #attach:hover:not(:disabled) { background: transparent; color: var(--text); }
+.composer .ghost-icon:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.composer .ghost-icon .ic { width: 20px; height: 20px; }
 
 /* ========================== members ================================== */
 #members { background: var(--bg-pane); border-left: 1px solid var(--divider); }
@@ -692,7 +733,7 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 .search-hit, .pin-row, #mention-popup .mrow, .msg-actions button {
   transition: background .15s ease, border-color .15s ease, color .15s ease, transform .11s ease;
 }
-.modal button:active, .composer button:not(#attach):active, #onboard button:active,
+.modal button:active, .composer button:not(.ghost-icon):active, #onboard button:active,
 #call-toast button:active, #gcall-toast button:active,
 #callbar button:active, #gcallbar button:active { transform: scale(.95); }
 .react-chip { transition: background .15s ease, border-color .15s ease, color .15s ease, transform .12s cubic-bezier(.2,.9,.3,1); }
@@ -754,7 +795,7 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 }
 
 /* Solid accent buttons get a faint top highlight for depth. */
-.composer button:not(#attach), .modal button:not(.ghost),
+.composer button:not(.ghost-icon), .modal button:not(.ghost),
 #onboard button:not(.ghost), #callbar button, #gcallbar button,
 #call-toast button, #gcall-toast button {
   border-radius: var(--radius-sm);
@@ -798,6 +839,7 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
     <header class="pane-head">
       <span id="pane-title">DaNTe</span>
       <span class="head-actions" id="pane-actions"></span>
+      <button class="icon-btn" id="btn-notif" data-icon="bell" title="Notifications"></button>
     </header>
     <div class="pane-scroll" id="pane-list"></div>
     <div id="user-panel">
@@ -818,7 +860,6 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
       <span class="spacer"></span>
       <button class="icon-btn" id="btn-mute" title="Mute notifications" data-icon="bell" hidden></button>
       <button class="icon-btn" id="btn-call" title="Start a voice call" data-icon="phone" hidden></button>
-      <button class="icon-btn" id="btn-groupcall" title="Start a group call" data-icon="users" hidden></button>
       <button class="icon-btn" id="btn-contact" title="Save as contact" data-icon="star" hidden></button>
       <button class="icon-btn" id="btn-leave" title="Leave channel" data-icon="log-out" hidden></button>
       <button class="icon-btn" id="btn-delchan" title="Delete channel" data-icon="trash" hidden></button>
@@ -834,7 +875,6 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
       <input type="file" id="emoji-file" accept="image/png,image/jpeg" hidden>
     </header>
     <div id="callbar" hidden></div>
-    <div id="gcallbar" hidden></div>
     <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
     <div id="typing"></div>
     <div id="replybar" hidden></div>
@@ -858,7 +898,6 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 </div>
 
 <div id="call-toast" hidden></div>
-<div id="gcall-toast" hidden></div>
 
 <script>
 "use strict";
@@ -900,6 +939,7 @@ const ICONS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
   "mic-off": '<path d="m2 2 20 20"/><path d="M15 9.3V6a3 3 0 0 0-5.9-.7M9 9v2a3 3 0 0 0 4.6 2.5"/><path d="M5 11a7 7 0 0 0 10.7 6M19 11a7 7 0 0 1-.6 2.8M12 18v3"/>',
   hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
+  volume: '<path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12"/>',
   reply: '<path d="M9 17 4 12l5-5"/><path d="M4 12h11a5 5 0 0 1 5 5v1"/>',
   forward: '<path d="m15 17 5-5-5-5"/><path d="M20 12H9a5 5 0 0 0-5 5v1"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
@@ -917,7 +957,10 @@ function paintIcons(root = document) {
 
 /* ---------- context menus (our own, not the browser's) ----------------- */
 let ctxEl = null;
-function ctxClose() { if (ctxEl) { ctxEl.remove(); ctxEl = null; } }
+function ctxOutside(e) { if (ctxEl && !ctxEl.contains(e.target)) ctxClose(); }
+function ctxClose() {
+  if (ctxEl) { ctxEl.remove(); ctxEl = null; removeEventListener("click", ctxOutside); }
+}
 // items: { label, run, danger, disabled, iconName } or the string "sep".
 function ctxShow(x, y, items) {
   ctxClose();
@@ -933,15 +976,17 @@ function ctxShow(x, y, items) {
   }
   document.body.appendChild(menu);
   const r = menu.getBoundingClientRect();
-  menu.style.left = Math.min(x, innerWidth - r.width - 8) + "px";
-  menu.style.top = Math.min(y, innerHeight - r.height - 8) + "px";
+  menu.style.left = Math.max(8, Math.min(x, innerWidth - r.width - 8)) + "px";
+  menu.style.top = Math.max(8, Math.min(y, innerHeight - r.height - 8)) + "px";
   ctxEl = menu;
+  // Attach the dismiss handler on the NEXT tick so the opening click doesn't
+  // immediately close it.
+  setTimeout(() => addEventListener("click", ctxOutside), 0);
 }
 function ctxAnchor(elm, items) {
   const r = elm.getBoundingClientRect();
   ctxShow(r.right - 4, r.bottom + 4, items);
 }
-addEventListener("click", e => { if (ctxEl && !ctxEl.contains(e.target)) ctxClose(); });
 addEventListener("keydown", e => { if (e.key === "Escape") ctxClose(); });
 addEventListener("resize", ctxClose);
 addEventListener("scroll", ctxClose, true);
@@ -985,7 +1030,7 @@ function insertAtCaret(t, text) {
 function collapseHeader() {
   const head = document.querySelector(".chat-head");
   if (!head) return;
-  const keep = new Set(["btn-more", "btn-search", "btn-members", "btn-call", "btn-groupcall"]);
+  const keep = new Set(["btn-more", "btn-search", "btn-members", "btn-call"]);
   const items = [];
   for (const b of head.querySelectorAll(".icon-btn")) {
     if (keep.has(b.id) || b.hidden) continue;
@@ -1049,7 +1094,6 @@ const store = {
   contacts: [],                       // [{fp,petname,verified,added_ms}]
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
-  groupCalls: [],                     // [{channel,channel_name,joined,participants,invited_by}]
   voice: {},                          // channel id -> { joined, participants:[fp] }
 
   roleName(root, memberFp) {
@@ -1302,22 +1346,55 @@ function renderRail() {
 }
 
 async function discoverFlow() {
+  if ($("#discover-overlay")) return;
+  const ov = el("div"); ov.id = "discover-overlay";
+  const box = el("div", "disc-box");
+  box.appendChild(el("h3", null, "Public servers"));
+  const grid = el("div", "disc-grid");
+  box.appendChild(grid);
+  ov.appendChild(box);
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape" && $("#discover-overlay")) { ov.remove(); document.removeEventListener("keydown", esc); }
+  });
+  document.body.appendChild(ov);
+
   let list;
   try { list = await api.get("/api/discover"); }
-  catch (e) { return ui.say("Could not load discovery: " + e.message); }
-  if (!list.length) return ui.say("No public servers listed right now.");
-  const menu = list.map((s, i) =>
-    `${i + 1}. ${s.name}${s.summary ? " — " + s.summary : ""}${s.tags && s.tags.length ? "  [" + s.tags.join(", ") + "]" : ""}`
-  ).join("\n");
-  const pick = parseInt(await ui.ask("Public servers:\n\n" + menu + "\n\nJoin which number?"), 10);
-  const chosen = list[pick - 1];
-  if (!chosen) return;
-  const password = await ui.ask("Server password? (blank if none)") || "";
-  try {
-    await api.post("/api/discover/join", { server: chosen.root, password });
-    ui.sys(`Joining "${chosen.name}" — you'll appear once the host is online.`);
-    setTimeout(refreshChannels, 3000);
-  } catch (e) { ui.say("Join failed: " + e.message); }
+  catch (e) { grid.appendChild(el("div", "disc-empty", "Could not load: " + e.message)); return; }
+  if (!list.length) { grid.appendChild(el("div", "disc-empty", "No public servers listed right now.")); return; }
+
+  for (const s of list) {
+    const card = el("div", "disc-card");
+    const banner = el("div", "disc-banner");
+    banner.appendChild(Object.assign(el("div", "disc-avatar"), { textContent: initials(s.name) }));
+    const body = el("div", "disc-body");
+    body.appendChild(el("div", "disc-name", s.name));
+    body.appendChild(el("div", "disc-desc", s.summary || "No description."));
+    const tags = el("div", "disc-tags");
+    for (const t of (s.tags || [])) tags.appendChild(el("span", "disc-tag", t));
+    body.appendChild(tags);
+    const join = el("button", "disc-join", "Join");
+    join.onclick = async () => {
+      join.disabled = true; join.textContent = "Joining…";
+      let password = "";
+      // Only prompt for a password if the first attempt is refused for one.
+      try {
+        await api.post("/api/discover/join", { server: s.root, password });
+      } catch (e) {
+        password = await ui.ask(`"${s.name}" needs a join password:`, "") || "";
+        if (!password) { join.disabled = false; join.textContent = "Join"; return; }
+        try { await api.post("/api/discover/join", { server: s.root, password }); }
+        catch (e2) { ui.say("Join failed: " + e2.message); join.disabled = false; join.textContent = "Join"; return; }
+      }
+      ui.sys(`Joining "${s.name}" — you'll appear once the host is online.`);
+      setTimeout(refreshChannels, 3000);
+      ov.remove();
+    };
+    body.appendChild(join);
+    card.append(banner, body);
+    grid.appendChild(card);
+  }
 }
 
 async function publishFlow(server) {
@@ -1419,7 +1496,7 @@ function renderPane() {
       const t = "#" + c.id;
       const room = store.voice[c.id] || { joined: false, participants: [] };
       const row = el("button", "chan-row" + (curTarget() === t ? " active" : ""));
-      row.appendChild(Object.assign(el("span", "hash"), { textContent: "🔊" }));
+      row.appendChild(Object.assign(el("span", "hash"), { innerHTML: svgIcon("volume") }));
       row.appendChild(el("span", "name", c.name));
       if (room.joined || voiceRtc.channelId === c.id) row.appendChild(Object.assign(el("span", "tag"), { textContent: "●" }));
       row.onclick = () => selectTarget(server, t);
@@ -1445,8 +1522,10 @@ function channelCtxItems(c, server, t) {
   const iOwn = c.root && store.policies[c.root] && store.policies[c.root].owner === store.me.fingerprint;
   const muted = store.isMuted(t);
   const items = [
-    { label: "Open", iconName: c.voice ? "phone" : "hash", run: () => selectTarget(server, t) },
+    { label: "Open", iconName: c.voice ? "volume" : "hash", run: () => selectTarget(server, t) },
     { label: muted ? "Unmute" : "Mute", iconName: muted ? "bell" : "bell-off", run: () => { store.toggleMute(t); render(); } },
+    { label: "Invite someone…", iconName: "user-plus", run: () => inviteFlow(t) },
+    { label: "Invite link…", iconName: "link", run: () => inviteLinkFlow(t) },
   ];
   if (iOwn && !isGeneral) {
     items.push("sep");
@@ -1516,10 +1595,7 @@ function renderChat() {
   muteBtn.hidden = true;
   const callBtn = $("#btn-call");
   callBtn.hidden = true;
-  const gcallBtn = $("#btn-groupcall");
-  gcallBtn.hidden = true;
   $("#callbar").hidden = true;
-  $("#gcallbar").hidden = true;
   document.querySelector(".composer").hidden = false;
 
   if (!target) {
@@ -1559,15 +1635,6 @@ function renderChat() {
     emojiBtn.onclick = () => emojiFlow(store.rootOf(store.view.server));
     pinsBtn.hidden = false;
     pinsBtn.onclick = () => openPins(target);
-    const gc = groupCallFor(target.slice(1));
-    gcallBtn.hidden = false;
-    gcallBtn.classList.toggle("active", !!(gc && gc.joined));
-    gcallBtn.title = gc && gc.joined ? "In the group call — open the bar to leave"
-      : gc ? "Join the group call" : "Start a group call";
-    gcallBtn.onclick = () => {
-      if (gc && gc.joined) return;
-      groupCallAction(target.slice(1), gc ? "join" : "start");
-    };
     const root = store.rootOf(store.view.server);
     const iOwn = root && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
     const chName = store.channelName(target.slice(1));
@@ -1640,7 +1707,7 @@ function renderChat() {
   log.innerHTML = "";
   if (!msgs.length) {
     log.appendChild(el("div", "empty", "No messages yet — say hello."));
-    renderCallbar(); renderGroupCallbar();
+    renderCallbar();
     return;
   }
 
@@ -1650,8 +1717,7 @@ function renderChat() {
     if (m.kind === "file") {
       const g = groupShell(m, m.from === lastAuthor);
       if (m._at && m._at > freshCut - 80) g.node.classList.add("msg-fresh");
-      g.body.appendChild(Object.assign(el("div", "msg-line file"),
-        { textContent: `📎 ${m.filename} (${m.size} bytes)` + (m.saved ? ` — saved to ${m.saved}` : "") }));
+      g.body.appendChild(renderFile(m));
       log.appendChild(g.node); lastAuthor = m.from;
       continue;
     }
@@ -1717,7 +1783,6 @@ function renderChat() {
   log.scrollTop = log.scrollHeight;
   msgPaintTs = Date.now();
   renderCallbar();
-  renderGroupCallbar();
   renderReplyBar();
 }
 
@@ -1725,12 +1790,11 @@ function renderChat() {
 function renderVoiceRoom(c, target) {
   const titleEl = $("#chat-title");
   const log = $("#log");
-  titleEl.innerHTML = '<span class="hash">🔊</span> ' + esc(c.name);
+  titleEl.innerHTML = '<span class="hash">' + svgIcon("volume") + '</span> ' + esc(c.name);
   $("#chat-topic").textContent = store.view.server;
   document.querySelector(".composer").hidden = true;
   $("#replybar").hidden = true;
   $("#callbar").hidden = true;
-  $("#gcallbar").hidden = true;
 
   const room = store.voice[c.id] || { joined: false, participants: [] };
   const connected = voiceRtc.channelId === c.id;
@@ -1738,7 +1802,7 @@ function renderVoiceRoom(c, target) {
 
   log.innerHTML = "";
   const wrap = el("div", "voice-room");
-  wrap.appendChild(Object.assign(el("div", "voice-room-icon"), { textContent: "🔊" }));
+  wrap.appendChild(Object.assign(el("div", "voice-room-icon"), { innerHTML: svgIcon("volume") }));
   wrap.appendChild(el("div", "voice-room-name", c.name));
   wrap.appendChild(el("div", "voice-room-sub",
     people.length ? (people.length === 1 ? "1 person connected" : people.length + " people connected")
@@ -2048,6 +2112,38 @@ async function verifyFlow(fp) {
   } catch (e) { ui.sys("verify failed: " + e.message); }
 }
 
+const humanSize = n => n < 1024 ? n + " B"
+  : n < 1048576 ? (n / 1024).toFixed(1) + " KB"
+  : (n / 1048576).toFixed(1) + " MB";
+
+// A file message: inline image if we can show it, otherwise a download row.
+function renderFile(m) {
+  const src = m.url || m._localUrl;          // _localUrl = optimistic outgoing
+  const isImg = (m.mime || "").startsWith("image/") ||
+    (!m.mime && /\.(png|jpe?g|gif|webp)$/i.test(m.filename || ""));
+  if (src && isImg) {
+    const wrap = el("div", "msg-line file");
+    const a = el("a"); a.href = src; a.target = "_blank"; a.rel = "noopener";
+    const img = el("img", "chat-image"); img.src = src; img.alt = m.filename || "image";
+    a.appendChild(img);
+    wrap.appendChild(a);
+    wrap.appendChild(Object.assign(el("div", "file-cap"), { textContent: `${m.filename} · ${humanSize(m.size)}` }));
+    return wrap;
+  }
+  const row = el("div", "msg-line file file-row");
+  row.appendChild(Object.assign(el("span"), { innerHTML: svgIcon("paperclip") }));
+  const meta = el("div", "file-meta");
+  meta.appendChild(Object.assign(el("div", "file-name"), { textContent: m.filename || "file" }));
+  meta.appendChild(Object.assign(el("div", "file-cap"), { textContent: humanSize(m.size) + (src ? "" : " · not held — ask them to resend") }));
+  row.appendChild(meta);
+  if (src) {
+    const dl = el("a", "file-dl", "Download");
+    dl.href = src; dl.download = m.filename || "file";
+    row.appendChild(dl);
+  }
+  return row;
+}
+
 function groupShell(m, sameAuthor) {
   const node = el("div", "msg-group");
   const name = m.from === "you" ? (store.me.username || short(store.me.fingerprint)) : authorLabel(m.from);
@@ -2186,7 +2282,7 @@ async function removeMemberFlow(channelTarget, memberFp) {
 
 function renderTyping() { $("#typing").textContent = store.typingText || ""; }
 
-function render() { paintMe(); renderRail(); renderPane(); renderChat(); collapseHeader(); renderMembers(); renderTyping(); renderGroupCallToast(); updateTitle(); }
+function render() { paintMe(); renderRail(); renderPane(); renderChat(); collapseHeader(); renderMembers(); renderTyping(); renderNotifButton(); updateTitle(); }
 
 function updateTitle() {
   const n = store.totalUnread();
@@ -2251,12 +2347,17 @@ function openEmojiPicker(anchor, onPick) {
   });
   pop.appendChild(tabs);
   pop.appendChild(grid);
+  pop.style.visibility = "hidden";
   document.body.appendChild(pop);
-  const r = anchor.getBoundingClientRect();
-  pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)) + "px";
-  pop.style.top = Math.max(8, r.top - pop.offsetHeight - 8) + "px";
   emojiPop = pop;
-  showCat(0);
+  showCat(0);                       // fill it BEFORE measuring
+  const r = anchor.getBoundingClientRect();
+  const h = pop.offsetHeight, w = pop.offsetWidth;
+  const above = r.top - 8 - h;
+  pop.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + "px";
+  // Prefer above the anchor; drop below only if there isn't room up top.
+  pop.style.top = (above >= 8 ? above : Math.min(r.bottom + 8, innerHeight - h - 8)) + "px";
+  pop.style.visibility = "";
   setTimeout(() => addEventListener("click", emojiPopOutside), 0);
 }
 function emojiPopOutside(e) {
@@ -2504,16 +2605,6 @@ function renderCallToast() {
   toast.appendChild(dec);
 }
 
-async function refreshGroupCalls() {
-  try {
-    const g = await api.get("/api/groupcalls");
-    if (JSON.stringify(g) !== JSON.stringify(store.groupCalls)) {
-      store.groupCalls = g;
-      render();
-    }
-  } catch (_) {}
-}
-
 async function refreshVoice() {
   try {
     const v = await api.voice();
@@ -2555,7 +2646,12 @@ async function voiceAction(channelId, join) {
   } catch (e) {
     voiceRtcStop();
     try { await api.voiceLeave(channelId); } catch (_) {}
-    ui.sys("voice: " + (e && e.message ? e.message : e));
+    const msg = (e && e.name === "NotAllowedError")
+      ? "Microphone permission denied — allow it in the browser to talk."
+      : (e && e.name === "NotFoundError")
+      ? "No microphone found."
+      : "voice: " + (e && e.message ? e.message : e);
+    ui.say(msg);
     await refreshVoice();
   }
 }
@@ -2563,6 +2659,9 @@ async function voiceAction(channelId, join) {
 async function voiceRtcStart(channelId) {
   if (voiceRtc.channelId === channelId) return;
   if (voiceRtc.channelId) voiceRtcStop();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("this browser has no microphone API (needs a secure context)");
+  }
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
@@ -2698,59 +2797,6 @@ async function voiceOnSignal(fp, kind, data) {
   } catch (e) { /* renegotiation races are expected; presence sync recovers */ }
 }
 
-function groupCallFor(channelId) {
-  return store.groupCalls.find(g => g.channel === channelId) || null;
-}
-
-async function groupCallAction(channelId, action) {
-  try { await api.post("/api/groupcall/" + action, { channel: channelId }); await refreshGroupCalls(); }
-  catch (e) { ui.sys("group call: " + e.message); }
-}
-
-function renderGroupCallbar() {
-  const bar = $("#gcallbar");
-  const t = curTarget();
-  const g = (t && t.startsWith("#")) ? groupCallFor(t.slice(1)) : null;
-  if (!g) { bar.hidden = true; return; }
-  bar.hidden = false;
-  bar.className = g.joined ? "joined" : "";
-  bar.innerHTML = "";
-  bar.appendChild(el("span", "dot"));
-  const who = g.joined ? `In a group call · ${g.participants + 1} on the line`
-    : g.invited_by ? `${short(g.invited_by)} invited you to a group call`
-    : "Group call ringing";
-  bar.appendChild(el("span", null, "📞👥 " + who));
-  bar.appendChild(el("span", "spacer"));
-  if (!g.joined) {
-    const acc = el("button", "accept", "Join");
-    acc.onclick = () => groupCallAction(g.channel, "join");
-    bar.appendChild(acc);
-  }
-  const leave = el("button", "hangup", g.joined ? "Leave" : "Dismiss");
-  leave.onclick = () => groupCallAction(g.channel, "leave");
-  bar.appendChild(leave);
-}
-
-function renderGroupCallToast() {
-  const toast = $("#gcall-toast");
-  const inv = store.groupCalls.find(g => !g.joined && g.invited_by
-    && ("#" + g.channel) !== curTarget());
-  if (!inv) { toast.hidden = true; return; }
-  toast.hidden = false;
-  toast.innerHTML = "";
-  toast.appendChild(el("span", null, "📞👥 " + (store.channelName(inv.channel) || "a channel")));
-  const acc = el("button", "accept", "Join");
-  acc.onclick = () => {
-    const ch = store.channels.find(c => c.id === inv.channel);
-    if (ch) selectTarget(ch.server, "#" + inv.channel);
-    groupCallAction(inv.channel, "join");
-  };
-  const dec = el("button", "decline", "Dismiss");
-  dec.onclick = () => groupCallAction(inv.channel, "leave");
-  toast.appendChild(acc);
-  toast.appendChild(dec);
-}
-
 /* ---------- polling ---------------------------------------------- */
 function ingest(items) {
   for (const it of items) {
@@ -2806,8 +2852,10 @@ function ingest(items) {
       // A DM while the tab is in the background.
       notify(dmLabel(it._target), it.text);
     }
-    // auto-list an unknown DM partner
-    if (it.kind !== "channel" && it.from !== "you" && it.from && !store.dms.some(d => short(d.fp) === it.from || d.fp === it.from)) {
+    // auto-list an unknown DM partner — only for a real text DM (has a msg id),
+    // never for system lines (call notices etc.)
+    if (it.kind === "message" && it.msg_id && it.from && it.from !== "you"
+        && !store.dms.some(d => short(d.fp) === it.from || d.fp === it.from)) {
       store.dms.push({ fp: it.from }); LS.set("dms", store.dms);
     }
   }
@@ -2923,7 +2971,9 @@ async function sendFile(file) {
   if (!t || t.startsWith("#") || isSelf(t)) { ui.say("Files can only be sent in a direct message."); return; }
   if (!file) return;
   if (file.size > MAX_ATTACH) { ui.say("That file is larger than " + Math.round(MAX_ATTACH / 1048576) + " MiB."); return; }
-  const stamp = { kind: "file", from: "you", filename: file.name, size: file.size, saved: "", _target: t, _at: Date.now(), seq: -1 };
+  const stamp = { kind: "file", from: "you", filename: file.name, size: file.size, saved: "",
+    mime: file.type || "", _target: t, _at: Date.now(), seq: -1 };
+  try { stamp._localUrl = URL.createObjectURL(file); } catch (_) {}
   store.messages.push(stamp); renderChat();
   try {
     const buf = await file.arrayBuffer();
@@ -3026,6 +3076,33 @@ $("#btn-members").onclick = () => {
 };
 $("#me-sub").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Block-ID copied."); };
 $("#me-gear").onclick = openSettings;
+
+// Notifications: what's unread / where you were mentioned, click to jump.
+$("#btn-notif").onclick = () => {
+  const items = [];
+  const seen = new Set();
+  const label = t => t === store.me.fingerprint ? "Private Note"
+    : t.startsWith("#") ? "#" + store.channelName(t.slice(1)) : ("@ " + dmLabel(t));
+  for (const t of store.mentions) {
+    seen.add(t);
+    items.push({ iconName: "bell", label: "Mention · " + label(t), run: () => jumpTo(t) });
+  }
+  for (const [t, c] of store.unread) {
+    if (seen.has(t) || store.isMuted(t) || !c) continue;
+    items.push({ iconName: "hash", label: `${c} unread · ${label(t)}`, run: () => jumpTo(t) });
+  }
+  if (!items.length) items.push({ label: "Nothing new", disabled: true, run: () => {} });
+  ctxAnchor($("#btn-notif"), items);
+};
+function jumpTo(t) {
+  if (t === store.me.fingerprint || !t.startsWith("#")) { selectTarget("@dm", t); return; }
+  const ch = store.channels.find(c => "#" + c.id === t);
+  if (ch) selectTarget(ch.server, t);
+}
+function renderNotifButton() {
+  const n = store.totalUnread() + store.mentions.size;
+  $("#btn-notif").classList.toggle("has-dot", n > 0);
+}
 
 // Paint the bottom-left identity chip: username big, block-id small below.
 function paintMe(online) {
@@ -3423,6 +3500,15 @@ async function init() {
     paintMe(true);
   } catch (_) { $("#me-sub").textContent = "offline"; }
 
+  // localStorage is per-origin, so a different identity reusing this port would
+  // otherwise inherit the previous one's DM list / notes / mutes. Wipe them
+  // when the identity changes.
+  if (store.me.fingerprint && LS.get("identity", "") !== store.me.fingerprint) {
+    for (const k of ["dms", "notes", "muted", "view"]) LS.set(k, k === "view" ? { server: "@dm", target: null } : []);
+    store.dms = []; store.muted = new Set(); store.view = { server: "@dm", target: null };
+    LS.set("identity", store.me.fingerprint);
+  }
+
   // restore local Private Notes
   for (const n of LS.get("notes", [])) {
     store.messages.push({ kind: "message", from: "you", text: n.text, _target: store.me.fingerprint, _at: n.at, seq: -1 });
@@ -3442,7 +3528,6 @@ async function init() {
   refreshBlocked();
   refreshUsernames();
   refreshCalls();
-  refreshGroupCalls();
   refreshVoice();
   setInterval(poll, 3000);
   setInterval(pollTyping, 1200);
@@ -3453,7 +3538,6 @@ async function init() {
   setInterval(refreshBlocked, 8000);
   setInterval(refreshUsernames, 10000);
   setInterval(refreshCalls, 1200);
-  setInterval(refreshGroupCalls, 1500);
   setInterval(refreshVoice, 1500);
 }
 paintIcons();

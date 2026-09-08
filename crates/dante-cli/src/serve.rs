@@ -376,6 +376,13 @@ enum Item {
         filename: String,
         size: usize,
         saved: String,
+        /// `/api/recv-file?id=…` for a file whose bytes we still hold this
+        /// session, else empty (e.g. history replayed from disk).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        url: String,
+        /// Sniffed MIME so the SPA knows whether to render an `<img>`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        mime: String,
     },
     Channel {
         seq: u64,
@@ -486,6 +493,12 @@ pub struct Bootstrap {
     pub pow: Difficulty,
 }
 
+/// Insertion order + `id -> (mime, bytes)` for received files kept this session.
+type RecvFiles = (
+    std::collections::VecDeque<String>,
+    std::collections::HashMap<String, (String, Vec<u8>)>,
+);
+
 struct Shared {
     inbox: Mutex<VecDeque<Item>>,
     channels: Mutex<Vec<ChanView>>,
@@ -504,6 +517,9 @@ struct Shared {
     group_calls: Mutex<std::collections::HashMap<String, GroupCallRow>>,
     /// Voice channels, keyed by channel id (base32). Live-session only.
     voice: Mutex<std::collections::HashMap<String, VoiceRoom>>,
+    /// Received file bytes we can still serve back this session (insertion
+    /// order + `id -> (mime, bytes)`, oldest evicted past a cap).
+    recv_files: Mutex<RecvFiles>,
     /// Monotonic id stamped on every inbox item, drawn by both the engine tick
     /// loop and command handlers so the SPA's `since` cursor never regresses.
     next_seq: AtomicU64,
@@ -552,6 +568,18 @@ fn sniff_image(b: &[u8]) -> &'static str {
         [b'G', b'I', b'F', b'8', ..] => "image/gif",
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
         _ => "image/png",
+    }
+}
+
+/// Best-effort MIME for any received file, from magic bytes.
+fn sniff_mime(b: &[u8]) -> &'static str {
+    match b {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [0x25, 0x50, 0x44, 0x46, ..] => "application/pdf",
+        _ => "application/octet-stream",
     }
 }
 
@@ -670,6 +698,10 @@ pub async fn run_on(
         calls: Mutex::new(std::collections::HashMap::new()),
         group_calls: Mutex::new(std::collections::HashMap::new()),
         voice: Mutex::new(std::collections::HashMap::new()),
+        recv_files: Mutex::new((
+            std::collections::VecDeque::new(),
+            std::collections::HashMap::new(),
+        )),
         next_seq: AtomicU64::new(0),
         me: Mutex::new((String::new(), String::new())),
         onboard_name: Mutex::new(String::new()),
@@ -772,6 +804,8 @@ async fn engine_task(
                     filename: filename.clone(),
                     size: *size as usize,
                     saved: String::new(),
+                    url: String::new(),
+                    mime: String::new(),
                 },
             });
         }
@@ -1012,9 +1046,24 @@ async fn engine_task(
                                     .replace(['/', '\\', '\0'], "_");
                                 let saved = format!("dante-recv-{safe}");
                                 let _ = std::fs::write(&saved, &data);
+                                let mime = sniff_mime(&data).to_owned();
+                                let id = to_hex(&dante_crypto::hash::sha256(&data))[..16].to_owned();
+                                {
+                                    let mut rf = engine_shared.recv_files.lock().await;
+                                    if !rf.1.contains_key(&id) {
+                                        rf.1.insert(id.clone(), (mime.clone(), data.clone()));
+                                        rf.0.push_back(id.clone());
+                                        while rf.0.len() > 48 {
+                                            if let Some(old) = rf.0.pop_front() { rf.1.remove(&old); }
+                                        }
+                                    }
+                                }
                                 let from = short_fp(&from_idk);
                                 last_msg_ms.insert(from.clone(), now);
-                                Item::File { seq, from, filename, size: data.len(), saved }
+                                Item::File {
+                                    seq, from, filename, size: data.len(), saved,
+                                    url: format!("/api/recv-file?id={id}"), mime,
+                                }
                             }
                             Inbound::IncomingCall { from_idk } => {
                                 let fp = short_fp(&from_idk);
@@ -3128,6 +3177,21 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 reply,
             })
             .await
+        }
+
+        ("GET", "/api/recv-file") => {
+            let id = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("id="))
+                .unwrap_or("");
+            let hit = {
+                let rf = shared.recv_files.lock().await;
+                rf.1.get(id).cloned()
+            };
+            match hit {
+                Some((mime, bytes)) => respond(&mut stream, 200, &mime, &bytes).await,
+                None => respond(&mut stream, 404, "text/plain", b"not held").await,
+            }
         }
 
         ("GET", "/api/emoji") => {

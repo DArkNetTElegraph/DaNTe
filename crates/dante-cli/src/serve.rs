@@ -246,6 +246,11 @@ enum Cmd {
         q: String,
         reply: oneshot::Sender<String>,
     },
+    /// Permanently revoke this identity on the ledger.
+    Revoke {
+        reason: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// `start` | `join` | `leave` a channel's group call.
     GroupCall {
         channel: String,
@@ -1507,6 +1512,21 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let rows: Vec<_> = shared.group_calls.lock().await.values().cloned().collect();
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
         }
+        Cmd::Revoke { reason, reply } => {
+            use dante_core::RevokeReason;
+            let reason = match reason.as_str() {
+                "compromised" => RevokeReason::Compromised,
+                "superseded" => RevokeReason::Superseded,
+                "retired" => RevokeReason::Retired,
+                _ => RevokeReason::Unspecified,
+            };
+            let r = engine
+                .revoke_identity(reason, now_ms())
+                .await
+                .map(|_| "ok".into())
+                .map_err(|e| e.to_string());
+            let _ = reply.send(r);
+        }
         Cmd::Search { q, reply } => {
             let rows: Vec<_> = engine
                 .search(&q, 100)
@@ -1664,10 +1684,17 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         ("GET", "/api/state") => {
             let ready = shared.ready.load(Ordering::Relaxed);
             let fp = shared.me.lock().await.0.clone();
+            let relays: Vec<&str> = shared
+                .boot
+                .relay
+                .split([',', ' ', '\t'])
+                .filter(|s| !s.is_empty())
+                .collect();
             let body = serde_json::json!({
                 "ready": ready,
                 "fingerprint": fp,
                 "has_keystore": shared.boot.keystore_path.exists(),
+                "relays": relays,
             })
             .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
@@ -2320,6 +2347,28 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             }
             let body = rx.await.unwrap_or_else(|_| "[]".into());
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/revoke") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                #[serde(default)]
+                reason: String,
+                /// Must be `true` — a deliberate confirmation.
+                #[serde(default)]
+                confirm: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            if !r.confirm {
+                return respond(&mut stream, 400, "text/plain", b"revocation not confirmed").await;
+            }
+            dispatch(&mut stream, &shared, |reply| Cmd::Revoke {
+                reason: r.reason,
+                reply,
+            })
+            .await
         }
 
         ("GET", "/api/search") => {

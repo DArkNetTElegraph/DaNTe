@@ -17,6 +17,14 @@ fn group_shares_a_call_key_that_rekeys_on_leave() {
     assert_eq!(alice.epoch(), bob.epoch());
     assert_eq!(alice.epoch(), carol.epoch());
 
+    // Every member sees the same three identities.
+    let mut ids: Vec<Vec<u8>> = alice.members().into_iter().map(|(_, id)| id).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![b"alice".to_vec(), b"bob".to_vec(), b"carol".to_vec()]
+    );
+
     let ka = alice.call_key().unwrap();
     assert_eq!(ka, bob.call_key().unwrap());
     assert_eq!(ka, carol.call_key().unwrap());

@@ -24,6 +24,7 @@ use dante_ledger::{
     server::{ServerDelist, ServerRegister},
     Ledger, LedgerParams, MemoryStore,
 };
+use dante_mls::{self as mls};
 use dante_net::{sync, transport::Client};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
 use dante_voice::{Call, CallEvent, CallState, IceServer};
@@ -146,6 +147,29 @@ pub enum Inbound {
         /// The other party's Ed25519 identity key.
         from_idk: [u8; 32],
     },
+    /// Someone started (or added us to) a group call in a channel we are in.
+    /// Answer with [`Engine::join_group_call`] or ignore it.
+    GroupCallInvite {
+        /// The channel the call belongs to.
+        channel_id: [u8; 32],
+        /// The inviter's Ed25519 identity key.
+        from_idk: [u8; 32],
+    },
+    /// A channel group call we are in changed membership (someone joined or
+    /// left). Re-read [`Engine::group_call_peers`] /
+    /// [`Engine::group_call_key`].
+    GroupCallMembersChanged {
+        /// The channel the call belongs to.
+        channel_id: [u8; 32],
+    },
+}
+
+/// One channel group call this client is in. Ephemeral — a restart drops it.
+pub(crate) struct GroupCall {
+    /// This client's MLS view of the call group. Its exporter secret is the
+    /// per-epoch media key ([`Engine::group_call_key`]); membership changes
+    /// rotate it.
+    mls: mls::Member,
 }
 
 /// A call state transition surfaced by [`Engine::poll_calls`].
@@ -159,6 +183,10 @@ pub struct CallUpdate {
 
 fn voice_err(e: dante_voice::VoiceError) -> CoreError {
     CoreError::Voice(e.to_string())
+}
+
+fn mls_err(e: mls::MlsError) -> CoreError {
+    CoreError::Voice(format!("mls: {e}"))
 }
 
 /// One channel this client belongs to.
@@ -266,6 +294,15 @@ pub struct Engine {
     pending_call_offers: HashMap<[u8; 32], String>,
     /// Last-seen connection state per active call.
     call_states: HashMap<[u8; 32], CallState>,
+    /// Active channel group calls, keyed by `channel_id`. Ephemeral. The media
+    /// legs to each participant live in `calls` (a full mesh of 1:1 calls).
+    group_calls: HashMap<[u8; 32], GroupCall>,
+    /// MLS KeyPackage private material we have published to the relay so peers
+    /// can add us to their group calls, newest last. Ephemeral.
+    mls_pending: Vec<mls::Pending>,
+    /// Group-call Welcomes received but not yet joined:
+    /// `channel_id -> (inviter id, welcome blob)`. Ephemeral.
+    pending_group_calls: HashMap<[u8; 32], ([u8; 32], Vec<u8>)>,
     /// Relay endpoints this engine may use, preference order. The first is the
     /// one embedded in invite links and server-discovery records; the whole
     /// list is the client's failover set.
@@ -329,6 +366,9 @@ impl Engine {
             inbound_audio: HashMap::new(),
             pending_call_offers: HashMap::new(),
             call_states: HashMap::new(),
+            group_calls: HashMap::new(),
+            mls_pending: Vec::new(),
+            pending_group_calls: HashMap::new(),
             relay_addrs,
             pow,
             last_fetch_since_ms: 0,
@@ -422,6 +462,10 @@ impl Engine {
                 })
                 .collect();
         }
+
+        // Publish an MLS KeyPackage so peers can add us to their group calls.
+        // Best-effort.
+        let _ = engine.refresh_mls_key_package().await;
 
         Ok(engine)
     }
@@ -624,7 +668,7 @@ impl Engine {
         let h = sha512(&buf);
 
         let mut groups = Vec::with_capacity(12);
-        for chunk in h[..60].chunks_exact(5) {
+        for chunk in h[..60].as_chunks::<5>().0 {
             let mut v = 0u64;
             for &b in chunk {
                 v = (v << 8) | u64::from(b);
@@ -868,6 +912,232 @@ impl Engine {
             .get_mut(peer_id)
             .map(|q| q.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    // ---- Channel group calls (MLS-keyed, full-mesh media) -------------------
+    //
+    // A group call is an MLS group (for a shared, membership-bound key that
+    // rotates on every join/leave — `group_call_key`) plus a full mesh of the
+    // existing 1:1 `Call`s for the media itself (each leg is its own
+    // DTLS-SRTP). Handshake messages (Welcome, Commit) ride sealed-sender DMs.
+
+    /// Mint a fresh MLS KeyPackage and publish it to the relay so other members
+    /// can add this identity to a group call. Keeps the private half locally.
+    /// Called at connect and again after each Welcome is consumed.
+    pub async fn refresh_mls_key_package(&mut self) -> Result<(), CoreError> {
+        let me = self.my_member_id();
+        let (pending, kp) = mls::Member::publish_key_package(&me).map_err(mls_err)?;
+        sync::publish_key_package(&mut self.client, &me, &kp.0).await?;
+        self.mls_pending.push(pending);
+        while self.mls_pending.len() > 4 {
+            self.mls_pending.remove(0);
+        }
+        Ok(())
+    }
+
+    /// Start a group call in a channel: create the MLS group, add every other
+    /// roster member that has a published KeyPackage, DM them the Welcome, and
+    /// open a media leg to each. Drive it with [`Engine::receive_all`] +
+    /// [`Engine::poll_calls`] + [`Engine::poll_group_calls`].
+    pub async fn start_group_call(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if !self.channels.contains_key(channel_id) {
+            return Err(CoreError::UnknownChannel);
+        }
+        if self.group_calls.contains_key(channel_id) {
+            return Err(CoreError::Voice("already in this group call".into()));
+        }
+        let me = self.my_member_id();
+        let others: Vec<[u8; 32]> = self.channels[channel_id]
+            .roster
+            .iter()
+            .copied()
+            .filter(|m| *m != me)
+            .collect();
+
+        let mut mls_member = mls::Member::create(&me, channel_id).map_err(mls_err)?;
+
+        let mut kps: Vec<mls::KeyPkg> = Vec::new();
+        let mut invited: Vec<[u8; 32]> = Vec::new();
+        for m in &others {
+            if let Ok(Some(bytes)) = sync::get_key_package(&mut self.client, m).await {
+                kps.push(mls::KeyPkg(bytes));
+                invited.push(*m);
+            }
+        }
+
+        if !kps.is_empty() {
+            let hs = mls_member.add(&kps).map_err(mls_err)?;
+            let welcome = hs
+                .welcome
+                .ok_or_else(|| CoreError::Voice("MLS add produced no Welcome".into()))?;
+            for m in &invited {
+                let _ = self
+                    .send_content(
+                        m,
+                        Content::GroupCallWelcome {
+                            channel_id: *channel_id,
+                            blob: welcome.clone(),
+                        },
+                        now_ms,
+                    )
+                    .await;
+            }
+        }
+
+        self.group_calls
+            .insert(*channel_id, GroupCall { mls: mls_member });
+        self.reconcile_group_legs(channel_id, now_ms).await;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Join a group call we were invited to (an [`Inbound::GroupCallInvite`]).
+    pub async fn join_group_call(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (_from, welcome) = self
+            .pending_group_calls
+            .remove(channel_id)
+            .ok_or_else(|| CoreError::Voice("no pending invite for that channel".into()))?;
+        if self.group_calls.contains_key(channel_id) {
+            return Err(CoreError::Voice("already in this group call".into()));
+        }
+
+        // Try each outstanding KeyPackage private half against the Welcome.
+        let mut joined: Option<mls::Member> = None;
+        let mut leftover: Vec<mls::Pending> = Vec::new();
+        for pending in std::mem::take(&mut self.mls_pending) {
+            if joined.is_none() {
+                match pending.join(&welcome) {
+                    Ok(m) => joined = Some(m),
+                    Err(_) => { /* not the matching KeyPackage */ }
+                }
+            } else {
+                leftover.push(pending);
+            }
+        }
+        self.mls_pending = leftover;
+        let member = joined.ok_or_else(|| {
+            CoreError::Voice("no KeyPackage matched the Welcome (re-publish and retry)".into())
+        })?;
+
+        self.group_calls
+            .insert(*channel_id, GroupCall { mls: member });
+        let _ = self.refresh_mls_key_package().await;
+        self.reconcile_group_legs(channel_id, now_ms).await;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Leave a group call: tear down every media leg and tell the other members
+    /// to rekey without us.
+    pub async fn leave_group_call(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let Some(gc) = self.group_calls.remove(channel_id) else {
+            return Ok(());
+        };
+        let me = self.my_member_id();
+        let peers: Vec<[u8; 32]> = gc
+            .mls
+            .members()
+            .into_iter()
+            .filter_map(|(_, id)| <[u8; 32]>::try_from(id).ok())
+            .filter(|id| *id != me)
+            .collect();
+        for p in &peers {
+            let _ = self.hangup(p, now_ms).await;
+            let _ = self
+                .send_content(
+                    p,
+                    Content::GroupCallLeave {
+                        channel_id: *channel_id,
+                    },
+                    now_ms,
+                )
+                .await;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Open a media leg to every MLS member of `channel_id`'s call we do not yet
+    /// have one with. Glare-free: the lower identity id sends the offer, the
+    /// higher one auto-accepts in [`Engine::receive_all`].
+    async fn reconcile_group_legs(&mut self, channel_id: &[u8; 32], now_ms: u64) {
+        let me = self.my_member_id();
+        let Some(gc) = self.group_calls.get(channel_id) else {
+            return;
+        };
+        let targets: Vec<[u8; 32]> = gc
+            .mls
+            .members()
+            .into_iter()
+            .filter_map(|(_, id)| <[u8; 32]>::try_from(id).ok())
+            .filter(|id| *id != me && me < *id && !self.calls.contains_key(id))
+            .collect();
+        for t in targets {
+            let _ = self.start_call(&t, now_ms).await;
+        }
+    }
+
+    /// Whether `id` is an MLS member of some active group call (so an incoming
+    /// call offer from them is a media leg to auto-accept, not a fresh 1:1).
+    fn is_group_call_member(&self, id: &[u8; 32]) -> bool {
+        self.group_calls
+            .values()
+            .any(|gc| gc.mls.members().iter().any(|(_, m)| m.as_slice() == id))
+    }
+
+    /// The MLS members of `channel_id`'s group call other than us.
+    pub fn group_call_peers(&self, channel_id: &[u8; 32]) -> Vec<[u8; 32]> {
+        let me = self.my_member_id();
+        self.group_calls
+            .get(channel_id)
+            .map(|gc| {
+                gc.mls
+                    .members()
+                    .into_iter()
+                    .filter_map(|(_, id)| <[u8; 32]>::try_from(id).ok())
+                    .filter(|id| *id != me)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The per-epoch group-call media key for `channel_id`, if we are in the
+    /// call. Every member in the same epoch derives the same 32 bytes; it
+    /// rotates on every join/leave.
+    pub fn group_call_key(&self, channel_id: &[u8; 32]) -> Option<[u8; 32]> {
+        self.group_calls.get(channel_id)?.mls.call_key().ok()
+    }
+
+    /// Whether we are in `channel_id`'s group call.
+    pub fn in_group_call(&self, channel_id: &[u8; 32]) -> bool {
+        self.group_calls.contains_key(channel_id)
+    }
+
+    /// Channels we hold an unanswered group-call invite for.
+    pub fn pending_group_call_channels(&self) -> Vec<[u8; 32]> {
+        self.pending_group_calls.keys().copied().collect()
+    }
+
+    /// Reconcile the media mesh for every active group call. Call each tick,
+    /// alongside [`Engine::poll_calls`].
+    pub async fn poll_group_calls(&mut self, now_ms: u64) -> Result<(), CoreError> {
+        let ids: Vec<[u8; 32]> = self.group_calls.keys().copied().collect();
+        for id in ids {
+            self.reconcile_group_legs(&id, now_ms).await;
+        }
+        Ok(())
     }
 
     /// Whether `peer_id` is verified **and** still on the key that was verified.
@@ -2445,7 +2715,10 @@ impl Engine {
             | Content::CallOffer(_)
             | Content::CallAnswer(_)
             | Content::CallIce(_)
-            | Content::CallEnd => None,
+            | Content::CallEnd
+            | Content::GroupCallWelcome { .. }
+            | Content::GroupCallCommit { .. }
+            | Content::GroupCallLeave { .. } => None,
         };
         let plaintext = content.encode();
 
@@ -2584,7 +2857,15 @@ impl Engine {
                 Ok(Content::CallOffer(sdp)) => {
                     let id = idk_to_id(&from);
                     self.pending_call_offers.insert(id, sdp);
-                    out.push(Inbound::IncomingCall { from_idk: from });
+                    if self.is_group_call_member(&id) {
+                        // A media leg of a call we are already in — accept it
+                        // without prompting the user again.
+                        if let Err(e) = self.accept_call(&id, now_ms).await {
+                            tracing::debug!(error = %e, "group-call leg auto-accept failed");
+                        }
+                    } else {
+                        out.push(Inbound::IncomingCall { from_idk: from });
+                    }
                 }
                 Ok(Content::CallAnswer(sdp)) => {
                     if let Some(call) = self.calls.get(&idk_to_id(&from)) {
@@ -2607,6 +2888,82 @@ impl Engine {
                         call.close().await;
                     }
                     out.push(Inbound::CallEnded { from_idk: from });
+                }
+                Ok(Content::GroupCallWelcome { channel_id, blob }) => {
+                    // Only for a channel we are actually in.
+                    if self.channels.contains_key(&channel_id) {
+                        self.pending_group_calls
+                            .insert(channel_id, (idk_to_id(&from), blob));
+                        out.push(Inbound::GroupCallInvite {
+                            channel_id,
+                            from_idk: from,
+                        });
+                    }
+                }
+                Ok(Content::GroupCallCommit { channel_id, blob }) => {
+                    let advanced = match self.group_calls.get_mut(&channel_id) {
+                        Some(gc) => match gc.mls.process(&blob) {
+                            Ok(_) => true,
+                            Err(e) => {
+                                tracing::debug!(error = %e, "bad group-call commit");
+                                false
+                            }
+                        },
+                        None => false,
+                    };
+                    if advanced {
+                        self.reconcile_group_legs(&channel_id, now_ms).await;
+                        out.push(Inbound::GroupCallMembersChanged { channel_id });
+                    }
+                }
+                Ok(Content::GroupCallLeave { channel_id }) => {
+                    let leaver = idk_to_id(&from);
+                    let _ = self.hangup(&leaver, now_ms).await;
+                    // The lowest-id remaining member issues the removal Commit,
+                    // so N members don't all commit a removal at once.
+                    let (issue, leaf, remaining) = match self.group_calls.get(&channel_id) {
+                        Some(gc) => {
+                            let me = self.my_member_id();
+                            let members = gc.mls.members();
+                            let leaf = members
+                                .iter()
+                                .find(|(_, id)| id.as_slice() == leaver)
+                                .map(|(l, _)| *l);
+                            let remaining: Vec<[u8; 32]> = members
+                                .iter()
+                                .filter_map(|(_, id)| <[u8; 32]>::try_from(id.clone()).ok())
+                                .filter(|id| *id != leaver)
+                                .collect();
+                            let lowest = remaining.iter().min().copied();
+                            (lowest == Some(me), leaf, remaining)
+                        }
+                        None => (false, None, Vec::new()),
+                    };
+                    if let (true, Some(leaf)) = (issue, leaf) {
+                        let commit = self
+                            .group_calls
+                            .get_mut(&channel_id)
+                            .and_then(|gc| gc.mls.remove(&[leaf]).ok())
+                            .map(|hs| hs.commit);
+                        if let Some(commit) = commit {
+                            let me = self.my_member_id();
+                            for p in remaining.iter().filter(|p| **p != me) {
+                                let _ = self
+                                    .send_content(
+                                        p,
+                                        Content::GroupCallCommit {
+                                            channel_id,
+                                            blob: commit.clone(),
+                                        },
+                                        now_ms,
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    if self.group_calls.contains_key(&channel_id) {
+                        out.push(Inbound::GroupCallMembersChanged { channel_id });
+                    }
                 }
                 // Typing / reactions are channel-scoped and never arrive by DM.
                 Ok(Content::Typing | Content::Reaction { .. }) => {}

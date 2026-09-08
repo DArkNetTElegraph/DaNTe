@@ -43,6 +43,28 @@ pub enum Content {
     CallIce(String),
     /// Hang up / decline the call.
     CallEnd,
+    /// An MLS **Welcome** inviting the recipient into a channel's group call.
+    /// `blob` is an opaque `dante_mls` handshake blob.
+    GroupCallWelcome {
+        /// The channel the group call belongs to.
+        channel_id: [u8; 32],
+        /// The opaque MLS Welcome.
+        blob: Vec<u8>,
+    },
+    /// An MLS **Commit** advancing a channel group call's epoch (a member
+    /// joined or left). Opaque `dante_mls` handshake blob.
+    GroupCallCommit {
+        /// The channel the group call belongs to.
+        channel_id: [u8; 32],
+        /// The opaque MLS Commit.
+        blob: Vec<u8>,
+    },
+    /// The sender is leaving a channel's group call; remaining members drop
+    /// their media leg to the sender and rekey the MLS group without them.
+    GroupCallLeave {
+        /// The channel the group call belongs to.
+        channel_id: [u8; 32],
+    },
 }
 
 impl Content {
@@ -81,6 +103,15 @@ impl Content {
             Content::CallEnd => {
                 w.u8(9);
             }
+            Content::GroupCallWelcome { channel_id, blob } => {
+                w.u8(10).fixed(channel_id).bytes(blob);
+            }
+            Content::GroupCallCommit { channel_id, blob } => {
+                w.u8(11).fixed(channel_id).bytes(blob);
+            }
+            Content::GroupCallLeave { channel_id } => {
+                w.u8(12).fixed(channel_id);
+            }
         }
         w.into_vec()
     }
@@ -102,6 +133,17 @@ impl Content {
             7 => Content::CallAnswer(r.string()?),
             8 => Content::CallIce(r.string()?),
             9 => Content::CallEnd,
+            10 => Content::GroupCallWelcome {
+                channel_id: r.fixed::<32>()?,
+                blob: r.bytes()?.to_vec(),
+            },
+            11 => Content::GroupCallCommit {
+                channel_id: r.fixed::<32>()?,
+                blob: r.bytes()?.to_vec(),
+            },
+            12 => Content::GroupCallLeave {
+                channel_id: r.fixed::<32>()?,
+            },
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "dm::Content",
@@ -157,6 +199,25 @@ mod tests {
             Content::CallAnswer("v=0\r\n...".into()),
             Content::CallIce("candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".into()),
             Content::CallEnd,
+        ] {
+            assert_eq!(Content::decode(&c.encode()).unwrap(), c);
+        }
+    }
+
+    #[test]
+    fn group_call_signalling_roundtrips() {
+        for c in [
+            Content::GroupCallWelcome {
+                channel_id: [3u8; 32],
+                blob: vec![1, 2, 3, 4],
+            },
+            Content::GroupCallCommit {
+                channel_id: [4u8; 32],
+                blob: vec![9, 9],
+            },
+            Content::GroupCallLeave {
+                channel_id: [5u8; 32],
+            },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }

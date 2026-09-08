@@ -109,7 +109,7 @@ pub fn safety_number(a: &IdentityId, b: &IdentityId) -> String {
             h = sha512(&[h.as_slice(), &me.0].concat());
         }
         let mut s = String::with_capacity(30);
-        for chunk in h[..30].chunks_exact(5) {
+        for chunk in h[..30].as_chunks::<5>().0 {
             let mut v: u64 = 0;
             for &byte in chunk {
                 v = (v << 8) | u64::from(byte);
@@ -141,7 +141,7 @@ fn crockford_encode_grouped(data: &[u8]) -> String {
         while bits >= 5 {
             bits -= 5;
             let idx = ((acc >> bits) & 0x1f) as usize;
-            if symbols > 0 && symbols % 4 == 0 {
+            if symbols > 0 && symbols.is_multiple_of(4) {
                 out.push('-');
             }
             out.push(CROCKFORD[idx] as char);
@@ -150,7 +150,7 @@ fn crockford_encode_grouped(data: &[u8]) -> String {
     }
     if bits > 0 {
         let idx = ((acc << (5 - bits)) & 0x1f) as usize;
-        if symbols > 0 && symbols % 4 == 0 {
+        if symbols > 0 && symbols.is_multiple_of(4) {
             out.push('-');
         }
         out.push(CROCKFORD[idx] as char);

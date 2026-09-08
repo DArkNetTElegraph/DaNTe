@@ -233,6 +233,102 @@ async fn a_one_to_one_call_connects_over_dm_signalling() {
     assert!(!alice.in_call(&bob_id) && !bob.in_call(&alice_id));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_call_shares_an_mls_key_that_rekeys_when_a_member_leaves() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true).unwrap();
+    host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
+    host.invite_to_channel(&chan, &bob_id, now).await.unwrap();
+    for _ in 0..8 {
+        for e in [&mut host, &mut alice, &mut bob] {
+            e.sync(now).await.unwrap();
+            e.receive_all(now).await.unwrap();
+        }
+    }
+    assert!(alice.channels().iter().any(|c| c.channel_id == chan));
+    assert!(bob.channels().iter().any(|c| c.channel_id == chan));
+
+    // Every member has an MLS KeyPackage on the relay (connect published one;
+    // re-publish to be safe under test timing).
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.refresh_mls_key_package().await.unwrap();
+    }
+
+    // Host opens the group call: adds alice + bob and DMs them one Welcome.
+    host.start_group_call(&chan, now).await.unwrap();
+    assert!(host.in_group_call(&chan));
+
+    let mut joined = 0;
+    for _ in 0..40 {
+        for e in [&mut alice, &mut bob] {
+            for it in e.receive_all(now).await.unwrap() {
+                if let crate::Inbound::GroupCallInvite { channel_id, .. } = it {
+                    if channel_id == chan && !e.in_group_call(&chan) {
+                        e.join_group_call(&chan, now).await.unwrap();
+                        joined += 1;
+                    }
+                }
+            }
+        }
+        host.receive_all(now).await.unwrap();
+        if joined >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(joined, 2, "alice and bob joined the group call");
+
+    // All three land in the same MLS epoch off the one Welcome — same key.
+    let key = host.group_call_key(&chan).expect("host derived a call key");
+    assert_eq!(
+        alice.group_call_key(&chan),
+        Some(key),
+        "alice shares the key"
+    );
+    assert_eq!(bob.group_call_key(&chan), Some(key), "bob shares the key");
+    assert_eq!(host.group_call_peers(&chan).len(), 2);
+    assert_eq!(alice.group_call_peers(&chan).len(), 2);
+
+    // Bob leaves: the remaining members rekey and the media key rotates.
+    bob.leave_group_call(&chan, now).await.unwrap();
+    assert!(!bob.in_group_call(&chan));
+
+    let mut rotated = false;
+    for _ in 0..60 {
+        for e in [&mut host, &mut alice] {
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_group_calls(now).await;
+        }
+        let hk = host.group_call_key(&chan);
+        if hk.is_some()
+            && hk != Some(key)
+            && hk == alice.group_call_key(&chan)
+            && host.group_call_peers(&chan).len() == 1
+        {
+            rotated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(rotated, "the group-call key rotated after bob left");
+}
+
 #[tokio::test]
 async fn a_revoked_identity_can_no_longer_be_messaged() {
     use dante_identity::RevokeReason;

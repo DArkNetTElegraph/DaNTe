@@ -380,6 +380,16 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                 dante_core::Inbound::CallEnded { from_idk } => {
                                     println!("\u{1f4de} call with {} ended", short_fp(&from_idk));
                                 }
+                                dante_core::Inbound::GroupCallInvite { channel_id, from_idk } => {
+                                    println!("\u{1f4de} {} invited you to a group call in #{} — /groupcall join #{}",
+                                        short_fp(&from_idk),
+                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""),
+                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""));
+                                }
+                                dante_core::Inbound::GroupCallMembersChanged { channel_id } => {
+                                    println!("\u{1f4de} group call #{} membership changed",
+                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""));
+                                }
                             }
                         }
                     }
@@ -390,6 +400,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                         IdentityId::from_bytes(u.peer).to_base32().split('-').next().unwrap_or(""),
                         u.state);
                 }
+                let _ = engine.poll_group_calls(now).await;
             }
             line = lines.next_line() => {
                 match line {
@@ -558,6 +569,28 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 },
                 None => println!("usage: /{cmd} <fingerprint>"),
             },
+            "groupcall" => {
+                let mut parts = a.unwrap_or("").split_whitespace();
+                let sub = parts.next().unwrap_or("");
+                let chan = parts.next().map(|c| c.strip_prefix('#').unwrap_or(c));
+                match (sub, chan) {
+                    ("start" | "join" | "leave", Some(c)) => match parse_fingerprint(c) {
+                        Ok(cid) => {
+                            let r = match sub {
+                                "start" => engine.start_group_call(&cid, now_ms()).await,
+                                "join" => engine.join_group_call(&cid, now_ms()).await,
+                                _ => engine.leave_group_call(&cid, now_ms()).await,
+                            };
+                            match r {
+                                Ok(()) => println!("\u{1f4de} group call {sub} ok"),
+                                Err(e) => println!("group call {sub} failed: {e}"),
+                            }
+                        }
+                        Err(e) => println!("bad channel id: {e}"),
+                    },
+                    _ => println!("usage: /groupcall start|join|leave #<channel>"),
+                }
+            }
             "block" | "unblock" => match a {
                 Some(fp) => match parse_fingerprint(fp) {
                     Ok(id) => {

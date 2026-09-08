@@ -2,8 +2,7 @@
 name = "dante-mls"
 version.workspace = true
 edition.workspace = true
-# OpenMLS 0.9 requires Rust 1.91; the rest of the workspace still builds on 1.85.
-rust-version = "1.91"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

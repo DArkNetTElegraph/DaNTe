@@ -282,6 +282,17 @@ impl Member {
         self.group.members().map(|m| m.index.u32()).collect()
     }
 
+    /// `(leaf index, identity bytes)` for every current member. The identity is
+    /// what each was created / added with (DaNTe passes the identity-key
+    /// fingerprint), so callers can map a peer to the leaf they pass to
+    /// [`remove`](Self::remove).
+    pub fn members(&self) -> Vec<(u32, Vec<u8>)> {
+        self.group
+            .members()
+            .map(|m| (m.index.u32(), m.credential.serialized_content().to_vec()))
+            .collect()
+    }
+
     /// The identity bytes this member was created with.
     pub fn identity(&self) -> &[u8] {
         &self.identity

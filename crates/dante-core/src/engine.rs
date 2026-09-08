@@ -2257,13 +2257,45 @@ impl Engine {
         text: &str,
         now_ms: u64,
     ) -> Result<u64, CoreError> {
+        self.send_channel_content(channel_id, Content::Text(text.to_owned()), text, now_ms)
+            .await
+    }
+
+    /// Send a text message to a channel as a reply to the message at
+    /// `target_seq`. Returns the new message's relay-log `seq`.
+    pub async fn send_channel_reply(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        text: &str,
+        now_ms: u64,
+    ) -> Result<u64, CoreError> {
+        self.send_channel_content(
+            channel_id,
+            Content::Reply {
+                target_seq,
+                text: text.to_owned(),
+            },
+            text,
+            now_ms,
+        )
+        .await
+    }
+
+    async fn send_channel_content(
+        &mut self,
+        channel_id: &[u8; 32],
+        content: Content,
+        history_text: &str,
+        now_ms: u64,
+    ) -> Result<u64, CoreError> {
         let ct = {
             let ch = self
                 .channels
                 .get_mut(channel_id)
                 .ok_or(CoreError::UnknownChannel)?;
             ch.mls
-                .encrypt(&pad_channel(&Content::Text(text.to_owned()).encode()))
+                .encrypt(&pad_channel(&content.encode()))
                 .map_err(mls_err)?
         };
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
@@ -2287,7 +2319,7 @@ impl Engine {
             sender: me,
             outgoing: true,
             ts_ms: now_ms,
-            text: text.to_owned(),
+            text: history_text.to_owned(),
         });
         self.dirty = true;
         Ok(seq)
@@ -2502,7 +2534,12 @@ impl Engine {
                             continue;
                         }
                         match unpad_channel(&plaintext).map(Content::decode) {
-                            Some(Ok(Content::Text(text))) => {
+                            Some(Ok(c @ (Content::Text(_) | Content::Reply { .. }))) => {
+                                let (text, reply_to) = match c {
+                                    Content::Text(t) => (t, None),
+                                    Content::Reply { target_seq, text } => (text, Some(target_seq)),
+                                    _ => unreachable!(),
+                                };
                                 self.channel_edits
                                     .entry(id)
                                     .or_default()
@@ -2525,6 +2562,7 @@ impl Engine {
                                     sender,
                                     text,
                                     seq,
+                                    reply_to,
                                 });
                             }
                             Some(Ok(Content::Reaction {
@@ -3012,7 +3050,8 @@ impl Engine {
             | Content::GroupCallCommit { .. }
             | Content::GroupCallLeave { .. }
             | Content::Edit { .. }
-            | Content::Delete { .. } => None,
+            | Content::Delete { .. }
+            | Content::Reply { .. } => None,
         };
         let plaintext = content.encode();
 
@@ -3259,12 +3298,13 @@ impl Engine {
                         out.push(Inbound::GroupCallMembersChanged { channel_id });
                     }
                 }
-                // Typing / reactions are channel-scoped and never arrive by DM.
+                // Typing / reactions / edits are channel-scoped, never by DM.
                 Ok(
                     Content::Typing
                     | Content::Reaction { .. }
                     | Content::Edit { .. }
-                    | Content::Delete { .. },
+                    | Content::Delete { .. }
+                    | Content::Reply { .. },
                 ) => {}
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }

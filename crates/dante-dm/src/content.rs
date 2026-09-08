@@ -79,6 +79,14 @@ pub enum Content {
         /// The relay-log `seq` of the message being deleted.
         target_seq: u64,
     },
+    /// A channel message posted as a reply to an earlier one. Otherwise a
+    /// normal text message (editable / deletable like any other).
+    Reply {
+        /// The relay-log `seq` of the message being replied to.
+        target_seq: u64,
+        /// The reply text.
+        text: String,
+    },
 }
 
 impl Content {
@@ -132,6 +140,9 @@ impl Content {
             Content::Delete { target_seq } => {
                 w.u8(14).u64(*target_seq);
             }
+            Content::Reply { target_seq, text } => {
+                w.u8(15).u64(*target_seq).string(text);
+            }
         }
         w.into_vec()
     }
@@ -170,6 +181,10 @@ impl Content {
             },
             14 => Content::Delete {
                 target_seq: r.u64()?,
+            },
+            15 => Content::Reply {
+                target_seq: r.u64()?,
+                text: r.string()?,
             },
             other => {
                 return Err(WireError::BadDiscriminant {
@@ -251,13 +266,17 @@ mod tests {
     }
 
     #[test]
-    fn edit_delete_roundtrip() {
+    fn edit_delete_reply_roundtrip() {
         for c in [
             Content::Edit {
                 target_seq: 77,
                 text: "fixed a typo".into(),
             },
             Content::Delete { target_seq: 42 },
+            Content::Reply {
+                target_seq: 12,
+                text: "agreed".into(),
+            },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }

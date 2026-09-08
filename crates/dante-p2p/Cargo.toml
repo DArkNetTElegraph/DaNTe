@@ -1,0 +1,36 @@
+# Detached from the root workspace on purpose (like crates/dante-audio and
+# apps/dante-desktop): rust-libp2p pulls a very large dependency tree that the
+# root `cargo deny` gate would need vetting for. This is groundwork for the
+# decentralized transport (Phase 3) and is not yet wired into dante-core.
+#
+#   cd crates/dante-p2p && cargo test
+[workspace]
+
+[package]
+name = "dante-p2p"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/DArkNetTElegraph/DaNTe"
+authors = ["The DaNTe contributors"]
+description = "libp2p transport for DaNTe: Kademlia key directory + gossipsub for the ledger and channel logs."
+
+[dependencies]
+# No "dns" feature on purpose: it pulls hickory-proto 0.25, which carries an
+# unfixed DoS advisory (RUSTSEC / GHSA-q2qq-hmj6-3wpp). Bootstrap peers are
+# configured by IP multiaddr; add "dns" back once libp2p ships hickory >= 0.26.1.
+libp2p = { version = "0.56", features = [
+    "tokio", "tcp", "noise", "yamux",
+    "kad", "gossipsub", "identify", "ping", "macros",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"

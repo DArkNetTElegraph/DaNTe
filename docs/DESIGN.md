@@ -107,6 +107,14 @@ achievable with no project-run infrastructure.
   inside `#app` and replaced with CSS menus — channel rows (rename / delete /
   leave / mute / copy id) and messages (reply / edit / delete / pin / forward /
   copy). The chat header's icon row collapses under a `⋯` button.
+- **Usernames *(done)*:** registration asks for a username; it rides the
+  `IdentityAnnounce.display_hint` (already in the record, now surfaced) so it
+  propagates over the ledger. `Ledger::{display_name, display_name_by_id,
+  usernames}`, `Engine::{my_username, username_of, known_usernames}`,
+  `POST /api/onboard {username}`, `GET /api/usernames`, `GET /api/me.username`.
+  Non-unique, unverified — a display convenience. The SPA resolves a name as
+  petname → username → block-id prefix, and the bottom-left chip shows the
+  username big with the block-id small beneath it.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 

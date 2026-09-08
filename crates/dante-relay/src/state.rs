@@ -8,7 +8,7 @@ use dante_net::{
     mailbox::Mailbox,
     ratelimit::KeyedRateLimiter,
     transport::RequestHandler,
-    wire::{Request, Response},
+    wire::{IceCfg, Request, Response},
 };
 use dante_proto::{record::RecordKind, Envelope, Record};
 use tokio::sync::Mutex;
@@ -44,6 +44,52 @@ impl Default for Limits {
     }
 }
 
+/// ICE servers this relay hands out (via `Request::GetIceConfig`) so clients on
+/// this network can do NAT traversal for calls. All empty by default: with no
+/// STUN/TURN a call only connects between peers that can reach each other
+/// directly.
+#[derive(Clone, Default)]
+pub struct IcePolicy {
+    /// `stun:` URLs (no credentials).
+    pub stun: Vec<String>,
+    /// `turn:` / `turns:` URLs.
+    pub turn: Vec<String>,
+    /// Shared secret for minting time-limited TURN credentials
+    /// (`username = "{expiry}:dante"`, `credential = base64(HMAC-SHA256(secret,
+    /// username))`). The operator's TURN server must be configured to verify
+    /// the same scheme. `None` → no TURN handed out.
+    pub turn_secret: Option<Vec<u8>>,
+    /// How long a minted TURN credential is valid (seconds).
+    pub turn_ttl_secs: u64,
+}
+
+/// Standard base64 (with padding).
+fn b64(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(A[(n >> 18 & 63) as usize] as char);
+        out.push(A[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// Everything a relay mutates.
 pub struct RelayState {
     ledger: Ledger<MemoryStore>,
@@ -63,6 +109,7 @@ pub struct RelayState {
     record_rl: KeyedRateLimiter<IpAddr>,
     deposit_rl: KeyedRateLimiter<IpAddr>,
     max_get_records: u64,
+    ice: IcePolicy,
 }
 
 /// Total blob-store budget (all file chunks). 128 MiB.
@@ -96,7 +143,13 @@ impl RelayState {
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
             deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
             max_get_records: 512,
+            ice: IcePolicy::default(),
         }
+    }
+
+    /// Set the ICE servers this relay advertises for calls.
+    pub fn set_ice_policy(&mut self, ice: IcePolicy) {
+        self.ice = ice;
     }
 
     /// Periodic housekeeping: expire mailbox entries, evaporate stale
@@ -320,6 +373,27 @@ impl RelayState {
                     .unwrap_or_default();
                 Response::Signals(out)
             }
+
+            Request::GetIceConfig => {
+                let mut out = Vec::new();
+                if !self.ice.stun.is_empty() {
+                    out.push(IceCfg {
+                        urls: self.ice.stun.clone(),
+                        ..Default::default()
+                    });
+                }
+                if let (Some(secret), false) = (&self.ice.turn_secret, self.ice.turn.is_empty()) {
+                    let expiry = now / 1000 + self.ice.turn_ttl_secs.max(60);
+                    let username = format!("{expiry}:dante");
+                    let mac = dante_crypto::mac::hmac_sha256(secret, username.as_bytes());
+                    out.push(IceCfg {
+                        urls: self.ice.turn.clone(),
+                        username,
+                        credential: b64(&mac),
+                    });
+                }
+                Response::IceConfig(out)
+            }
         }
     }
 }
@@ -399,6 +473,49 @@ mod tests {
             Response::Records(v) => assert_eq!(v, vec![rec.encode()]),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn b64_matches_known_vectors() {
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foob"), "Zm9vYg==");
+        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn get_ice_config_mints_ephemeral_turn_credentials() {
+        let mut s = state();
+        // No policy -> empty list.
+        assert_eq!(
+            s.handle(Request::GetIceConfig, IP, 1_000),
+            Response::IceConfig(vec![])
+        );
+
+        s.set_ice_policy(IcePolicy {
+            stun: vec!["stun:s.example:3478".into()],
+            turn: vec!["turn:t.example:3478".into()],
+            turn_secret: Some(b"shared-secret".to_vec()),
+            turn_ttl_secs: 600,
+        });
+        let Response::IceConfig(list) = s.handle(Request::GetIceConfig, IP, 1_000_000) else {
+            panic!("wrong response");
+        };
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].urls, vec!["stun:s.example:3478".to_string()]);
+        assert!(list[0].username.is_empty());
+
+        let turn = &list[1];
+        // now = 1_000_000 ms -> 1000 s; ttl 600 -> expiry 1600.
+        assert_eq!(turn.username, "1600:dante");
+        let want = b64(&dante_crypto::mac::hmac_sha256(
+            b"shared-secret",
+            b"1600:dante",
+        ));
+        assert_eq!(turn.credential, want);
+        assert_eq!(turn.credential.len(), 44);
     }
 
     #[test]

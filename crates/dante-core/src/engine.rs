@@ -26,7 +26,7 @@ use dante_ledger::{
 };
 use dante_net::{sync, transport::Client};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
-use dante_voice::{Call, CallEvent, CallState};
+use dante_voice::{Call, CallEvent, CallState, IceServer};
 
 use crate::{
     channel::{ChannelControl, ChannelInfo, ChannelMessage},
@@ -256,6 +256,8 @@ pub struct Engine {
     /// messages and typing signals are dropped on receipt, and the client
     /// refuses to DM them. Persisted.
     blocked: HashSet<[u8; 32]>,
+    /// STUN/TURN servers used for new calls. Set at runtime; not persisted.
+    ice_servers: Vec<IceServer>,
     /// Active 1:1 calls, keyed by peer `IdentityId` bytes. Ephemeral.
     calls: HashMap<[u8; 32], Call>,
     /// Received call offers awaiting an accept/decline, `peer -> offer SDP`.
@@ -320,6 +322,7 @@ impl Engine {
             verified_peers: HashMap::new(),
             contacts: HashMap::new(),
             blocked: HashSet::new(),
+            ice_servers: Vec::new(),
             calls: HashMap::new(),
             pending_call_offers: HashMap::new(),
             call_states: HashMap::new(),
@@ -403,6 +406,20 @@ impl Engine {
                 );
             }
         }
+
+        // Learn this network's ICE servers (STUN, short-lived TURN creds) from
+        // the relay, so calls can traverse NAT. Best-effort.
+        if let Ok(cfg) = sync::get_ice_config(&mut engine.client).await {
+            engine.ice_servers = cfg
+                .into_iter()
+                .map(|c| IceServer {
+                    urls: c.urls,
+                    username: c.username,
+                    credential: c.credential,
+                })
+                .collect();
+        }
+
         Ok(engine)
     }
 
@@ -732,7 +749,9 @@ impl Engine {
                 "a call with this peer is already active".into(),
             ));
         }
-        let (call, offer) = Call::offer().await.map_err(voice_err)?;
+        let (call, offer) = Call::offer_with(&self.ice_servers)
+            .await
+            .map_err(voice_err)?;
         self.calls.insert(*peer_id, call);
         self.call_states.insert(*peer_id, CallState::New);
         self.send_content(peer_id, Content::CallOffer(offer), now_ms)
@@ -746,7 +765,9 @@ impl Engine {
             .pending_call_offers
             .remove(peer_id)
             .ok_or(CoreError::Voice("no pending call from that peer".into()))?;
-        let (call, answer) = Call::answer(&offer).await.map_err(voice_err)?;
+        let (call, answer) = Call::answer_with(&offer, &self.ice_servers)
+            .await
+            .map_err(voice_err)?;
         self.calls.insert(*peer_id, call);
         self.call_states.insert(*peer_id, CallState::New);
         self.send_content(peer_id, Content::CallAnswer(answer), now_ms)
@@ -795,6 +816,17 @@ impl Engine {
     /// Current state of the call with `peer_id`, if any.
     pub fn call_state(&self, peer_id: &[u8; 32]) -> Option<CallState> {
         self.call_states.get(peer_id).copied()
+    }
+
+    /// Set the STUN/TURN servers used when *starting* future calls (calls
+    /// already in progress keep their config).
+    pub fn set_ice_servers(&mut self, servers: Vec<IceServer>) {
+        self.ice_servers = servers;
+    }
+
+    /// The configured STUN/TURN servers.
+    pub fn ice_servers(&self) -> &[IceServer] {
+        &self.ice_servers
     }
 
     /// Whether a call with `peer_id` is active (connecting or connected).

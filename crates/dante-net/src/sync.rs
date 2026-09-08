@@ -6,7 +6,7 @@ use dante_proto::{record::Record, Envelope};
 use crate::{
     error::NetError,
     transport::Client,
-    wire::{Request, Response},
+    wire::{IceCfg, Request, Response},
 };
 
 /// Pull records the relay has that we don't, and feed them to `apply`.
@@ -178,6 +178,15 @@ pub async fn fetch_signals(
     {
         Response::Signals(blobs) => Ok(blobs),
         _ => Err(NetError::UnexpectedResponse("FetchSignals")),
+    }
+}
+
+/// Ask the relay which ICE servers (STUN, and short-lived TURN credentials) to
+/// use for calls on this network.
+pub async fn get_ice_config(client: &mut Client) -> Result<Vec<IceCfg>, NetError> {
+    match client.request(&Request::GetIceConfig).await? {
+        Response::IceConfig(list) => Ok(list),
+        _ => Err(NetError::UnexpectedResponse("GetIceConfig")),
     }
 }
 

@@ -117,7 +117,13 @@ provide.
 5. **Anonymity of network location.** DaNTe does not hide your IP address from
    peers you connect to directly or from relays. Run it over Tor/VPN if network-
    level anonymity is required. (A future phase may integrate transport-level
-   anonymity; it is not a current guarantee.)
+   anonymity; it is not a current guarantee.) In particular, a **1:1 call**
+   discovers a direct path between the two peers, so each learns the other's IP;
+   a call routed through a TURN server hides the peers' IPs from each other but
+   exposes both to the TURN operator (who still cannot read the media — it is
+   DTLS-SRTP). The DaNTe relay only *issues* short-lived TURN credentials
+   (`HMAC-SHA256` over an expiry-stamped username); it does not run the TURN
+   server or see call media.
 6. **Availability against a resourced censor.** Bootstrap addresses can be
    blocked; a nation-state can disrupt the DHT. DaNTe aims for resilience, not
    invulnerability.

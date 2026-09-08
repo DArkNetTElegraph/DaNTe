@@ -30,4 +30,4 @@ pub use error::NetError;
 pub use mailbox::Mailbox;
 pub use ratelimit::KeyedRateLimiter;
 pub use transport::{serve, Client, RequestHandler, MAX_FRAME};
-pub use wire::{Request, Response};
+pub use wire::{IceCfg, Request, Response};

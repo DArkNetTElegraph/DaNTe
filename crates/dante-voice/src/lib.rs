@@ -21,9 +21,20 @@ use tokio::sync::{mpsc, Mutex};
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-    RTCIceCandidateInit, RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription,
-    SettingEngineBuilder,
+    RTCIceCandidateInit, RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
+    RTCSessionDescription, SettingEngineBuilder,
 };
+
+/// A STUN or TURN server for ICE. `username` / `credential` are empty for STUN.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IceServer {
+    /// e.g. `stun:stun.example.org:3478` or `turn:turn.example.org:3478?transport=udp`.
+    pub urls: Vec<String>,
+    /// TURN username (empty for STUN).
+    pub username: String,
+    /// TURN credential (empty for STUN).
+    pub credential: String,
+}
 
 /// Anything that can go wrong setting up or driving a call.
 #[derive(Debug, thiserror::Error)]
@@ -156,13 +167,24 @@ type Built = (
     mpsc::UnboundedReceiver<CallEvent>,
 );
 
-async fn build_pc() -> Result<Built, VoiceError> {
+async fn build_pc(ice: &[IceServer]) -> Result<Built, VoiceError> {
     let (tx, rx) = mpsc::unbounded_channel();
     let dc: DcSlot = Arc::new(Mutex::new(None));
 
-    // No ICE servers: 1:1 DaNTe calls rely on host candidates (both peers reach
-    // each other directly, or the future relay-side TURN once that lands).
-    let config = RTCConfigurationBuilder::default().build();
+    // With no ICE servers a call only connects between peers that can reach each
+    // other directly (same host / LAN). STUN adds server-reflexive candidates
+    // (each peer's public ip:port); TURN adds a relayed path for symmetric NAT.
+    let servers: Vec<RTCIceServer> = ice
+        .iter()
+        .map(|s| RTCIceServer {
+            urls: s.urls.clone(),
+            username: s.username.clone(),
+            credential: s.credential.clone(),
+        })
+        .collect();
+    let config = RTCConfigurationBuilder::default()
+        .with_ice_servers(servers)
+        .build();
     let setting = SettingEngineBuilder::default()
         .with_include_loopback_candidate(true)
         .build();
@@ -182,10 +204,20 @@ async fn build_pc() -> Result<Built, VoiceError> {
 }
 
 impl Call {
-    /// Caller side: build the connection and the control channel, return the
-    /// call plus the SDP **offer** to hand to the peer.
+    /// Caller side with no ICE servers (direct / LAN only).
     pub async fn offer() -> Result<(Call, String), VoiceError> {
-        let (pc, dc, tx, events) = build_pc().await?;
+        Self::offer_with(&[]).await
+    }
+
+    /// Callee side with no ICE servers.
+    pub async fn answer(offer_sdp: &str) -> Result<(Call, String), VoiceError> {
+        Self::answer_with(offer_sdp, &[]).await
+    }
+
+    /// Caller side: build the connection and the control channel using `ice`
+    /// (STUN/TURN), return the call plus the SDP **offer** to hand to the peer.
+    pub async fn offer_with(ice: &[IceServer]) -> Result<(Call, String), VoiceError> {
+        let (pc, dc, tx, events) = build_pc(ice).await?;
 
         let channel = pc.create_data_channel("dante", None).await?;
         *dc.lock().await = Some(Arc::clone(&channel));
@@ -196,10 +228,14 @@ impl Call {
         Ok((Call { pc, dc, events }, offer.sdp))
     }
 
-    /// Callee side: apply a received **offer**, return the call plus the SDP
-    /// **answer**. The caller's control channel arrives via `on_data_channel`.
-    pub async fn answer(offer_sdp: &str) -> Result<(Call, String), VoiceError> {
-        let (pc, dc, _tx, events) = build_pc().await?;
+    /// Callee side: apply a received **offer** with `ice` servers, return the
+    /// call plus the SDP **answer**. The caller's control channel arrives via
+    /// `on_data_channel`.
+    pub async fn answer_with(
+        offer_sdp: &str,
+        ice: &[IceServer],
+    ) -> Result<(Call, String), VoiceError> {
+        let (pc, dc, _tx, events) = build_pc(ice).await?;
         pc.set_remote_description(RTCSessionDescription::offer(offer_sdp.to_owned())?)
             .await?;
         let answer = pc.create_answer(None).await?;

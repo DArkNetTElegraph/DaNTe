@@ -36,12 +36,15 @@ fn test_params() -> LedgerParams {
 }
 
 async fn spawn_relay() -> String {
+    spawn_relay_with_ice(dante_relay::state::IcePolicy::default()).await
+}
+
+async fn spawn_relay_with_ice(ice: dante_relay::state::IcePolicy) -> String {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let handler = Arc::new(RelayHandler::new(RelayState::new(
-        test_params(),
-        Limits::default(),
-    )));
+    let mut state = RelayState::new(test_params(), Limits::default());
+    state.set_ice_policy(ice);
+    let handler = Arc::new(RelayHandler::new(state));
     tokio::spawn(serve(listener, handler));
     addr.to_string()
 }
@@ -108,6 +111,35 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
 
     // Re-polling returns nothing new (dedup).
     assert!(bob.receive(now).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn engine_learns_ice_servers_from_the_relay() {
+    let ice = dante_relay::state::IcePolicy {
+        stun: vec!["stun:stun.example.org:3478".into()],
+        turn: vec!["turn:turn.example.org:3478?transport=udp".into()],
+        turn_secret: Some(vec![7u8; 32]),
+        turn_ttl_secs: 600,
+    };
+    let relay = spawn_relay_with_ice(ice).await;
+    let e = engine(&relay).await;
+
+    let servers = e.ice_servers();
+    assert_eq!(servers.len(), 2, "STUN + TURN");
+    assert_eq!(
+        servers[0].urls,
+        vec!["stun:stun.example.org:3478".to_string()]
+    );
+    assert!(servers[0].username.is_empty());
+
+    let turn = &servers[1];
+    assert!(turn.urls[0].starts_with("turn:"));
+    assert!(turn.username.ends_with(":dante"), "ephemeral username");
+    assert_eq!(turn.credential.len(), 44, "base64 of a 32-byte HMAC");
+    assert!(turn
+        .credential
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

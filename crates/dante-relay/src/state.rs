@@ -339,7 +339,7 @@ impl RelayState {
                     let excess = entries.len() - MAX_CHANNEL_ENTRIES;
                     entries.drain(..excess);
                 }
-                Response::Ok
+                Response::Posted(seq)
             }
 
             Request::FetchChannel {

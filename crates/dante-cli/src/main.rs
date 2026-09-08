@@ -351,6 +351,15 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                         if r.removed { "－" } else { "＋" }, r.emoji,
                         IdentityId::from_bytes(r.member).to_base32().split('-').next().unwrap_or(""));
                 }
+                for e in engine.take_edits() {
+                    let cid = IdentityId::from_bytes(e.channel_id).to_base32();
+                    let cid = cid.split('-').next().unwrap_or("");
+                    if e.deleted {
+                        println!("  [#{cid} {}] (message deleted)", e.target_seq);
+                    } else {
+                        println!("  [#{cid} {}] (edited) {}", e.target_seq, e.text.unwrap_or_default());
+                    }
+                }
                 match engine.receive_all(now).await {
                     Ok(items) => {
                         for item in items {
@@ -751,6 +760,42 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     }
                 }
                 _ => println!("usage: /react #<chan> <seq> <emoji> [-]"),
+            },
+            "edit" | "delete" => match (a, b) {
+                (Some(chan), Some(rest)) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    let (seq_str, new_text) = match rest.split_once(char::is_whitespace) {
+                        Some((s, t)) => (s, t),
+                        None => (rest, ""),
+                    };
+                    match (parse_fingerprint(chan), seq_str.parse::<u64>()) {
+                        (Ok(cid), Ok(seq)) => {
+                            if cmd == "edit" && new_text.is_empty() {
+                                println!("usage: /edit #<chan> <seq> <new text>");
+                            } else {
+                                let r = if cmd == "delete" {
+                                    engine.delete_channel_message(&cid, seq, now_ms()).await
+                                } else {
+                                    engine
+                                        .edit_channel_message(&cid, seq, new_text, now_ms())
+                                        .await
+                                };
+                                match r {
+                                    Ok(()) => println!("{cmd} ok"),
+                                    Err(e) => println!("{cmd} failed: {e}"),
+                                }
+                            }
+                        }
+                        _ => println!(
+                            "usage: /{cmd} #<chan> <seq>{}",
+                            if cmd == "edit" { " <new text>" } else { "" }
+                        ),
+                    }
+                }
+                _ => println!(
+                    "usage: /{cmd} #<chan> <seq>{}",
+                    if cmd == "edit" { " <new text>" } else { "" }
+                ),
             },
             "discover" => {
                 let list = engine.discoverable_servers();

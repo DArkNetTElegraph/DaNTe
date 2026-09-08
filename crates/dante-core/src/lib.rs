@@ -19,7 +19,8 @@ pub use channel::{ChannelInfo, ChannelMessage, ChannelReaction};
 pub use dante_identity::RevokeReason;
 pub use dante_voice::{CallEvent, CallState, IceServer};
 pub use engine::{
-    CallUpdate, Contact, Engine, Inbound, ReceivedDm, TypingEvent, TypingScope, DM_TTL_MS,
+    CallUpdate, ChannelEdit, Contact, Engine, Inbound, ReceivedDm, TypingEvent, TypingScope,
+    DM_TTL_MS,
 };
 pub use error::CoreError;
 pub use invite::InviteToken;

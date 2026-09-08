@@ -142,12 +142,13 @@ pub async fn get_blob(client: &mut Client, hash: &[u8; 32]) -> Result<Option<Vec
     }
 }
 
-/// Append an encoded channel message to a channel's relay log.
+/// Append an encoded channel message to a channel's relay log. Returns the
+/// relay-log `seq` the message was assigned.
 pub async fn post_to_channel(
     client: &mut Client,
     channel_id: &[u8; 32],
     blob: &[u8],
-) -> Result<(), NetError> {
+) -> Result<u64, NetError> {
     match client
         .request(&Request::PostToChannel {
             channel_id: *channel_id,
@@ -155,7 +156,9 @@ pub async fn post_to_channel(
         })
         .await?
     {
-        Response::Ok => Ok(()),
+        Response::Posted(seq) => Ok(seq),
+        // Tolerate an older relay that still answers `Ok`.
+        Response::Ok => Ok(0),
         other => Err(NetError::Peer(format!("PostToChannel: {other:?}"))),
     }
 }

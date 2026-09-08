@@ -63,6 +63,33 @@ type ReactionMap = HashMap<[u8; 32], HashMap<u64, HashMap<String, HashSet<[u8; 3
 /// A reaction pending a fold-in: `(channel_id, target_seq, emoji, member, removed)`.
 type PendingReaction = ([u8; 32], u64, String, [u8; 32], bool);
 
+/// Standing edit/delete state for channel messages: `channel_id -> seq -> state`.
+type EditMap = HashMap<[u8; 32], HashMap<u64, MsgEdit>>;
+
+/// Per-message edit / delete tracking. `author` is recorded when the original
+/// text message is seen; only that identity's edit or delete is honoured.
+#[derive(Clone, Debug)]
+struct MsgEdit {
+    author: [u8; 32],
+    /// `Some` once the message has been edited (the current text).
+    text: Option<String>,
+    /// `true` once the message has been deleted.
+    deleted: bool,
+}
+
+/// A live edit/delete the UI folds into its view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelEdit {
+    /// The channel the message is in.
+    pub channel_id: [u8; 32],
+    /// The relay-log `seq` of the message.
+    pub target_seq: u64,
+    /// The new text (`None` if this is a delete).
+    pub text: Option<String>,
+    /// `true` if the message was deleted.
+    pub deleted: bool,
+}
+
 /// Max bytes of a contact petname.
 const PETNAME_MAX: usize = 64;
 
@@ -348,6 +375,11 @@ pub struct Engine {
     /// Persisted: the channel log is only re-polled from `last_seq`, so a
     /// restart would otherwise lose every reaction.
     channel_reactions: ReactionMap,
+    /// Standing edit/delete state for channel messages. Persisted for the same
+    /// reason as `channel_reactions`.
+    channel_edits: EditMap,
+    /// Edits/deletes seen since the last `take_edits()` — the live UI delta.
+    new_edits: Vec<ChannelEdit>,
     /// DM peers whose safety number the user confirmed out-of-band, keyed by
     /// stable `IdentityId` bytes and pinned to the peer `idk` that was verified
     /// (so a later key rotation drops back to unverified). Persisted.
@@ -432,6 +464,8 @@ impl Engine {
             server_policies: HashMap::new(),
             new_reactions: Vec::new(),
             channel_reactions: HashMap::new(),
+            channel_edits: HashMap::new(),
+            new_edits: Vec::new(),
             verified_peers: HashMap::new(),
             contacts: HashMap::new(),
             blocked: HashSet::new(),
@@ -512,6 +546,20 @@ impl Engine {
                     .entry(emoji)
                     .or_default()
                     .insert(member);
+            }
+            for se in s.channel_edits {
+                engine
+                    .channel_edits
+                    .entry(se.channel_id)
+                    .or_default()
+                    .insert(
+                        se.seq,
+                        MsgEdit {
+                            author: se.author,
+                            text: (!se.deleted && !se.text.is_empty()).then_some(se.text),
+                            deleted: se.deleted,
+                        },
+                    );
             }
             engine.verified_peers = s.verified_peers.into_iter().collect();
             engine.contacts = s
@@ -669,6 +717,22 @@ impl Engine {
                 .map(|(id, c)| (*id, c.petname.clone(), c.added_ms))
                 .collect(),
             blocked: self.blocked.iter().copied().collect(),
+            channel_edits: self
+                .channel_edits
+                .iter()
+                .flat_map(|(cid, by_seq)| {
+                    by_seq
+                        .iter()
+                        .filter(|(_, e)| e.text.is_some() || e.deleted)
+                        .map(move |(seq, e)| store::StoredEdit {
+                            channel_id: *cid,
+                            seq: *seq,
+                            author: e.author,
+                            text: e.text.clone().unwrap_or_default(),
+                            deleted: e.deleted,
+                        })
+                })
+                .collect(),
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
@@ -2184,13 +2248,15 @@ impl Engine {
         Ok(())
     }
 
-    /// Send a text message to a channel.
+    /// Send a text message to a channel. Returns the relay-log `seq` it was
+    /// assigned (the handle for a later [`edit_channel_message`] /
+    /// [`delete_channel_message`]).
     pub async fn send_channel(
         &mut self,
         channel_id: &[u8; 32],
         text: &str,
         now_ms: u64,
-    ) -> Result<(), CoreError> {
+    ) -> Result<u64, CoreError> {
         let ct = {
             let ch = self
                 .channels
@@ -2201,16 +2267,174 @@ impl Engine {
                 .map_err(mls_err)?
         };
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
-        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        let seq = sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        let me = self.my_member_id();
+        // Record our authorship so we can edit / delete this message later
+        // (we never see our own message come back through `poll_channels`).
+        if seq != 0 {
+            self.channel_edits
+                .entry(*channel_id)
+                .or_default()
+                .entry(seq)
+                .or_insert(MsgEdit {
+                    author: me,
+                    text: None,
+                    deleted: false,
+                });
+        }
         self.push_channel_history(ChannelHistoryEntry {
             channel_id: *channel_id,
-            sender: self.my_member_id(),
+            sender: me,
             outgoing: true,
             ts_ms: now_ms,
             text: text.to_owned(),
         });
         self.dirty = true;
+        Ok(seq)
+    }
+
+    /// Replace the text of one of our earlier channel messages. `target_seq` is
+    /// the value [`send_channel`] returned. Only the original author's edit is
+    /// honoured by other members.
+    pub async fn edit_channel_message(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        new_text: &str,
+        _now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.post_channel_edit(channel_id, target_seq, Some(new_text.to_owned()))
+            .await
+    }
+
+    /// Withdraw one of our earlier channel messages.
+    pub async fn delete_channel_message(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        _now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.post_channel_edit(channel_id, target_seq, None).await
+    }
+
+    async fn post_channel_edit(
+        &mut self,
+        channel_id: &[u8; 32],
+        target_seq: u64,
+        new_text: Option<String>,
+    ) -> Result<(), CoreError> {
+        let me = self.my_member_id();
+        match self
+            .channel_edits
+            .get(channel_id)
+            .and_then(|m| m.get(&target_seq))
+        {
+            Some(e) if e.author != me => {
+                return Err(CoreError::Channel("you can only edit your own messages"))
+            }
+            Some(e) if e.deleted => return Err(CoreError::Channel("that message was deleted")),
+            Some(_) => {}
+            None => {
+                return Err(CoreError::Channel(
+                    "unknown message (or sent before restart)",
+                ))
+            }
+        }
+
+        let content = match &new_text {
+            Some(t) => Content::Edit {
+                target_seq,
+                text: t.clone(),
+            },
+            None => Content::Delete { target_seq },
+        };
+        let ct = {
+            let ch = self
+                .channels
+                .get_mut(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            ch.mls
+                .encrypt(&pad_channel(&content.encode()))
+                .map_err(mls_err)?
+        };
+        let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
+        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        self.apply_channel_edit(*channel_id, target_seq, me, new_text);
         Ok(())
+    }
+
+    /// Apply an edit / delete to the standing state and queue the UI delta.
+    /// `new_text: None` = delete. No-op unless `by` authored the message.
+    fn apply_channel_edit(
+        &mut self,
+        channel_id: [u8; 32],
+        target_seq: u64,
+        by: [u8; 32],
+        new_text: Option<String>,
+    ) {
+        let Some(entry) = self
+            .channel_edits
+            .get_mut(&channel_id)
+            .and_then(|m| m.get_mut(&target_seq))
+        else {
+            return;
+        };
+        if entry.author != by || entry.deleted {
+            return;
+        }
+        match new_text {
+            Some(t) => {
+                entry.text = Some(t.clone());
+                self.new_edits.push(ChannelEdit {
+                    channel_id,
+                    target_seq,
+                    text: Some(t),
+                    deleted: false,
+                });
+            }
+            None => {
+                entry.text = None;
+                entry.deleted = true;
+                self.new_edits.push(ChannelEdit {
+                    channel_id,
+                    target_seq,
+                    text: None,
+                    deleted: true,
+                });
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Drain the edits/deletes seen since the last call (own and inbound).
+    pub fn take_edits(&mut self) -> Vec<ChannelEdit> {
+        std::mem::take(&mut self.new_edits)
+    }
+
+    /// The current edit/delete state, one [`ChannelEdit`] per changed message.
+    /// Used to re-seed a fresh view on startup.
+    pub fn edit_snapshot(&self) -> Vec<ChannelEdit> {
+        let mut out = Vec::new();
+        for (cid, by_seq) in &self.channel_edits {
+            for (seq, e) in by_seq {
+                if e.deleted {
+                    out.push(ChannelEdit {
+                        channel_id: *cid,
+                        target_seq: *seq,
+                        text: None,
+                        deleted: true,
+                    });
+                } else if let Some(t) = &e.text {
+                    out.push(ChannelEdit {
+                        channel_id: *cid,
+                        target_seq: *seq,
+                        text: Some(t.clone()),
+                        deleted: false,
+                    });
+                }
+            }
+        }
+        out
     }
 
     fn push_channel_history(&mut self, e: ChannelHistoryEntry) {
@@ -2229,6 +2453,8 @@ impl Engine {
         let mut out = Vec::new();
         let mut new_history = Vec::new();
         let mut new_reacts: Vec<PendingReaction> = Vec::new();
+        #[allow(clippy::type_complexity)]
+        let mut pending_edits: Vec<([u8; 32], u64, [u8; 32], Option<String>)> = Vec::new();
         let mut evicted: Vec<[u8; 32]> = Vec::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
@@ -2277,6 +2503,15 @@ impl Engine {
                         }
                         match unpad_channel(&plaintext).map(Content::decode) {
                             Some(Ok(Content::Text(text))) => {
+                                self.channel_edits
+                                    .entry(id)
+                                    .or_default()
+                                    .entry(seq)
+                                    .or_insert(MsgEdit {
+                                        author: sender,
+                                        text: None,
+                                        deleted: false,
+                                    });
                                 new_history.push(ChannelHistoryEntry {
                                     channel_id: id,
                                     sender,
@@ -2299,6 +2534,12 @@ impl Engine {
                             })) => {
                                 new_reacts.push((id, target_seq, emoji, sender, remove));
                             }
+                            Some(Ok(Content::Edit { target_seq, text })) => {
+                                pending_edits.push((id, target_seq, sender, Some(text)));
+                            }
+                            Some(Ok(Content::Delete { target_seq })) => {
+                                pending_edits.push((id, target_seq, sender, None));
+                            }
                             _ => {}
                         }
                     }
@@ -2312,6 +2553,9 @@ impl Engine {
         }
         for (cid, seq, emoji, member, removed) in new_reacts {
             self.record_reaction(cid, seq, emoji, member, removed);
+        }
+        for (cid, tseq, by, new_text) in pending_edits {
+            self.apply_channel_edit(cid, tseq, by, new_text);
         }
         if !out.is_empty() {
             for e in new_history {
@@ -2766,7 +3010,9 @@ impl Engine {
             | Content::CallEnd
             | Content::GroupCallWelcome { .. }
             | Content::GroupCallCommit { .. }
-            | Content::GroupCallLeave { .. } => None,
+            | Content::GroupCallLeave { .. }
+            | Content::Edit { .. }
+            | Content::Delete { .. } => None,
         };
         let plaintext = content.encode();
 
@@ -3014,7 +3260,12 @@ impl Engine {
                     }
                 }
                 // Typing / reactions are channel-scoped and never arrive by DM.
-                Ok(Content::Typing | Content::Reaction { .. }) => {}
+                Ok(
+                    Content::Typing
+                    | Content::Reaction { .. }
+                    | Content::Edit { .. }
+                    | Content::Delete { .. },
+                ) => {}
                 Err(e) => tracing::debug!(error = %e, "dropping malformed content"),
             }
             self.dirty = true;

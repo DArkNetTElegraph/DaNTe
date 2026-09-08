@@ -96,22 +96,22 @@ pub async fn get_prekeys(
     }
 }
 
-/// Publish one MLS `KeyPackage` (opaque bytes) for `identity` so other members
-/// can add it to a channel's MLS group or a group call.
-pub async fn publish_key_package(
+/// Publish MLS `KeyPackage`s (opaque bytes) for `identity` so other members can
+/// add it to channels / group calls. Each is single-use.
+pub async fn publish_key_packages(
     client: &mut Client,
     identity: &[u8; 32],
-    key_package: &[u8],
+    key_packages: Vec<Vec<u8>>,
 ) -> Result<(), NetError> {
     match client
-        .request(&Request::PublishKeyPackage {
+        .request(&Request::PublishKeyPackages {
             identity: *identity,
-            key_package: key_package.to_vec(),
+            key_packages,
         })
         .await?
     {
         Response::Ok => Ok(()),
-        other => Err(NetError::Peer(format!("PublishKeyPackage: {other:?}"))),
+        other => Err(NetError::Peer(format!("PublishKeyPackages: {other:?}"))),
     }
 }
 

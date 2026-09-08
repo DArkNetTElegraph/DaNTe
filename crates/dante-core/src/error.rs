@@ -14,10 +14,6 @@ pub enum CoreError {
     #[error(transparent)]
     Dm(#[from] dante_dm::DmError),
 
-    /// A group/channel operation failed.
-    #[error(transparent)]
-    Group(#[from] dante_group::GroupError),
-
     /// An identity/record operation failed.
     #[error(transparent)]
     Identity(#[from] dante_identity::IdentityError),

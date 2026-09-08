@@ -15,7 +15,7 @@ pub mod invite;
 pub mod roles;
 pub mod store;
 
-pub use channel::{ChannelInfo, ChannelMessage, ChannelReaction, RemoveOrder};
+pub use channel::{ChannelInfo, ChannelMessage, ChannelReaction};
 pub use dante_identity::RevokeReason;
 pub use dante_voice::{CallEvent, CallState, IceServer};
 pub use engine::{

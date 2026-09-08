@@ -2218,6 +2218,21 @@ function openSettings() {
     nwSec.appendChild(Object.assign(el("div", "set-mono"),
       { textContent: "Relays: " + ((s.relays || []).join(", ") || "—") }));
   }).catch(() => {});
+  const p2pLine = el("div", "set-mono");
+  p2pLine.textContent = "Peer-to-peer: …";
+  nwSec.appendChild(p2pLine);
+  api.get("/api/p2p").then(p => {
+    if (!p || !p.enabled) {
+      p2pLine.textContent = "Peer-to-peer: off"
+        + (p && p.built === false ? " (build with --features p2p to enable)" : "");
+      return;
+    }
+    p2pLine.textContent = "Peer-to-peer: on";
+    nwSec.appendChild(Object.assign(el("div", "set-mono"),
+      { textContent: "  peer id: " + (p.peer_id || "?") }));
+    for (const a of (p.dial_addrs || []))
+      nwSec.appendChild(Object.assign(el("div", "set-mono"), { textContent: "  " + a }));
+  }).catch(() => { p2pLine.textContent = "Peer-to-peer: off"; });
   box.appendChild(nwSec);
 
   // Danger zone

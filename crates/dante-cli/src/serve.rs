@@ -17,6 +17,7 @@
 //! `POST /api/discover/join {server,password}`, `GET /api/reactions`,
 //! `POST /api/react {channel,seq,emoji,remove}`,
 //! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
+//! `GET /api/p2p`,
 //! `POST /api/dm/edit {peer,msg_id,text}` (empty text deletes),
 //! `POST /api/forward {to,origin,text}`,
 //! `POST /api/file?to=<fp>&name=<file>` (raw body = bytes, DMs only),
@@ -198,6 +199,8 @@ enum Cmd {
         channel: [u8; 32],
         reply: oneshot::Sender<String>,
     },
+    /// libp2p node status as a ready JSON object.
+    P2pInfo { reply: oneshot::Sender<String> },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
     /// The DM pair's safety number + verification state as a ready JSON object.
@@ -1294,6 +1297,24 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 .collect();
             let _ = reply.send(serde_json::to_string(&pins).unwrap_or_else(|_| "[]".into()));
         }
+        Cmd::P2pInfo { reply } => {
+            #[cfg(feature = "p2p")]
+            let body = match engine.p2p_peer_id() {
+                Some(pid) => serde_json::json!({
+                    "enabled": true,
+                    "peer_id": pid,
+                    "dial_addrs": engine.p2p_dial_addrs(),
+                })
+                .to_string(),
+                None => "{\"enabled\":false}".to_string(),
+            };
+            #[cfg(not(feature = "p2p"))]
+            let body = {
+                let _ = &engine;
+                "{\"enabled\":false,\"built\":false}".to_string()
+            };
+            let _ = reply.send(body);
+        }
         Cmd::CreateServer { name, reply } => {
             let r = engine
                 .create_server(&name, now_ms())
@@ -2385,6 +2406,17 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 return respond(&mut stream, 500, "text/plain", b"engine gone").await;
             }
             let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/p2p") => {
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::P2pInfo { reply: tx }).await.is_err() {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx
+                .await
+                .unwrap_or_else(|_| "{\"enabled\":false}".to_string());
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 

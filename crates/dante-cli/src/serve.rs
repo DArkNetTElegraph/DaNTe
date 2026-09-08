@@ -553,6 +553,11 @@ struct Shared {
     boot: Bootstrap,
     /// The command receiver, handed to the engine task when it starts.
     pending_rx: Mutex<Option<mpsc::Receiver<Cmd>>>,
+    /// The loopback authorities this server legitimately answers to, e.g.
+    /// `["127.0.0.1:8080", "localhost:8080", "[::1]:8080"]`. Used to reject a
+    /// forged `Host` (DNS-rebinding) or a cross-site `Origin` (CSRF). See
+    /// [`request_is_local`].
+    local_authorities: Vec<String>,
 }
 
 impl Shared {
@@ -706,6 +711,8 @@ pub async fn run_on(
     boot: Bootstrap,
 ) -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(32);
+    let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let local_authorities = loopback_authorities(bound_port);
     let shared = Arc::new(Shared {
         inbox: Mutex::new(VecDeque::new()),
         channels: Mutex::new(Vec::new()),
@@ -726,6 +733,7 @@ pub async fn run_on(
         cmd: cmd_tx,
         boot,
         pending_rx: Mutex::new(Some(cmd_rx)),
+        local_authorities,
     });
 
     let http_addr = listener
@@ -2255,6 +2263,12 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
     let target = parts.next().unwrap_or("/");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
+    // Reject a browser being aimed at this localhost API from another site
+    // (CSRF) or via a rebound hostname (DNS rebinding) before reading any body.
+    if !request_is_local(&head, method, &shared.local_authorities) {
+        return respond(&mut stream, 403, "text/plain", b"cross-origin request refused").await;
+    }
+
     let content_length: usize = lines
         .clone()
         .find_map(|l| {
@@ -3467,6 +3481,80 @@ async fn dispatch(
     }
 }
 
+/// The loopback authorities a server bound to `port` legitimately answers to.
+/// A browser sends whichever form the user typed into the address bar, so all
+/// three must be accepted; anything else in a `Host` header is a rebinding
+/// attempt.
+fn loopback_authorities(port: u16) -> Vec<String> {
+    vec![
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+    ]
+}
+
+/// Case-insensitively fetch a single header value from a raw request head.
+fn header_val<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// The authority (`host:port`) of an `Origin`/`Referer` URL, scheme stripped.
+fn authority_of(url: &str) -> Option<&str> {
+    let s = url.trim();
+    let s = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+        .unwrap_or(s);
+    let s = s.split('/').next().unwrap_or(s);
+    (!s.is_empty()).then_some(s)
+}
+
+/// Guard against the browser being used as a confused deputy against this
+/// localhost-only API. Two orthogonal checks, because a plain CSRF request and
+/// a DNS-rebinding request fail in different places:
+///
+/// * **Host allowlist (every request).** A rebinding attacker resolves their
+///   own domain to `127.0.0.1`, so the connection reaches us but carries
+///   `Host: evil.example`. Refusing any `Host` outside our loopback authorities
+///   makes the page cross-origin again, so the browser's same-origin policy
+///   keeps the attacker out of the responses.
+/// * **Cross-site refusal (mutating requests).** A plain CSRF `fetch`/form from
+///   `evil.example` still connects with the real `Host: 127.0.0.1:port`, but the
+///   browser attaches a truthful `Origin` (and/or `Sec-Fetch-Site`) that it will
+///   not let script forge. A mutating request whose `Origin` is a different
+///   authority, or which is tagged `Sec-Fetch-Site: cross-site`/`same-site`, is
+///   refused. Requests from non-browser tooling (curl, the CLI) send neither
+///   header and are allowed — they are not confused deputies.
+fn request_is_local(head: &str, method: &str, authorities: &[String]) -> bool {
+    // Host must be one of ours (or absent, as in HTTP/1.0 — then the other
+    // checks still apply). A present-but-foreign Host is a rebinding attempt.
+    if let Some(host) = header_val(head, "host") {
+        if !authorities.iter().any(|a| a == host) {
+            return false;
+        }
+    }
+    // Reads (GET/HEAD) are not state-changing; the Host check above is enough to
+    // stop rebinding from turning them same-origin.
+    if method != "GET" && method != "HEAD" {
+        if let Some(origin) = header_val(head, "origin") {
+            // "null" (sandboxed/opaque origin) never matches — refuse it.
+            match authority_of(origin) {
+                Some(a) if authorities.iter().any(|x| x == a) => {}
+                _ => return false,
+            }
+        }
+        if let Some(site) = header_val(head, "sec-fetch-site") {
+            if site.eq_ignore_ascii_case("cross-site") || site.eq_ignore_ascii_case("same-site") {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Security headers sent on every response. The page is one self-contained file
 /// with inline script/style and only same-origin fetches (incl. the `/api/stream`
 /// EventSource) — lock everything else down so an injected string can't pull in
@@ -3540,6 +3628,7 @@ async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) ->
     let reason = match code {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
@@ -3559,9 +3648,70 @@ async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{typing_text, TYPING_FRESH_MS};
+    use super::{loopback_authorities, request_is_local, typing_text, TYPING_FRESH_MS};
 
     const NOW: u64 = 1_000_000;
+
+    fn head(lines: &[&str]) -> String {
+        // Request line + headers, as `serve_conn` sees them.
+        let mut s = String::from("POST /api/contact HTTP/1.1\r\n");
+        for l in lines {
+            s.push_str(l);
+            s.push_str("\r\n");
+        }
+        s.push_str("\r\n");
+        s
+    }
+
+    #[test]
+    fn csrf_guard_allows_the_legit_spa_and_local_tooling() {
+        let auth = loopback_authorities(8080);
+        // Same-origin browser POST from the served page.
+        assert!(request_is_local(
+            &head(&["Host: 127.0.0.1:8080", "Origin: http://127.0.0.1:8080", "Sec-Fetch-Site: same-origin"]),
+            "POST",
+            &auth,
+        ));
+        // The user typed `localhost` in the address bar.
+        assert!(request_is_local(
+            &head(&["Host: localhost:8080", "Origin: http://localhost:8080"]),
+            "POST",
+            &auth,
+        ));
+        // curl / CLI: correct Host, no Origin, no Sec-Fetch-Site.
+        assert!(request_is_local(&head(&["Host: 127.0.0.1:8080"]), "POST", &auth));
+    }
+
+    #[test]
+    fn csrf_guard_blocks_cross_origin_and_rebinding() {
+        let auth = loopback_authorities(8080);
+        // Plain CSRF: real Host, foreign Origin.
+        assert!(!request_is_local(
+            &head(&["Host: 127.0.0.1:8080", "Origin: https://evil.example"]),
+            "POST",
+            &auth,
+        ));
+        // Plain CSRF that omits Origin but is tagged cross-site by the browser.
+        assert!(!request_is_local(
+            &head(&["Host: 127.0.0.1:8080", "Sec-Fetch-Site: cross-site"]),
+            "POST",
+            &auth,
+        ));
+        // DNS rebinding: attacker domain resolved to loopback → foreign Host.
+        assert!(!request_is_local(
+            &head(&["Host: evil.example", "Origin: http://evil.example"]),
+            "POST",
+            &auth,
+        ));
+        // A rebound GET (reads) is refused too, on the Host check alone.
+        assert!(!request_is_local(&head(&["Host: evil.example"]), "GET", &auth));
+        // Opaque/sandboxed origin must not slip through.
+        assert!(!request_is_local(
+            &head(&["Host: 127.0.0.1:8080", "Origin: null"]),
+            "POST",
+            &auth,
+        ));
+    }
 
     fn e(names: &[&str], age: u64) -> Vec<(String, u64)> {
         names

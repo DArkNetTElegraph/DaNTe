@@ -771,6 +771,18 @@ async fn a_channel_reply_carries_its_target_seq() {
     assert_eq!(edits.len(), 1);
     assert_eq!(edits[0].target_seq, reply_seq);
     assert_eq!(edits[0].text.as_deref(), Some("me too!"));
+
+    // Search finds both the DM and the channel text, newest first.
+    host.send_dm(&alice_id, "lunch tomorrow?", now)
+        .await
+        .unwrap();
+    alice.receive(now).await.unwrap();
+    let hits = alice.search("tomorrow", 10);
+    assert_eq!(hits.len(), 1);
+    assert!(!hits[0].is_channel && hits[0].text.contains("tomorrow"));
+    let chan_hits = alice.search("me", 10);
+    assert!(chan_hits.iter().any(|h| h.is_channel && h.text == "me!"));
+    assert!(alice.search("nothing-matches-xyz", 10).is_empty());
 }
 
 #[tokio::test]

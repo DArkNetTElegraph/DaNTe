@@ -241,6 +241,11 @@ enum Cmd {
     },
     /// The channel group calls as a ready JSON array.
     GroupCalls { reply: oneshot::Sender<String> },
+    /// Search stored DM + channel text; reply is a ready JSON array.
+    Search {
+        q: String,
+        reply: oneshot::Sender<String>,
+    },
     /// `start` | `join` | `leave` a channel's group call.
     GroupCall {
         channel: String,
@@ -420,6 +425,31 @@ fn hex_bytes(s: &str) -> Option<Vec<u8>> {
             Some(((hi << 4) | lo) as u8)
         })
         .collect()
+}
+
+/// Minimal `application/x-www-form-urlencoded` value decode (`+` and `%XX`).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                let h = (b[i + 1] as char).to_digit(16);
+                let l = (b[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (h, l) {
+                    out.push(((h << 4) | l) as u8);
+                    i += 2;
+                } else {
+                    out.push(b'%');
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Label for a channel sender (bytes are already an `IdentityId`).
@@ -1477,6 +1507,23 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let rows: Vec<_> = shared.group_calls.lock().await.values().cloned().collect();
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
         }
+        Cmd::Search { q, reply } => {
+            let rows: Vec<_> = engine
+                .search(&q, 100)
+                .into_iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "channel": h.is_channel,
+                        "scope": if h.is_channel { id_b32(&h.scope) } else { short_fp(&h.scope_idk) },
+                        "scope_name": h.scope_name,
+                        "from": if h.outgoing { "you".to_string() } else { short_id(&h.sender) },
+                        "text": h.text,
+                        "ts_ms": h.ts_ms,
+                    })
+                })
+                .collect();
+            let _ = reply.send(serde_json::Value::Array(rows).to_string());
+        }
         Cmd::GroupCall {
             channel,
             action,
@@ -2269,6 +2316,20 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 .await
                 .is_err()
             {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/search") => {
+            let q = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("q="))
+                .map(percent_decode)
+                .unwrap_or_default();
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::Search { q, reply: tx }).await.is_err() {
                 return respond(&mut stream, 500, "text/plain", b"engine gone").await;
             }
             let body = rx.await.unwrap_or_else(|_| "[]".into());

@@ -77,6 +77,27 @@ struct MsgEdit {
     deleted: bool,
 }
 
+/// One hit from [`Engine::search`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    /// True for a channel message, false for a DM.
+    pub is_channel: bool,
+    /// `IdentityId` of the DM peer, or the `channel_id`.
+    pub scope: [u8; 32],
+    /// The DM peer's Ed25519 key (zero for a channel hit).
+    pub scope_idk: [u8; 32],
+    /// Channel display name (empty for a DM hit).
+    pub scope_name: String,
+    /// Sender: `IdentityId` bytes (the DM peer, or the channel member).
+    pub sender: [u8; 32],
+    /// Whether we sent it.
+    pub outgoing: bool,
+    /// The matching message text.
+    pub text: String,
+    /// Wall-clock time (Unix ms).
+    pub ts_ms: u64,
+}
+
 /// A live edit/delete the UI folds into its view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelEdit {
@@ -633,6 +654,63 @@ impl Engine {
     /// first.
     pub fn channel_history(&self) -> &[ChannelHistoryEntry] {
         &self.channel_history
+    }
+
+    /// Case-insensitive substring search across stored DM and channel text,
+    /// newest first, at most `limit` hits.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut hits: Vec<SearchHit> = Vec::new();
+
+        for e in self.history.iter().rev() {
+            if let HistoryKind::Text(t) = &e.kind {
+                if t.to_lowercase().contains(&q) {
+                    hits.push(SearchHit {
+                        is_channel: false,
+                        scope: idk_to_id(&e.peer_idk),
+                        scope_idk: e.peer_idk,
+                        scope_name: String::new(),
+                        sender: idk_to_id(&e.peer_idk),
+                        outgoing: e.outgoing,
+                        text: t.clone(),
+                        ts_ms: e.ts_ms,
+                    });
+                    if hits.len() >= limit {
+                        return hits;
+                    }
+                }
+            }
+        }
+
+        let names: HashMap<[u8; 32], String> = self
+            .channels
+            .values()
+            .map(|c| (c.info.channel_id, c.info.channel_name.clone()))
+            .collect();
+        for e in self.channel_history.iter().rev() {
+            if e.text.to_lowercase().contains(&q) {
+                hits.push(SearchHit {
+                    is_channel: true,
+                    scope: e.channel_id,
+                    scope_idk: [0u8; 32],
+                    scope_name: names.get(&e.channel_id).cloned().unwrap_or_default(),
+                    sender: e.sender,
+                    outgoing: e.outgoing,
+                    text: e.text.clone(),
+                    ts_ms: e.ts_ms,
+                });
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        hits.sort_by_key(|h| std::cmp::Reverse(h.ts_ms));
+        hits.truncate(limit);
+        hits
     }
 
     /// Flush state to the store file if anything changed since the last flush.

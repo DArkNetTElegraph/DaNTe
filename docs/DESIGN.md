@@ -115,6 +115,16 @@ achievable with no project-run infrastructure.
   Non-unique, unverified — a display convenience. The SPA resolves a name as
   petname → username → block-id prefix, and the bottom-left chip shows the
   username big with the block-id small beneath it.
+- **Emoji *(done)*:** channels no longer take a password (only a whole server
+  has a join password — dropped from `POST /api/channel`, `Cmd::CreateChannel`,
+  the `/channel` CLI arg, and the SPA modal). Reactions and the composer use a
+  categorised emoji picker (`openEmojiPicker`, phone-keyboard style) instead of
+  a text field; the composer's emoji button sits opposite the file-attach
+  button. Custom server emoji: PNG/JPEG only, ≤1 MiB (magic-byte checked in
+  `Engine::set_server_emoji`), rendered inline at `--emoji-size` (20px). UI
+  chrome uses inline monochrome stroke icons (`ICONS`/`svgIcon`/`paintIcons`,
+  `data-icon` attrs); emoji now appear only in message content, reactions, and
+  the picker.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 

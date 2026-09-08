@@ -507,6 +507,12 @@ pub struct Engine {
     #[cfg(feature = "p2p")]
     p2p: Option<crate::p2p::P2p>,
     pow: Difficulty,
+    /// Position in the relay's ordered record log that the next [`sync`] should
+    /// resume from. Tracked separately from `ledger.len()` because records can
+    /// also enter the local replica out of band (gossip, feature `p2p`), which
+    /// would otherwise make `sync` skip relay records. Not persisted — the
+    /// ledger replica is rebuilt from the relay on each start.
+    relay_ledger_cursor: u64,
     last_fetch_since_ms: u64,
     last_announce_ms: u64,
     store_path: Option<PathBuf>,
@@ -578,6 +584,7 @@ impl Engine {
             #[cfg(feature = "p2p")]
             p2p: None,
             pow,
+            relay_ledger_cursor: 0,
             last_fetch_since_ms: 0,
             last_announce_ms: 0,
             store_path,
@@ -951,13 +958,14 @@ impl Engine {
     /// Pull new ledger records from the relay into the local replica. Returns
     /// how many were accepted.
     pub async fn sync(&mut self, now_ms: u64) -> Result<u64, CoreError> {
-        let local = self.ledger.len() as u64;
+        let from = self.relay_ledger_cursor;
         let ledger = &mut self.ledger;
-        let (_fetched, accepted) =
-            sync::pull_records(&mut self.client, local, now_ms, 256, |rec: Record, now| {
+        let (new_cursor, accepted) =
+            sync::pull_records(&mut self.client, from, now_ms, 256, |rec: Record, now| {
                 ledger.append(rec, now).is_ok()
             })
             .await?;
+        self.relay_ledger_cursor = new_cursor;
         Ok(accepted)
     }
 
@@ -968,6 +976,7 @@ impl Engine {
         let rec = IdentityAnnounce::build(&self.identity, display_hint, self.pow)
             .to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
+        self.gossip_record(&rec).await;
         self.last_announce_ms = now_ms;
         self.dirty = true;
         Ok(())
@@ -978,6 +987,7 @@ impl Engine {
         let rec = LivenessProof::build(&self.identity, now_ms, self.pow)
             .to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
+        self.gossip_record(&rec).await;
         self.last_announce_ms = now_ms;
         self.dirty = true;
         Ok(())
@@ -994,8 +1004,40 @@ impl Engine {
     ) -> Result<(), CoreError> {
         let rec = IdentityRevoke::build(&self.identity, reason).to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
+        self.gossip_record(&rec).await;
         self.dirty = true;
         Ok(())
+    }
+
+    /// Fan a just-submitted ledger record out to peers over gossipsub. No-op
+    /// unless the `p2p` feature is on and a node is running.
+    async fn gossip_record(&self, rec: &Record) {
+        #[cfg(feature = "p2p")]
+        if let Some(p2p) = &self.p2p {
+            p2p.publish_ledger(rec.encode()).await;
+        }
+        #[cfg(not(feature = "p2p"))]
+        let _ = rec;
+    }
+
+    /// Fold ledger records heard from peers over gossipsub into the local
+    /// replica. Returns how many were newly accepted. Best-effort; the relay
+    /// [`sync`](Engine::sync) remains the authoritative path. Feature `p2p`.
+    #[cfg(feature = "p2p")]
+    pub async fn poll_p2p(&mut self, now_ms: u64) -> u64 {
+        let blobs = match self.p2p.as_mut() {
+            Some(p2p) => p2p.drain_ledger_records(),
+            None => return 0,
+        };
+        let mut accepted = 0;
+        for blob in blobs {
+            if let Ok(rec) = Record::decode(&blob) {
+                if self.ledger.append(rec, now_ms).is_ok() {
+                    accepted += 1;
+                }
+            }
+        }
+        accepted
     }
 
     /// Whether the ledger has seen a revocation for `idk` (any key in its

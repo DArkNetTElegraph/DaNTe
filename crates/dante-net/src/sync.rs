@@ -9,10 +9,14 @@ use crate::{
     wire::{IceCfg, Request, Response},
 };
 
-/// Pull records the relay has that we don't, and feed them to `apply`.
+/// Pull records the relay has that we don't, starting from log position
+/// `local_len`, and feed them to `apply`.
 ///
 /// `apply(record, now_ms)` should run the ledger's acceptance rules and return
-/// `true` if the record was accepted. Returns `(fetched, accepted)`.
+/// `true` if the record was accepted. Returns `(new_cursor, accepted)`, where
+/// `new_cursor` is the relay-log position the caller should resume from next
+/// time — advance a persisted cursor to it, don't derive one from the local
+/// ledger length (records can also arrive out of band, e.g. over gossip).
 pub async fn pull_records<F>(
     client: &mut Client,
     local_len: u64,
@@ -28,10 +32,10 @@ where
         _ => return Err(NetError::UnexpectedResponse("GetTreeHead")),
     };
     if size <= local_len {
-        return Ok((0, 0));
+        return Ok((local_len, 0));
     }
 
-    let (mut fetched, mut accepted) = (0u64, 0u64);
+    let mut accepted = 0u64;
     let mut from = local_len;
     while from < size {
         let to = (from + batch).min(size);
@@ -43,7 +47,6 @@ where
             break;
         }
         for blob in blobs {
-            fetched += 1;
             if let Ok(rec) = Record::decode(&blob) {
                 if apply(rec, now_ms) {
                     accepted += 1;
@@ -52,7 +55,7 @@ where
         }
         from = to;
     }
-    Ok((fetched, accepted))
+    Ok((from, accepted))
 }
 
 /// Submit one encoded record to the relay for ledger acceptance.

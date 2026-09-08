@@ -843,6 +843,56 @@ async fn the_dht_serves_as_a_prekey_directory_fallback() {
     let _ = bob_id;
 }
 
+#[cfg(feature = "p2p")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_learns_an_identity_from_ledger_gossip() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_idk = alice.identity().sign_public().to_bytes();
+
+    let alice_addrs = alice.enable_p2p("/ip4/127.0.0.1/tcp/0", &[]).await.unwrap();
+    bob.enable_p2p("/ip4/127.0.0.1/tcp/0", &alice_addrs)
+        .await
+        .unwrap();
+
+    // Give gossipsub a moment to form the mesh.
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+    // Bob never syncs from the relay in this test.
+    assert!(!bob.knows(&alice_idk), "bob starts out not knowing alice");
+
+    // Alice announces (relay + gossip).
+    alice.announce("alice", now).await.unwrap();
+
+    // Bob hears it over gossip and folds it into his replica.
+    let mut learned = false;
+    for _ in 0..30 {
+        let _ = bob.poll_p2p(now).await;
+        if bob.knows(&alice_idk) {
+            learned = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    assert!(learned, "bob learned alice's identity from ledger gossip");
+
+    // The relay sync cursor is independent of gossip appends. Alice proves
+    // liveness (relay only, as far as Bob is concerned — he won't poll_p2p
+    // again). Bob's replica already holds Alice's announce from gossip, but a
+    // sync must still re-scan the relay log from position 0 and pick up the new
+    // liveness record rather than skip it because `ledger.len()` grew.
+    let later = now + 60_000;
+    alice.prove_liveness(later).await.unwrap();
+    let accepted = bob.sync(later).await.unwrap();
+    assert_eq!(
+        accepted, 1,
+        "sync picks up the liveness record (announce is a harmless dup)"
+    );
+    assert!(bob.knows(&alice_idk));
+}
+
 #[tokio::test]
 async fn a_direct_message_can_be_edited_and_deleted_by_its_sender() {
     let now = now_ms();

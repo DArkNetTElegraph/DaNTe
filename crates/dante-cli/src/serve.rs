@@ -828,6 +828,8 @@ async fn engine_task(
 
             _ = tick.tick() => {
                 let now = now_ms();
+                #[cfg(feature = "p2p")]
+                let _ = engine.poll_p2p(now).await;
                 let _ = engine.sync(now).await;
 
                 if let Ok(msgs) = engine.poll_channels(now).await {

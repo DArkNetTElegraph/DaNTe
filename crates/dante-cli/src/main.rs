@@ -409,6 +409,8 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
             _ = save_tick.tick() => { let _ = engine.persist(); }
             _ = tick.tick() => {
                 let now = now_ms();
+                #[cfg(feature = "p2p")]
+                let _ = engine.poll_p2p(now).await;
                 let _ = engine.sync(now).await;
                 match engine.poll_channels(now).await {
                     Ok(msgs) => for m in msgs {

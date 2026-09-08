@@ -32,17 +32,31 @@ achievable with no project-run infrastructure.
 - **Groups** (`dante-group`): sender-keys channel ratchet (FS within a chain,
   removed-member lockout, insider-forgery resistance; **no PCS** — MLS migration
   planned).
-- **MLS groundwork** (`crates/dante-mls`): thin OpenMLS 0.9 (RFC 9420) wrapper
-  — `Member::{create, publish_key_package, add, remove, encrypt, process}`,
+- **MLS** (`crates/dante-mls`): thin OpenMLS 0.9 (RFC 9420) wrapper —
+  `Member::{create, publish_key_package, add, remove, encrypt, process}`,
   `Member::call_key` (the per-epoch group-call media key every member derives
   identically and that rotates on each membership change), and
   `Member::{export, import}` (whole-member byte blob for DaNTe's encrypted
-  local state, so a call / channel survives a restart). A normal workspace
-  member — `rust-version = 1.91` per-crate (OpenMLS's floor), one build-time
-  advisory (`RUSTSEC-2026-0173`, unmaintained proc-macro) allow-listed in
-  `deny.toml`. Not yet driven by `dante-core`: still needs a relay MLS
-  KeyPackage directory, an `Engine` group-call state machine, and the N-party
-  media mesh.
+  local state). Workspace MSRV is 1.91 (OpenMLS's floor); one build-time
+  advisory (`RUSTSEC-2026-0173`, unmaintained proc-macro) is allow-listed in
+  `deny.toml`. Drives group calls today; the channel-messaging migration off
+  the sender-keys ratchet is still pending.
+- **Group calls *(done — 1:1-mesh + MLS key)*:** a channel group call is an
+  MLS group for a shared media key (`Engine::group_call_key`, rotates on every
+  join/leave) plus a full mesh of the existing 1:1 `Call`s for the media. The
+  relay keeps an **MLS KeyPackage directory** (`PublishKeyPackage` /
+  `GetKeyPackage`, mirrors the prekey dir). `Engine::start_group_call` creates
+  the group, adds every roster member with a published KeyPackage, DMs the
+  Welcome (`Content::GroupCallWelcome`), and opens a leg to each (glare-free:
+  the lower identity id offers, the higher auto-accepts). `join_group_call` /
+  `leave_group_call` (a leaver's `GroupCallLeave` → the lowest-id remaining
+  member commits the removal → `GroupCallCommit` fan-out). `dante serve`
+  `GET /api/groupcalls`, `POST /api/groupcall/{start,join,leave}`; SPA has a
+  📞👥 header button, a group-call bar, and an invite toast. CLI:
+  `/groupcall start|join|leave #<channel>`. e2e-tested (three members share one
+  key off one Welcome; it rotates when one leaves) and smoke-tested across two
+  `dante serve` instances (mesh legs reach `connected`). Media key is not yet
+  applied as an SFrame layer — the mesh legs' own DTLS-SRTP protects the audio.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 
@@ -382,15 +396,15 @@ infrastructure. Reached. ---**
   `connected`, captures + Opus-encodes with `dante-audio` and exchanges frames
   with the co-hosted `dante-cli` service over `POST` / `GET /api/call/audio`
   (the `POST` grew a `frames_hex: [..]` batch form so a burst flushes in one
-  round-trip). The mic opens only for the duration of a call. `dante-audio` is
-  a dependency of the (detached) desktop crate, never of `dante-cli`, so the
-  CI gate never links libopus/cpal.
-- **Still to build:** screen share; group calls. The media-key half is
-  prototyped — `dante_mls::Member::call_key` exports a per-epoch group secret
-  that rekeys on every join/leave — but it needs the channel MLS migration
-  under it and an N-party mix/SFU path.
-- Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
-- SFU role in the server relay above ~5 participants; full mesh below.
+  round-trip). It drives **every** `connected` leg — one for a 1:1 call, the
+  whole mesh for a group call — encoding the mic once and playing a summed mix
+  of the per-leg decoders. `dante-audio` is a dependency of the (detached)
+  desktop crate, never of `dante-cli`, so the CI gate never links libopus/cpal.
+- **Still to build:** screen share; an SFrame layer that applies
+  `group_call_key` to the media so an SFU can forward without decrypting; the
+  channel-messaging MLS migration (group calls already use MLS).
+- Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).
+- SFU role in the server relay above ~5 participants; full mesh below (mesh done).
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.
   Sources: full display, single window, and "follow the active screen" (see `IDEAS.md`).
 - Noise suppression: RNNoise, client-side.

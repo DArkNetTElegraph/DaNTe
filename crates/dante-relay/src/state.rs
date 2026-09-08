@@ -29,6 +29,9 @@ pub struct Limits {
     pub record: (f64, f64),
     /// Envelope deposits.
     pub deposit: (f64, f64),
+    /// Read/query endpoints (fetches, log/blob reads, tree head). These return
+    /// far more than they cost to request, so they need a ceiling of their own.
+    pub read: (f64, f64),
 }
 
 impl Default for Limits {
@@ -40,6 +43,10 @@ impl Default for Limits {
             record: (30.0, 0.5),
             // 60 / minute.
             deposit: (120.0, 1.0),
+            // Reads are frequent and legitimate (poll loops), so keep this
+            // generous: a 240 burst, 60 / second sustained. Enough that no
+            // honest client notices, low enough to cap amplification abuse.
+            read: (240.0, 60.0),
         }
     }
 }
@@ -87,6 +94,7 @@ pub struct RelayState {
     announce_rl: KeyedRateLimiter<IpAddr>,
     record_rl: KeyedRateLimiter<IpAddr>,
     deposit_rl: KeyedRateLimiter<IpAddr>,
+    read_rl: KeyedRateLimiter<IpAddr>,
     max_get_records: u64,
     ice: IcePolicy,
     /// libp2p bootstrap multiaddrs handed to clients: operator-seeded entries
@@ -158,6 +166,7 @@ impl RelayState {
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
             deposit_rl: KeyedRateLimiter::new(limits.deposit.0, limits.deposit.1),
+            read_rl: KeyedRateLimiter::new(limits.read.0, limits.read.1),
             max_get_records: 512,
             ice: IcePolicy::default(),
             p2p_seed: Vec::new(),
@@ -189,6 +198,7 @@ impl RelayState {
             &mut self.announce_rl,
             &mut self.record_rl,
             &mut self.deposit_rl,
+            &mut self.read_rl,
         ] {
             rl.sweep(now, 3_600_000);
         }
@@ -231,6 +241,9 @@ impl RelayState {
             Request::Ping => Response::Pong,
 
             Request::GetTreeHead => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
                 let h = self.ledger.head();
                 Response::TreeHead {
                     size: h.size,
@@ -239,6 +252,9 @@ impl RelayState {
             }
 
             Request::GetRecords { from, to } => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
                 let len = self.ledger.len() as u64;
                 let from = from.min(len);
                 let to = to.min(len).min(from + self.max_get_records);
@@ -283,6 +299,9 @@ impl RelayState {
             }
 
             Request::Fetch { hints, since_ms } => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
                 let hints: Vec<[u8; 8]> = hints.into_iter().take(32).collect();
                 let envs = self
                     .mailbox
@@ -319,6 +338,9 @@ impl RelayState {
             }
 
             Request::GetPrekeys(id) => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
                 // Hand out at most one one-time prekey per fetch and shrink our
                 // stored copy, so two initiators never receive the same OTP
                 // (which would make the second X3DH handshake fail). When the
@@ -370,6 +392,9 @@ impl RelayState {
             }
 
             Request::GetKeyPackage(id) => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
                 let out = match self.key_packages.get_mut(&id) {
                     // More than one queued: consume the oldest.
                     Some(q) if q.len() > 1 => q.pop_front(),
@@ -395,7 +420,12 @@ impl RelayState {
                 Response::Ok
             }
 
-            Request::GetBlob(hash) => Response::Blob(self.blobs.get(&hash).map(|(b, _)| b.clone())),
+            Request::GetBlob(hash) => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                Response::Blob(self.blobs.get(&hash).map(|(b, _)| b.clone()))
+            }
 
             Request::PostToChannel { channel_id, blob } => {
                 if !self.deposit_rl.check(&ip, now, 1.0) {
@@ -433,6 +463,9 @@ impl RelayState {
                 channel_id,
                 since_seq,
             } => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
                 // Cap the reply so a large log can't build an unsendable frame.
                 let mut used = 0usize;
                 let out = self
@@ -860,6 +893,25 @@ mod tests {
         }
         s.maintain(1_000 + SIGNAL_TTL_MS + 1);
         assert!(s.signals.is_empty());
+    }
+
+    #[test]
+    fn read_endpoints_are_rate_limited() {
+        let mut s = state();
+        let (cap, _) = Limits::default().read;
+        // Drain the burst with cheap reads at a single instant...
+        let mut ok = 0;
+        for _ in 0..(cap as usize) {
+            if !matches!(s.handle(Request::GetTreeHead, IP, 1_000), Response::Error(_)) {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, cap as usize);
+        // ...the next same-instant read is refused.
+        assert!(matches!(
+            s.handle(Request::GetBlob([0u8; 32]), IP, 1_000),
+            Response::Error(_)
+        ));
     }
 
     #[test]

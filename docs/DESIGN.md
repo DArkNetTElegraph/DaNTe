@@ -450,6 +450,12 @@ infrastructure. Reached. ---**
   deleted)`, and hover ✎/🗑 on your own lines. CLI `/edit` `/delete`. Same
   restart caveat as reactions (authorship of a pre-restart message isn't
   re-derivable).
+- **Replies** *(done)*: `Content::Reply { target_seq, text }` rides the channel
+  log — an ordinary editable/deletable message that also carries the `seq` it
+  answers. `ChannelMessage.reply_to: Option<u64>`;
+  `Engine::send_channel_reply`. `serve` `POST /api/send` takes an optional
+  `reply_to`; the SPA has a ↩ hover action → a reply bar over the composer and
+  a quoted line above the reply; CLI `/reply #<chan> <seq> <text>`.
 - **Custom per-server emoji** *(done)*: `ServerPolicy` gained an `emojis:
   Vec<(shortcode, [u8;32])>` tail field (back-compat: only written when
   non-empty, so pre-emoji signatures still verify). `Engine::set_server_emoji`

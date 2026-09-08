@@ -79,6 +79,8 @@ pub struct RelayState {
     /// `channel_id` -> the channel's append-only log. Opaque E2E channel
     /// messages; the relay never reads them.
     channels: std::collections::HashMap<[u8; 32], ChannelLog>,
+    /// Running total of channel-log blob bytes, bounded by [`CHANNEL_STORE_CAP`].
+    channel_bytes: usize,
     /// `topic` -> ephemeral signals `(blob, deposited_ms)`. Typing indicators
     /// and the like: never persisted, swept aggressively by TTL.
     signals: std::collections::HashMap<[u8; 32], Vec<(Vec<u8>, u64)>>,
@@ -118,6 +120,24 @@ const MAX_SIGNAL_BYTES: usize = 4 * 1024;
 const MAX_KEYPKGS_PER_IDENTITY: usize = 32;
 /// Largest accepted MLS KeyPackage.
 const MAX_KEYPKG_BYTES: usize = 16 * 1024;
+/// Largest accepted published `PreKeyBundle`. Also bounds the allocation a
+/// later `GetPrekeys` decode can be driven to (the decoder reserves per the
+/// bundle's own length fields), so an oversized bundle can't be an OOM lever.
+const MAX_PREKEY_BYTES: usize = 16 * 1024;
+/// Cap on distinct identities holding a stored prekey bundle. The key is
+/// unauthenticated (an attacker picks arbitrary ids), so bound the map.
+const MAX_PREKEY_IDENTITIES: usize = 100_000;
+/// Cap on distinct identities holding stored MLS KeyPackages.
+const MAX_KEYPKG_IDENTITIES: usize = 100_000;
+/// Cap on distinct channels the relay logs for.
+const MAX_CHANNELS: usize = 100_000;
+/// Largest accepted single channel-log frame.
+const MAX_CHANNEL_BLOB_BYTES: usize = 1024 * 1024;
+/// Global budget across all channel logs. 128 MiB.
+const CHANNEL_STORE_CAP: usize = 128 * 1024 * 1024;
+/// Byte budget for one `FetchChannel` reply, kept under the transport frame cap
+/// so a full channel can't build an unsendable response.
+const MAX_CHANNEL_FETCH_BYTES: usize = 7 * 1024 * 1024;
 
 /// `(next_seq, entries)` where each entry is `(seq, blob, ts_ms)`.
 type ChannelLog = (u64, Vec<(u64, Vec<u8>, u64)>);
@@ -133,6 +153,7 @@ impl RelayState {
             blobs: std::collections::HashMap::new(),
             blob_bytes: 0,
             channels: std::collections::HashMap::new(),
+            channel_bytes: 0,
             signals: std::collections::HashMap::new(),
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
@@ -185,6 +206,14 @@ impl RelayState {
             entries.retain(|(_, _, ts)| now.saturating_sub(*ts) <= BLOB_TTL_MS);
         }
         self.channels.retain(|_, (_, entries)| !entries.is_empty());
+        // Resync the byte counter from the surviving entries (authoritative, so
+        // incremental drift can't accumulate).
+        self.channel_bytes = self
+            .channels
+            .values()
+            .flat_map(|(_, entries)| entries.iter())
+            .map(|(_, blob, _)| blob.len())
+            .sum();
 
         self.p2p_reported
             .retain(|(_, ts)| now.saturating_sub(*ts) <= P2P_REPORTED_TTL_MS);
@@ -268,10 +297,20 @@ impl RelayState {
                 if !self.record_rl.check(&ip, now, 1.0) {
                     return Response::Error("rate limited".into());
                 }
+                if blob.len() > MAX_PREKEY_BYTES {
+                    return Response::Error("prekey bundle too large".into());
+                }
                 // The bundle's `identity_id` is its first 32 bytes; the relay
                 // stores the blob opaquely and the recipient re-validates.
                 match blob.get(..32).and_then(|s| <[u8; 32]>::try_from(s).ok()) {
                     Some(id) => {
+                        // Refuse a brand-new id once the map is full; an
+                        // existing id may always refresh its own bundle.
+                        if !self.prekeys.contains_key(&id)
+                            && self.prekeys.len() >= MAX_PREKEY_IDENTITIES
+                        {
+                            return Response::Error("prekey directory full".into());
+                        }
                         self.prekeys.insert(id, blob);
                         Response::Ok
                     }
@@ -315,6 +354,11 @@ impl RelayState {
                 {
                     return Response::Error("bad key package".into());
                 }
+                if !self.key_packages.contains_key(&identity)
+                    && self.key_packages.len() >= MAX_KEYPKG_IDENTITIES
+                {
+                    return Response::Error("key package directory full".into());
+                }
                 let q = self.key_packages.entry(identity).or_default();
                 for kp in key_packages {
                     q.push_back(kp);
@@ -357,15 +401,31 @@ impl RelayState {
                 if !self.deposit_rl.check(&ip, now, 1.0) {
                     return Response::Error("rate limited".into());
                 }
+                if blob.len() > MAX_CHANNEL_BLOB_BYTES {
+                    return Response::Error("channel frame too large".into());
+                }
+                if !self.channels.contains_key(&channel_id)
+                    && self.channels.len() >= MAX_CHANNELS
+                {
+                    return Response::Error("channel directory full".into());
+                }
+                if self.channel_bytes.saturating_add(blob.len()) > CHANNEL_STORE_CAP {
+                    return Response::Error("channel store full".into());
+                }
+                let added = blob.len();
                 let (next_seq, entries) =
                     self.channels.entry(channel_id).or_insert((1, Vec::new()));
                 let seq = *next_seq;
                 *next_seq += 1;
                 entries.push((seq, blob, now));
+                let mut removed = 0usize;
                 if entries.len() > MAX_CHANNEL_ENTRIES {
                     let excess = entries.len() - MAX_CHANNEL_ENTRIES;
-                    entries.drain(..excess);
+                    for (_, b, _) in entries.drain(..excess) {
+                        removed += b.len();
+                    }
                 }
+                self.channel_bytes = self.channel_bytes.saturating_add(added) - removed;
                 Response::Posted(seq)
             }
 
@@ -373,6 +433,8 @@ impl RelayState {
                 channel_id,
                 since_seq,
             } => {
+                // Cap the reply so a large log can't build an unsendable frame.
+                let mut used = 0usize;
                 let out = self
                     .channels
                     .get(&channel_id)
@@ -380,6 +442,10 @@ impl RelayState {
                         entries
                             .iter()
                             .filter(|(seq, _, _)| *seq > since_seq)
+                            .take_while(|(_, blob, _)| {
+                                used += blob.len();
+                                used <= MAX_CHANNEL_FETCH_BYTES
+                            })
                             .map(|(seq, blob, _)| (*seq, blob.clone()))
                             .collect()
                     })
@@ -794,6 +860,62 @@ mod tests {
         }
         s.maintain(1_000 + SIGNAL_TTL_MS + 1);
         assert!(s.signals.is_empty());
+    }
+
+    #[test]
+    fn oversized_prekey_and_channel_frames_are_rejected() {
+        let mut s = state();
+        // A prekey bundle above the cap is refused, so a later GetPrekeys can't
+        // be driven to over-allocate on decode.
+        assert!(matches!(
+            s.handle(Request::PublishPrekeys(vec![0u8; MAX_PREKEY_BYTES + 1]), IP, 0),
+            Response::Error(_)
+        ));
+        // An over-large channel frame is refused up front.
+        assert!(matches!(
+            s.handle(
+                Request::PostToChannel {
+                    channel_id: [1u8; 32],
+                    blob: vec![0u8; MAX_CHANNEL_BLOB_BYTES + 1],
+                },
+                IP,
+                0,
+            ),
+            Response::Error(_)
+        ));
+    }
+
+    #[test]
+    fn channel_bytes_accounting_stays_consistent() {
+        let mut s = state();
+        let ch = [9u8; 32];
+        for _ in 0..3u64 {
+            assert!(matches!(
+                s.handle(
+                    Request::PostToChannel {
+                        channel_id: ch,
+                        blob: vec![7u8; 1000],
+                    },
+                    IP,
+                    1_000,
+                ),
+                Response::Posted(_)
+            ));
+        }
+        assert_eq!(s.channel_bytes, 3000);
+        // A FetchChannel returns the log without disturbing the counter.
+        let _ = s.handle(
+            Request::FetchChannel {
+                channel_id: ch,
+                since_seq: 0,
+            },
+            IP,
+            2_000,
+        );
+        assert_eq!(s.channel_bytes, 3000);
+        // After the retention window, maintain resyncs it to zero.
+        s.maintain(1_000 + BLOB_TTL_MS + 1);
+        assert_eq!(s.channel_bytes, 0);
     }
 
     #[test]

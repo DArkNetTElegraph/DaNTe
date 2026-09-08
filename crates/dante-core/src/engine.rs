@@ -205,6 +205,9 @@ pub(crate) struct ChannelSession {
     /// Members the host has ejected: `member -> when (Unix ms)`. Used to hide
     /// their still-cached backlog messages after removal.
     pub removed: HashMap<[u8; 32], u64>,
+    /// Outer AEAD key wrapping every log frame, for a password-protected
+    /// channel. `None` = unprotected (frames posted raw).
+    pub log_key: Option<[u8; 32]>,
 }
 
 impl ChannelSession {
@@ -488,6 +491,7 @@ impl Engine {
                         roster: c.roster.into_iter().collect(),
                         last_seq: c.last_seq,
                         removed,
+                        log_key: c.log_key,
                     },
                 );
             }
@@ -611,6 +615,7 @@ impl Engine {
                     mls: c.mls.export().unwrap_or_default(),
                     roster: c.roster.iter().copied().collect(),
                     last_seq: c.last_seq,
+                    log_key: c.log_key,
                 })
                 .collect(),
             hosted: self
@@ -1321,11 +1326,16 @@ impl Engine {
     }
 
     /// Create a channel in a server this client hosts. Returns the channel id.
+    ///
+    /// `password`, if given, content-protects the channel: every relay-log
+    /// frame is wrapped in an outer AEAD keyed by `Argon2id(password)`, so the
+    /// `channel_id` alone (e.g. leaked to a relay) does not grant read access.
     pub fn create_channel(
         &mut self,
         server_root: &[u8; 32],
         name: &str,
         private: bool,
+        password: Option<&str>,
     ) -> Result<[u8; 32], CoreError> {
         let server_name = self
             .hosted
@@ -1336,6 +1346,9 @@ impl Engine {
         let channel_id = random_array::<32>();
         let me = self.my_member_id();
         let mls = mls::Member::create(&me, &channel_id).map_err(mls_err)?;
+        let log_key = password
+            .filter(|p| !p.is_empty())
+            .map(|p| channel::derive_log_key(server_root, &channel_id, p));
         let info = ChannelInfo {
             server_root: *server_root,
             server_name,
@@ -1354,6 +1367,7 @@ impl Engine {
                 roster,
                 last_seq: 0,
                 removed: HashMap::new(),
+                log_key,
             },
         );
         self.hosted
@@ -1363,6 +1377,16 @@ impl Engine {
             .push(channel_id);
         self.dirty = true;
         Ok(channel_id)
+    }
+
+    /// Build a channel-log frame, applying the outer password wrapper if the
+    /// channel has one.
+    fn wrap_channel_frame(&self, channel_id: &[u8; 32], tag: u8, payload: &[u8]) -> Vec<u8> {
+        let framed = channel::frame(tag, payload);
+        match self.channels.get(channel_id).and_then(|c| c.log_key) {
+            Some(k) => channel::wrap(&k, channel_id, &framed),
+            None => framed,
+        }
     }
 
     /// Add `peer_id` to a channel (host only): commit an MLS add to the channel
@@ -1403,7 +1427,7 @@ impl Engine {
                 "that identity has no published MLS KeyPackage — they must connect first",
             ))?;
 
-        let (commit, welcome, info, since_seq, server_root) = {
+        let (commit, welcome, info, since_seq, server_root, log_key) = {
             let ch = self
                 .channels
                 .get_mut(channel_id)
@@ -1419,20 +1443,18 @@ impl Engine {
                 ch.info.clone(),
                 ch.last_seq,
                 ch.info.server_root,
+                ch.log_key,
             )
         };
 
-        sync::post_to_channel(
-            &mut self.client,
-            channel_id,
-            &channel::frame(channel::FRAME_COMMIT, &commit),
-        )
-        .await?;
+        let frame = self.wrap_channel_frame(channel_id, channel::FRAME_COMMIT, &commit);
+        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
 
         let wc = ChannelControl::MlsWelcome {
             info,
             welcome,
             since_seq,
+            log_key: log_key.unwrap_or([0u8; 32]),
         };
         self.send_content(peer_id, Content::Channel(wc.encode()), now_ms)
             .await?;
@@ -1631,12 +1653,8 @@ impl Engine {
         };
         self.dirty = true;
 
-        sync::post_to_channel(
-            &mut self.client,
-            channel_id,
-            &channel::frame(channel::FRAME_COMMIT, &commit),
-        )
-        .await?;
+        let frame = self.wrap_channel_frame(channel_id, channel::FRAME_COMMIT, &commit);
+        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
         Ok(())
     }
 
@@ -2182,12 +2200,8 @@ impl Engine {
                 .encrypt(&pad_channel(&Content::Text(text.to_owned()).encode()))
                 .map_err(mls_err)?
         };
-        sync::post_to_channel(
-            &mut self.client,
-            channel_id,
-            &channel::frame(channel::FRAME_APP, &ct),
-        )
-        .await?;
+        let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
+        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
         self.push_channel_history(ChannelHistoryEntry {
             channel_id: *channel_id,
             sender: self.my_member_id(),
@@ -2224,7 +2238,15 @@ impl Engine {
                     continue;
                 };
                 ch.last_seq = ch.last_seq.max(seq);
-                let Some((tag, payload)) = channel::unframe(&blob) else {
+                // Strip the outer password wrapper first, if this channel has one.
+                let inner: std::borrow::Cow<'_, [u8]> = match ch.log_key {
+                    Some(k) => match channel::unwrap(&k, &id, &blob) {
+                        Some(v) => std::borrow::Cow::Owned(v),
+                        None => continue, // wrong key / corrupt — skip
+                    },
+                    None => std::borrow::Cow::Borrowed(&blob[..]),
+                };
+                let Some((tag, payload)) = channel::unframe(&inner) else {
                     continue;
                 };
                 let host_id = ch.info.host_id;
@@ -2326,12 +2348,8 @@ impl Engine {
                 ))
                 .map_err(mls_err)?
         };
-        sync::post_to_channel(
-            &mut self.client,
-            channel_id,
-            &channel::frame(channel::FRAME_APP, &ct),
-        )
-        .await?;
+        let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
+        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
         let me = self.my_member_id();
         self.record_reaction(*channel_id, target_seq, emoji.to_owned(), me, remove);
         Ok(())
@@ -2411,6 +2429,7 @@ impl Engine {
                 info,
                 welcome,
                 since_seq,
+                log_key,
             } => {
                 let channel_id = info.channel_id;
                 if self.channels.contains_key(&channel_id) {
@@ -2433,6 +2452,7 @@ impl Engine {
                         roster,
                         last_seq: since_seq,
                         removed: HashMap::new(),
+                        log_key: (log_key != [0u8; 32]).then_some(log_key),
                     },
                 );
                 let _ = self.refresh_mls_key_package().await;

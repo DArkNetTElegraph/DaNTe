@@ -73,6 +73,7 @@ enum Cmd {
     CreateChannel {
         server: String,
         name: String,
+        password: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     Invite {
@@ -907,11 +908,13 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
         Cmd::CreateChannel {
             server,
             name,
+            password,
             reply,
         } => {
+            let pw = (!password.is_empty()).then_some(password.as_str());
             let r = match parse_fingerprint(&server) {
                 Ok(root) => engine
-                    .create_channel(&root, &name, true)
+                    .create_channel(&root, &name, true, pw)
                     .map(|id| id_b32(&id))
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
@@ -1668,6 +1671,9 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             struct Req {
                 server: String,
                 name: String,
+                /// Optional: content-protect the channel log with this password.
+                #[serde(default)]
+                password: String,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
@@ -1675,6 +1681,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::CreateChannel {
                 server: r.server,
                 name: r.name,
+                password: r.password,
                 reply,
             })
             .await

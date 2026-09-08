@@ -519,7 +519,7 @@ const api = {
   typing()    { return this.get("/api/typing"); },
   send(to, text)          { return this.post("/api/send", { to, text }); },
   createServer(name)      { return this.post("/api/server", { name }); },
-  createChannel(server, name) { return this.post("/api/channel", { server, name }); },
+  createChannel(server, name, password) { return this.post("/api/channel", { server, name, password: password || "" }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
   policy(root)            { return this.get("/api/policy?server=" + encodeURIComponent(root)); },
   sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
@@ -1239,10 +1239,13 @@ async function createServerFlow() {
 async function createChannelFlow(server) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root — open a channel in this server first.");
-  const name = await ui.ask("New channel name?");
-  if (!name) return;
+  const f = await ui.form("New channel", [
+    { name: "name", label: "Channel name", placeholder: "general" },
+    { name: "pw", label: "Password (optional)", placeholder: "content-protects the relay log", password: true },
+  ], { ok: "Create" });
+  if (!f || !f.name) return;
   try {
-    await api.createChannel(root, name);
+    await api.createChannel(root, f.name, f.pw);
     await refreshChannels();
   } catch (e) { ui.say("Could not create channel (are you the host?): " + e.message); }
 }

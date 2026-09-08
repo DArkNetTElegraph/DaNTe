@@ -24,6 +24,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 async-trait = "0.1"
+turn = "0.17"
+webrtc-util = "0.17"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

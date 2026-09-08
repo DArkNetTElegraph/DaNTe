@@ -332,13 +332,22 @@ infrastructure. Reached. ---**
   `Call::offer_with` / `answer_with(ice)`; `Engine::set_ice_servers` /
   `ice_servers`. The relay advertises them: `Request::GetIceConfig` →
   `Response::IceConfig(Vec<IceCfg>)`, configured with
-  `dante-relay --stun URL … --turn URL … --turn-secret HEX [--turn-ttl SECS]`.
-  TURN credentials are **short-lived**: `username = "{expiry}:dante"`,
-  `credential = base64(HMAC-SHA256(turn-secret, username))` — the operator's
-  TURN server (coturn, …) must verify the same scheme. `Engine::connect`
-  fetches the config from its relay automatically; `dante serve` exposes it at
-  `GET /api/ice`. The relay does **not** run a TURN server itself (that's an
-  ops concern); it only mints the credentials.
+  `dante-relay --stun URL … --turn URL … --turn-secret STR [--turn-ttl SECS]`.
+  TURN credentials are **short-lived** and use the standard coturn
+  `use-auth-secret` scheme: `username = "{expiry}"`,
+  `credential = base64(HMAC-SHA1(turn-secret, username))` (minted via
+  `turn::auth::generate_long_term_credentials`) — so a stock coturn verifies
+  them unchanged. `Engine::connect` fetches the config from its relay
+  automatically; `dante serve` exposes it at `GET /api/ice`.
+- **In-process TURN *(done)*:** `dante-relay --turn-listen HOST:PORT
+  [--turn-public-ip IP] --turn-secret STR` runs a TURN server inside the relay
+  process (`dante_relay::turn_server::TurnServer` over the `turn` crate,
+  `LongTermAuthHandler` + `RelayAddressGeneratorStatic`), and auto-appends
+  `turn:<public-ip>:<port>` to the advertised ICE list — one binary, zero-config
+  NAT traversal. Operators who already run coturn just skip `--turn-listen` and
+  point `--turn` / `--turn-secret` at it. Integration-tested in
+  `crates/dante-relay/tests/turn.rs` (auth + datagram relay; forged credential
+  refused).
 - **Call UI *(done)*:** `dante serve` `GET /api/calls`,
   `POST /api/call|call/accept|call/hangup {peer}`; SPA has a 📞 button, a call
   bar (ringing/calling/connecting/connected + Accept/Hang up) and a corner
@@ -358,7 +367,7 @@ infrastructure. Reached. ---**
   host. The desktop client wires this in; `dante serve` has no browser media
   path so its call UI stays state-only.
 - **Still to build:** wiring `dante-audio` into a client (Tauri); screen
-  share; bundling / running a TURN server for zero-config deployments.
+  share; group calls (MLS-derived media keys).
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (the correct form of the user's "regenerate keys on connect/disconnect").
 - SFU role in the server relay above ~5 participants; full mesh below.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

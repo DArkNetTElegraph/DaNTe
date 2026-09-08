@@ -54,40 +54,14 @@ pub struct IcePolicy {
     pub stun: Vec<String>,
     /// `turn:` / `turns:` URLs.
     pub turn: Vec<String>,
-    /// Shared secret for minting time-limited TURN credentials
-    /// (`username = "{expiry}:dante"`, `credential = base64(HMAC-SHA256(secret,
-    /// username))`). The operator's TURN server must be configured to verify
-    /// the same scheme. `None` → no TURN handed out.
-    pub turn_secret: Option<Vec<u8>>,
+    /// Shared secret for minting time-limited TURN credentials. This is the
+    /// standard **coturn `use-auth-secret`** scheme (`username = "{expiry}"`,
+    /// `credential = base64(HMAC-SHA1(secret, username))`), so it works with a
+    /// stock coturn *and* with this relay's own `--turn-listen` server. `None`
+    /// → no TURN handed out.
+    pub turn_secret: Option<String>,
     /// How long a minted TURN credential is valid (seconds).
     pub turn_ttl_secs: u64,
-}
-
-/// Standard base64 (with padding).
-fn b64(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(A[(n >> 18 & 63) as usize] as char);
-        out.push(A[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            A[(n >> 6 & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            A[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 /// Everything a relay mutates.
@@ -383,14 +357,16 @@ impl RelayState {
                     });
                 }
                 if let (Some(secret), false) = (&self.ice.turn_secret, self.ice.turn.is_empty()) {
-                    let expiry = now / 1000 + self.ice.turn_ttl_secs.max(60);
-                    let username = format!("{expiry}:dante");
-                    let mac = dante_crypto::mac::hmac_sha256(secret, username.as_bytes());
-                    out.push(IceCfg {
-                        urls: self.ice.turn.clone(),
-                        username,
-                        credential: b64(&mac),
-                    });
+                    let ttl = std::time::Duration::from_secs(self.ice.turn_ttl_secs.max(60));
+                    if let Ok((username, credential)) =
+                        turn::auth::generate_long_term_credentials(secret, ttl)
+                    {
+                        out.push(IceCfg {
+                            urls: self.ice.turn.clone(),
+                            username,
+                            credential,
+                        });
+                    }
                 }
                 Response::IceConfig(out)
             }
@@ -476,17 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn b64_matches_known_vectors() {
-        assert_eq!(b64(b""), "");
-        assert_eq!(b64(b"f"), "Zg==");
-        assert_eq!(b64(b"fo"), "Zm8=");
-        assert_eq!(b64(b"foo"), "Zm9v");
-        assert_eq!(b64(b"foob"), "Zm9vYg==");
-        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
-    }
-
-    #[test]
-    fn get_ice_config_mints_ephemeral_turn_credentials() {
+    fn get_ice_config_mints_coturn_style_turn_credentials() {
         let mut s = state();
         // No policy -> empty list.
         assert_eq!(
@@ -497,7 +463,7 @@ mod tests {
         s.set_ice_policy(IcePolicy {
             stun: vec!["stun:s.example:3478".into()],
             turn: vec!["turn:t.example:3478".into()],
-            turn_secret: Some(b"shared-secret".to_vec()),
+            turn_secret: Some("shared-secret".into()),
             turn_ttl_secs: 600,
         });
         let Response::IceConfig(list) = s.handle(Request::GetIceConfig, IP, 1_000_000) else {
@@ -508,14 +474,15 @@ mod tests {
         assert!(list[0].username.is_empty());
 
         let turn = &list[1];
-        // now = 1_000_000 ms -> 1000 s; ttl 600 -> expiry 1600.
-        assert_eq!(turn.username, "1600:dante");
-        let want = b64(&dante_crypto::mac::hmac_sha256(
-            b"shared-secret",
-            b"1600:dante",
-        ));
-        assert_eq!(turn.credential, want);
-        assert_eq!(turn.credential.len(), 44);
+        // coturn `use-auth-secret`: username is the expiry (a Unix seconds
+        // number), credential is base64(HMAC-SHA1(secret, username)).
+        let expiry: u64 = turn.username.parse().expect("numeric expiry username");
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(expiry > now_s && expiry <= now_s + 601);
+        assert_eq!(turn.credential.len(), 28, "base64 of a 20-byte SHA-1 HMAC");
     }
 
     #[test]

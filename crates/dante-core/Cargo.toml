@@ -16,6 +16,7 @@ dante-proto.workspace = true
 dante-net.workspace = true
 dante-dm.workspace = true
 dante-group.workspace = true
+dante-mls.workspace = true
 dante-voice.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

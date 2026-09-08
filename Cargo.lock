@@ -791,6 +791,7 @@ dependencies = [
  "dante-group",
  "dante-identity",
  "dante-ledger",
+ "dante-mls",
  "dante-net",
  "dante-proto",
  "dante-relay",

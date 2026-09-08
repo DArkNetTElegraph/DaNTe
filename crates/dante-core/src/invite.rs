@@ -144,7 +144,7 @@ impl InviteToken {
     pub fn from_link(s: &str) -> Result<Self, CoreError> {
         let hex = s.trim().strip_prefix(LINK_PREFIX).unwrap_or(s.trim());
         let hex = hex.trim();
-        if hex.len() % 2 != 0 || hex.is_empty() {
+        if !hex.len().is_multiple_of(2) || hex.is_empty() {
             return Err(CoreError::Invite("not a link"));
         }
         let mut bytes = Vec::with_capacity(hex.len() / 2);

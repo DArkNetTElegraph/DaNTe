@@ -229,6 +229,14 @@ enum Cmd {
         peer: String,
         reply: oneshot::Sender<String>,
     },
+    /// The channel group calls as a ready JSON array.
+    GroupCalls { reply: oneshot::Sender<String> },
+    /// `start` | `join` | `leave` a channel's group call.
+    GroupCall {
+        channel: String,
+        action: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// One row of the SPA's call panel.
@@ -240,6 +248,21 @@ struct CallRow {
     state: String,
     /// True while it is an unanswered inbound call.
     incoming: bool,
+}
+
+/// One row of the SPA's group-call panel.
+#[derive(Clone, Serialize)]
+struct GroupCallRow {
+    /// Channel id (base32).
+    channel: String,
+    /// Channel display name.
+    channel_name: String,
+    /// True once we have joined (vs. only invited).
+    joined: bool,
+    /// Number of other participants (MLS members) we can see.
+    participants: usize,
+    /// Fingerprint of whoever invited us, if we are only invited.
+    invited_by: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -310,6 +333,8 @@ struct Shared {
     >,
     /// Active 1:1 calls, keyed by peer fingerprint. Live-session only.
     calls: Mutex<std::collections::HashMap<String, CallRow>>,
+    /// Channel group calls, keyed by channel id (base32). Live-session only.
+    group_calls: Mutex<std::collections::HashMap<String, GroupCallRow>>,
     /// Monotonic id stamped on every inbox item, drawn by both the engine tick
     /// loop and command handlers so the SPA's `since` cursor never regresses.
     next_seq: AtomicU64,
@@ -358,7 +383,7 @@ fn sniff_image(b: &[u8]) -> &'static str {
 
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 || s.is_empty() {
+    if !s.len().is_multiple_of(2) || s.is_empty() {
         return None;
     }
     let b = s.as_bytes();
@@ -444,6 +469,7 @@ pub async fn run_on(
         typing: Mutex::new(Vec::new()),
         reactions: Mutex::new(std::collections::HashMap::new()),
         calls: Mutex::new(std::collections::HashMap::new()),
+        group_calls: Mutex::new(std::collections::HashMap::new()),
         next_seq: AtomicU64::new(0),
         me: Mutex::new((String::new(), String::new())),
         ready: AtomicBool::new(false),
@@ -689,6 +715,31 @@ async fn engine_task(
                                 engine_shared.calls.lock().await.remove(&fp);
                                 Item::Message { seq, from: fp, text: "\u{1f4de} call ended".into() }
                             }
+                            Inbound::GroupCallInvite { channel_id, from_idk } => {
+                                let fp = short_fp(&from_idk);
+                                let key = id_b32(&channel_id);
+                                engine_shared.group_calls.lock().await.insert(
+                                    key.clone(),
+                                    GroupCallRow {
+                                        channel: key,
+                                        channel_name: String::new(),
+                                        joined: false,
+                                        participants: 0,
+                                        invited_by: Some(fp.clone()),
+                                    },
+                                );
+                                Item::Message { seq, from: fp, text: "\u{1f4de} group call invite".into() }
+                            }
+                            Inbound::GroupCallMembersChanged { channel_id } => {
+                                Item::Channel {
+                                    seq,
+                                    channel: id_b32(&channel_id),
+                                    channel_name: String::new(),
+                                    from: "system".into(),
+                                    text: "\u{1f4de} group call membership changed".into(),
+                                    ref_seq: 0,
+                                }
+                            }
                         };
                         inbox.push_back(entry);
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }
@@ -710,6 +761,9 @@ async fn engine_task(
                         }
                     }
                 }
+
+                let _ = engine.poll_group_calls(now).await;
+                refresh_group_calls(&engine, &engine_shared).await;
 
                 if let Ok(events) = engine.poll_typing(now).await {
                     let mut typing = engine_shared.typing.lock().await;
@@ -757,6 +811,57 @@ async fn refresh_channels(engine: &Engine, shared: &Shared) {
         })
         .collect();
     *shared.channels.lock().await = views;
+}
+
+/// Rebuild the group-call panel from live engine state. Rows the engine no
+/// longer knows (call ended, invite consumed) are dropped; `invited_by` set by
+/// the inbound handler is preserved.
+async fn refresh_group_calls(engine: &Engine, shared: &Shared) {
+    let names: std::collections::HashMap<[u8; 32], String> = engine
+        .channels()
+        .into_iter()
+        .map(|c| (c.channel_id, c.channel_name))
+        .collect();
+    let mut rows = shared.group_calls.lock().await;
+    let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (cid, name) in &names {
+        if engine.in_group_call(cid) {
+            let key = id_b32(cid);
+            live.insert(key.clone());
+            rows.insert(
+                key.clone(),
+                GroupCallRow {
+                    channel: key,
+                    channel_name: name.clone(),
+                    joined: true,
+                    participants: engine.group_call_peers(cid).len(),
+                    invited_by: None,
+                },
+            );
+        }
+    }
+    for cid in engine.pending_group_call_channels() {
+        if engine.in_group_call(&cid) {
+            continue;
+        }
+        let key = id_b32(&cid);
+        live.insert(key.clone());
+        let name = names.get(&cid).cloned().unwrap_or_default();
+        rows.entry(key.clone())
+            .and_modify(|r| {
+                r.channel_name = name.clone();
+                r.joined = false;
+            })
+            .or_insert(GroupCallRow {
+                channel: key,
+                channel_name: name,
+                joined: false,
+                participants: 0,
+                invited_by: None,
+            });
+    }
+    rows.retain(|k, _| live.contains(k));
 }
 
 async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
@@ -1260,6 +1365,39 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                                     calls.remove(&fp);
                                 }
                             }
+                            Ok("ok".into())
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::GroupCalls { reply } => {
+            let rows: Vec<_> = shared.group_calls.lock().await.values().cloned().collect();
+            let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
+        }
+        Cmd::GroupCall {
+            channel,
+            action,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel).to_string();
+            let now = now_ms();
+            let r = match parse_fingerprint(&channel) {
+                Ok(cid) => {
+                    let res = match action.as_str() {
+                        "start" => engine.start_group_call(&cid, now).await,
+                        "join" => engine.join_group_call(&cid, now).await,
+                        "leave" => engine.leave_group_call(&cid, now).await,
+                        _ => Err(dante_core::CoreError::Voice(
+                            "unknown group-call action".into(),
+                        )),
+                    };
+                    match res {
+                        Ok(()) => {
+                            refresh_group_calls(engine, shared).await;
                             Ok("ok".into())
                         }
                         Err(e) => Err(e.to_string()),
@@ -1990,6 +2128,44 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             .to_string();
             dispatch(&mut stream, &shared, |reply| Cmd::Call {
                 peer: r.peer,
+                action,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/groupcalls") => {
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::GroupCalls { reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "[]".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/groupcall/start")
+        | ("POST", "/api/groupcall/join")
+        | ("POST", "/api/groupcall/leave") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let action = match path {
+                "/api/groupcall/join" => "join",
+                "/api/groupcall/leave" => "leave",
+                _ => "start",
+            }
+            .to_string();
+            dispatch(&mut stream, &shared, |reply| Cmd::GroupCall {
+                channel: r.channel,
                 action,
                 reply,
             })

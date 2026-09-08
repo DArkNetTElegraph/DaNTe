@@ -292,6 +292,109 @@ impl Member {
         out.copy_from_slice(&secret);
         Ok(out)
     }
+
+    /// Serialize the whole member — the OpenMLS store (group state + this
+    /// member's signature key) plus the handles needed to reload it. DaNTe
+    /// keeps this blob in its own encrypted local store so a call / channel
+    /// survives a restart. It carries private keys: treat it like the keystore.
+    pub fn export(&self) -> Result<Vec<u8>, MlsError> {
+        let values = self
+            .provider
+            .storage()
+            .values
+            .read()
+            .map_err(|_| MlsError::Group("storage lock poisoned".into()))?;
+
+        let mut store = Vec::new();
+        store.extend_from_slice(&(values.len() as u32).to_be_bytes());
+        for (k, v) in values.iter() {
+            put(&mut store, k);
+            put(&mut store, v);
+        }
+
+        let mut out = Vec::new();
+        put(&mut out, self.group.group_id().as_slice());
+        put(&mut out, &self.identity);
+        put(&mut out, &self.signer.to_public_vec());
+        put(&mut out, &store);
+        Ok(out)
+    }
+
+    /// Rebuild a member from [`export`](Self::export) bytes.
+    pub fn import(bytes: &[u8]) -> Result<Self, MlsError> {
+        let mut cur = bytes;
+        let group_id = get(&mut cur)?;
+        let identity = get(&mut cur)?;
+        let signer_public = get(&mut cur)?;
+        let store_bytes = get(&mut cur)?;
+
+        let provider = OpenMlsRustCrypto::default();
+        {
+            let mut sb = &store_bytes[..];
+            if sb.len() < 4 {
+                return Err(MlsError::Codec("truncated store".into()));
+            }
+            let (count_bytes, rest) = sb.split_at(4);
+            let count = u32::from_be_bytes(count_bytes.try_into().unwrap());
+            sb = rest;
+
+            let mut values = provider
+                .storage()
+                .values
+                .write()
+                .map_err(|_| MlsError::Group("storage lock poisoned".into()))?;
+            for _ in 0..count {
+                let k = get(&mut sb)?;
+                let v = get(&mut sb)?;
+                values.insert(k, v);
+            }
+        }
+
+        let signer = SignatureKeyPair::read(
+            provider.storage(),
+            &signer_public,
+            CIPHERSUITE.signature_algorithm(),
+        )
+        .ok_or(MlsError::Group("no signature key in the store".into()))?;
+
+        let group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&group_id))
+            .map_err(|e| MlsError::Group(format!("{e:?}")))?
+            .ok_or(MlsError::Group("no group in the store".into()))?;
+
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(identity.clone()).into(),
+            signature_key: signer.to_public_vec().into(),
+        };
+
+        Ok(Self {
+            provider,
+            signer,
+            credential,
+            identity,
+            group,
+        })
+    }
+}
+
+/// Length-prefix (`u32` big-endian) a field into `buf`.
+fn put(buf: &mut Vec<u8>, field: &[u8]) {
+    buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
+    buf.extend_from_slice(field);
+}
+
+/// Read one length-prefixed field, advancing `cur`.
+fn get(cur: &mut &[u8]) -> Result<Vec<u8>, MlsError> {
+    if cur.len() < 4 {
+        return Err(MlsError::Codec("truncated export".into()));
+    }
+    let (len_bytes, rest) = cur.split_at(4);
+    let len = u32::from_be_bytes(len_bytes.try_into().unwrap()) as usize;
+    if rest.len() < len {
+        return Err(MlsError::Codec("truncated export".into()));
+    }
+    let (field, rest) = rest.split_at(len);
+    *cur = rest;
+    Ok(field.to_vec())
 }
 
 fn new_credential(

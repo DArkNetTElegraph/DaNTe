@@ -35,6 +35,39 @@ fn group_shares_a_call_key_that_rekeys_on_leave() {
     assert_ne!(ka, ka2, "the call key must rotate when membership changes");
 }
 
+/// A member survives an export / import round-trip: same epoch, same call key,
+/// still able to send, receive, and commit membership changes.
+#[test]
+fn member_survives_export_import() {
+    let mut alice = Member::create(b"alice", b"chan").unwrap();
+    let (bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
+    let hs = alice.add(&[bob_kp]).unwrap();
+    let mut bob = bob_pending.join(&hs.welcome.unwrap()).unwrap();
+
+    let blob = alice.export().unwrap();
+    let mut alice = Member::import(&blob).unwrap();
+
+    assert_eq!(alice.epoch(), bob.epoch());
+    assert_eq!(alice.call_key().unwrap(), bob.call_key().unwrap());
+
+    // The reloaded member can still originate traffic...
+    let ct = alice.encrypt(b"after reload").unwrap();
+    match bob.process(&ct).unwrap() {
+        Processed::Application(pt) => assert_eq!(pt, b"after reload"),
+        other => panic!("expected application message, got {other:?}"),
+    }
+
+    // ...and still drive the group with its signature key.
+    let (carol_pending, carol_kp) = Member::publish_key_package(b"carol").unwrap();
+    let hs = alice.add(&[carol_kp]).unwrap();
+    assert!(matches!(
+        bob.process(&hs.commit).unwrap(),
+        Processed::EpochChanged
+    ));
+    let carol = carol_pending.join(&hs.welcome.unwrap()).unwrap();
+    assert_eq!(alice.call_key().unwrap(), carol.call_key().unwrap());
+}
+
 /// Application messages round-trip through the group.
 #[test]
 fn members_exchange_application_messages() {

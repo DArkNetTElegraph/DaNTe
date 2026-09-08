@@ -274,6 +274,14 @@ pub enum Inbound {
         /// The channel the call belongs to.
         channel_id: [u8; 32],
     },
+    /// A plaintext snapshot of a channel's recent messages, handed to us by the
+    /// host on join (MLS forward secrecy hides the pre-join log). Oldest first.
+    ChannelBacklog {
+        /// The channel the snapshot belongs to.
+        channel_id: [u8; 32],
+        /// `(sender member id, Unix ms, text)`.
+        entries: Vec<([u8; 32], u64, String)>,
+    },
     /// A WebRTC signalling blob for a voice-channel mesh leg, relayed from
     /// another participant's browser. The engine does not interpret it.
     VoiceSignal {
@@ -2129,6 +2137,29 @@ impl Engine {
                 .send_content(peer_id, Content::Channel(pol.encode()), now_ms)
                 .await;
         }
+
+        // Share a plaintext snapshot of recent messages — the joiner can't
+        // decrypt the log from before their MLS epoch.
+        let entries: Vec<([u8; 32], u64, String)> = self
+            .channel_history
+            .iter()
+            .filter(|e| &e.channel_id == channel_id)
+            .rev()
+            .take(200)
+            .map(|e| (e.sender, e.ts_ms, e.text.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if !entries.is_empty() {
+            let hist = ChannelControl::History {
+                channel_id: *channel_id,
+                entries,
+            };
+            let _ = self
+                .send_content(peer_id, Content::Channel(hist.encode()), now_ms)
+                .await;
+        }
         self.dirty = true;
         Ok(())
     }
@@ -3574,6 +3605,7 @@ impl Engine {
         from: &[u8; 32],
         blob: &[u8],
         now_ms: u64,
+        out: &mut Vec<Inbound>,
     ) -> Result<(), CoreError> {
         match ChannelControl::decode(blob)? {
             ChannelControl::MlsWelcome {
@@ -3668,6 +3700,38 @@ impl Engine {
                         c.info.channel_name = name.chars().take(64).collect();
                         self.dirty = true;
                     }
+                }
+            }
+            ChannelControl::History {
+                channel_id,
+                entries,
+            } => {
+                // Only from the channel's host, and only once (ignore if we
+                // already have backlog for this channel).
+                let from_host = self
+                    .channels
+                    .get(&channel_id)
+                    .is_some_and(|c| c.info.host_id == idk_to_id(from));
+                let already = self
+                    .channel_history
+                    .iter()
+                    .any(|e| e.channel_id == channel_id);
+                if from_host && !already && !entries.is_empty() {
+                    let me = self.my_member_id();
+                    for (sender, ts_ms, text) in &entries {
+                        self.push_channel_history(ChannelHistoryEntry {
+                            channel_id,
+                            sender: *sender,
+                            outgoing: *sender == me,
+                            ts_ms: *ts_ms,
+                            text: text.clone(),
+                        });
+                    }
+                    self.dirty = true;
+                    out.push(Inbound::ChannelBacklog {
+                        channel_id,
+                        entries,
+                    });
                 }
             }
             ChannelControl::Policy { policy } => {
@@ -4278,7 +4342,10 @@ impl Engine {
                     Err(e) => tracing::debug!(error = %e, "dropping file with a failed transfer"),
                 },
                 Ok(Content::Channel(blob)) => {
-                    if let Err(e) = self.handle_channel_control(&from, &blob, now_ms).await {
+                    if let Err(e) = self
+                        .handle_channel_control(&from, &blob, now_ms, &mut out)
+                        .await
+                    {
                         tracing::debug!(error = %e, "dropping channel-control message");
                     }
                 }

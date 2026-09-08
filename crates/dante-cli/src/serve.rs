@@ -1024,6 +1024,26 @@ async fn engine_task(
                 if let Ok(items) = engine.receive_all(now).await {
                     let mut inbox = engine_shared.inbox.lock().await;
                     for it in items {
+                        // Backlog expands to one Item::Channel per message.
+                        if let Inbound::ChannelBacklog { channel_id, entries } = it {
+                            let ch = id_b32(&channel_id);
+                            let me = *engine.identity().id().as_bytes();
+                            for (sender, at_ms, text) in entries {
+                                let _ = at_ms;
+                                inbox.push_back(Item::Channel {
+                                    seq: engine_shared.next(),
+                                    channel: ch.clone(),
+                                    channel_name: String::new(),
+                                    from: if sender == me { "you".into() } else { short_id(&sender) },
+                                    text,
+                                    ref_seq: 0,
+                                    reply_to: None,
+                                    forwarded_from: None,
+                                });
+                            }
+                            while inbox.len() > INBOX_CAP { inbox.pop_front(); }
+                            continue;
+                        }
                         let seq = engine_shared.next();
                         let entry = match it {
                             Inbound::Message(m) => {
@@ -1114,6 +1134,7 @@ async fn engine_task(
                                     data,
                                 }
                             }
+                            Inbound::ChannelBacklog { .. } => unreachable!("handled above"),
                         };
                         inbox.push_back(entry);
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }

@@ -693,6 +693,55 @@ async fn host_and_member_exchange_channel_messages() {
 }
 
 #[tokio::test]
+async fn a_new_member_gets_a_backlog_of_recent_messages() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    host.sync(now).await.unwrap();
+    bob.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    host.send_channel(&chan, "first", now).await.unwrap();
+    host.send_channel(&chan, "second", now).await.unwrap();
+
+    // Bob joins after those were sent — he can't decrypt the pre-join log, so
+    // the host hands him a plaintext snapshot.
+    host.invite_to_channel(&chan, &bob_id, now).await.unwrap();
+    let mut backlog = None;
+    for _ in 0..8 {
+        for inb in bob.receive_all(now).await.unwrap() {
+            if let crate::Inbound::ChannelBacklog {
+                channel_id,
+                entries,
+            } = inb
+            {
+                backlog = Some((channel_id, entries));
+            }
+        }
+        if backlog.is_some() {
+            break;
+        }
+    }
+    let (cid, entries) = backlog.expect("bob received a channel backlog");
+    assert_eq!(cid, chan);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|(_, _, t)| t.clone())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+}
+
+#[tokio::test]
 async fn a_password_protected_channel_wraps_the_relay_log() {
     let now = now_ms();
     let relay = spawn_relay().await;

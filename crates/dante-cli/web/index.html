@@ -298,6 +298,31 @@ img.emoji { height: 1.4em; width: auto; vertical-align: -0.3em; margin: 0 1px; }
 .chan-row.muted .hash { opacity: .55; }
 .chan-row .avatar { width: 20px; height: 20px; font-size: 10px; }
 
+/* voice channel: participants nested under the sidebar row */
+.voice-members { display: flex; flex-direction: column; gap: 2px; margin: 1px 0 4px 22px; }
+.voice-member { display: flex; align-items: center; gap: 6px; padding: 2px 6px;
+  font-size: 12px; color: var(--text-muted); border-radius: var(--radius-sm); }
+.voice-member .avatar { width: 18px; height: 18px; font-size: 9px; }
+
+/* voice channel: the room view that replaces the message log */
+.voice-room { display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; min-height: 100%; padding: 40px 20px; text-align: center; }
+.voice-room-icon { font-size: 44px; opacity: .9; }
+.voice-room-name { font-size: 20px; font-weight: 700; color: var(--text); }
+.voice-room-sub { font-size: 13px; color: var(--text-faint); }
+.voice-stage { display: flex; flex-wrap: wrap; gap: 18px; justify-content: center; margin: 14px 0 4px; }
+.voice-tile { display: flex; flex-direction: column; align-items: center; gap: 7px;
+  padding: 14px 18px; border-radius: var(--radius-lg); background: var(--bg-raised);
+  border: 1px solid var(--divider); min-width: 96px; }
+.voice-tile.me { border-color: var(--accent); }
+.voice-tile .avatar.big { width: 56px; height: 56px; font-size: 18px; }
+.voice-tile-name { font-size: 12px; color: var(--text-muted); max-width: 120px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-join-btn { margin-top: 10px; padding: 10px 24px; border: 0; border-radius: var(--radius-pill);
+  background: var(--accent); color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
+.voice-join-btn:hover { filter: brightness(1.08); }
+.voice-join-btn.leave { background: var(--bg-raised); color: var(--text); border: 1px solid var(--divider); }
+
 /* user panel */
 #user-panel {
   flex: 0 0 auto;
@@ -805,6 +830,7 @@ const store = {
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
   groupCalls: [],                     // [{channel,channel_name,joined,participants,invited_by}]
+  voice: {},                          // channel id -> { joined, participants:[fp] }
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -859,7 +885,10 @@ const api = {
   editDm(peer, msgId, text) { return this.post("/api/dm/edit", { peer, msg_id: msgId, text }); },
   forward(to, origin, text) { return this.post("/api/forward", { to, origin, text }); },
   createServer(name)      { return this.post("/api/server", { name }); },
-  createChannel(server, name, password) { return this.post("/api/channel", { server, name, password: password || "" }); },
+  createChannel(server, name, password, voice) { return this.post("/api/channel", { server, name, password: password || "", voice: !!voice }); },
+  voice()                { return this.get("/api/voice"); },
+  voiceJoin(channel)     { return this.post("/api/voice/join", { channel }); },
+  voiceLeave(channel)    { return this.post("/api/voice/leave", { channel }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
   policy(root)            { return this.get("/api/policy?server=" + encodeURIComponent(root)); },
   sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
@@ -1138,13 +1167,17 @@ function renderPane() {
   gear.onclick = () => openServerSettings(server);
   actions.appendChild(gear);
 
+  const all = store.channelsOf(server);
+  const textChans = all.filter(c => !c.voice);
+  const voiceChans = all.filter(c => c.voice);
+
   const lbl = el("div", "group-label");
   lbl.appendChild(el("span", null, "Text Channels"));
   const plus = el("button", null, "+"); plus.title = "Create channel"; plus.onclick = () => createChannelFlow(server);
   lbl.appendChild(plus);
   list.appendChild(lbl);
 
-  for (const c of store.channelsOf(server)) {
+  for (const c of textChans) {
     const t = "#" + c.id;
     const row = el("button", "chan-row" + (curTarget() === t ? " active" : "") + (store.isMuted(t) ? " muted" : ""));
     row.appendChild(el("span", "hash", "#"));
@@ -1153,6 +1186,32 @@ function renderPane() {
     unreadBadge(row, t);
     row.onclick = () => selectTarget(server, t);
     list.appendChild(row);
+  }
+
+  if (voiceChans.length) {
+    const vl = el("div", "group-label");
+    vl.appendChild(el("span", null, "Voice Channels"));
+    list.appendChild(vl);
+    for (const c of voiceChans) {
+      const t = "#" + c.id;
+      const room = store.voice[c.id] || { joined: false, participants: [] };
+      const row = el("button", "chan-row" + (curTarget() === t ? " active" : ""));
+      row.appendChild(Object.assign(el("span", "hash"), { textContent: "🔊" }));
+      row.appendChild(el("span", "name", c.name));
+      if (room.joined) row.appendChild(Object.assign(el("span", "tag"), { textContent: "●" }));
+      row.onclick = () => selectTarget(server, t);
+      list.appendChild(row);
+      if (room.participants.length) {
+        const pl = el("div", "voice-members");
+        for (const fp of room.participants) {
+          const m = el("div", "voice-member");
+          m.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(dmLabel(fp) || short(fp)) }));
+          m.appendChild(el("span", null, dmLabel(fp) || short(fp)));
+          pl.appendChild(m);
+        }
+        list.appendChild(pl);
+      }
+    }
   }
 }
 
@@ -1193,12 +1252,23 @@ function renderChat() {
   gcallBtn.hidden = true;
   $("#callbar").hidden = true;
   $("#gcallbar").hidden = true;
+  document.querySelector(".composer").hidden = false;
 
   if (!target) {
     titleEl.innerHTML = '<span class="hash">#</span> —';
     $("#chat-topic").textContent = "";
     inviteBtn.hidden = true; linkBtn.hidden = true;
     log.innerHTML = '<div class="empty">Pick a channel or start a DM.</div>';
+    return;
+  }
+
+  const voiceInfo = target.startsWith("#")
+    ? store.channels.find(c => c.id === target.slice(1) && c.voice) : null;
+  if (voiceInfo) {
+    inviteBtn.hidden = false; inviteBtn.onclick = () => inviteFlow(target);
+    linkBtn.hidden = false;   linkBtn.onclick = () => inviteLinkFlow(target);
+    renderVoiceRoom(voiceInfo, target);
+    $("#typing").textContent = "";
     return;
   }
 
@@ -1375,6 +1445,49 @@ function renderChat() {
   renderCallbar();
   renderGroupCallbar();
   renderReplyBar();
+}
+
+// A voice channel: no message log, just the room and a Join / Leave control.
+function renderVoiceRoom(c, target) {
+  const titleEl = $("#chat-title");
+  const log = $("#log");
+  titleEl.innerHTML = '<span class="hash">🔊</span> ' + esc(c.name);
+  $("#chat-topic").textContent = store.view.server;
+  document.querySelector(".composer").hidden = true;
+  $("#replybar").hidden = true;
+  $("#callbar").hidden = true;
+  $("#gcallbar").hidden = true;
+
+  const room = store.voice[c.id] || { joined: false, participants: [] };
+  const people = room.participants.slice().sort();
+
+  log.innerHTML = "";
+  const wrap = el("div", "voice-room");
+  wrap.appendChild(Object.assign(el("div", "voice-room-icon"), { textContent: "🔊" }));
+  wrap.appendChild(el("div", "voice-room-name", c.name));
+  wrap.appendChild(el("div", "voice-room-sub",
+    people.length ? (people.length === 1 ? "1 person connected" : people.length + " people connected")
+                  : "No one's here yet — jump in."));
+
+  if (people.length) {
+    const stage = el("div", "voice-stage");
+    for (const fp of people) {
+      const mine = isSelf(fp);
+      const tile = el("div", "voice-tile" + (mine ? " me" : ""));
+      tile.appendChild(Object.assign(el("div", "avatar big"),
+        { textContent: initials(dmLabel(fp) || short(fp)) }));
+      tile.appendChild(el("span", "voice-tile-name", mine ? "You" : (dmLabel(fp) || short(fp))));
+      stage.appendChild(tile);
+    }
+    wrap.appendChild(stage);
+  }
+
+  const btn = el("button", "voice-join-btn" + (room.joined ? " leave" : ""),
+    room.joined ? "Disconnect" : "Join voice");
+  btn.onclick = () => voiceAction(c.id, !room.joined);
+  wrap.appendChild(btn);
+
+  log.appendChild(wrap);
 }
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "✅"];
@@ -1821,10 +1934,11 @@ async function createChannelFlow(server) {
   const f = await ui.form("New channel", [
     { name: "name", label: "Channel name", placeholder: "general" },
     { name: "pw", label: "Password (optional)", placeholder: "content-protects the relay log", password: true },
+    { name: "voice", label: "Voice channel (members join a call, no text)", type: "check", value: false },
   ], { ok: "Create" });
   if (!f || !f.name) return;
   try {
-    await api.createChannel(root, f.name, f.pw);
+    await api.createChannel(root, f.name, f.voice ? "" : f.pw, f.voice);
     await refreshChannels();
   } catch (e) { ui.say("Could not create channel (are you the host?): " + e.message); }
 }
@@ -1985,6 +2099,23 @@ async function refreshGroupCalls() {
       render();
     }
   } catch (_) {}
+}
+
+async function refreshVoice() {
+  try {
+    const v = await api.voice();
+    if (JSON.stringify(v) !== JSON.stringify(store.voice)) {
+      store.voice = v;
+      render();
+    }
+  } catch (_) {}
+}
+
+async function voiceAction(channelId, join) {
+  try {
+    await (join ? api.voiceJoin(channelId) : api.voiceLeave(channelId));
+    await refreshVoice();
+  } catch (e) { ui.sys("voice: " + e.message); }
 }
 
 function groupCallFor(channelId) {
@@ -2710,6 +2841,7 @@ async function init() {
   refreshBlocked();
   refreshCalls();
   refreshGroupCalls();
+  refreshVoice();
   setInterval(poll, 3000);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
@@ -2719,6 +2851,7 @@ async function init() {
   setInterval(refreshBlocked, 8000);
   setInterval(refreshCalls, 1200);
   setInterval(refreshGroupCalls, 1500);
+  setInterval(refreshVoice, 1500);
 }
 init();
 </script>

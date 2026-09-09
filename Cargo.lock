@@ -1043,6 +1043,7 @@ dependencies = [
  "dante-crypto",
  "dante-identity",
  "dante-ledger",
+ "dante-p2p",
  "dante-proto",
  "proptest",
  "thiserror 2.0.20",

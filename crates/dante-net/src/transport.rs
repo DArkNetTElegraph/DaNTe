@@ -68,12 +68,22 @@ async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<u8>, NetEr
 
 /// A client connection to a relay.
 ///
-/// Holds an ordered list of candidate relay endpoints and a lazily-(re)opened
-/// TCP stream. [`Client::request`] transparently reconnects — and fails over to
-/// the next endpoint — across a dropped connection, so a relay restart or a
-/// single dead relay does not sink the engine. Application-level errors
-/// ([`NetError::Peer`]) are returned as-is and never trigger a retry.
-pub struct Client {
+/// The default backend is framed TCP: an ordered list of candidate relay
+/// endpoints and a lazily-(re)opened stream, with transparent reconnect and
+/// failover across a dropped connection. With the `p2p` feature and
+/// [`Client::connect_p2p`] the same [`Request`]/[`Response`] wire instead
+/// rides a libp2p `/dante/relay/1` stream to a relay peer. Either way,
+/// application-level errors ([`NetError::Peer`]) are returned as-is and never
+/// retried.
+pub struct Client(Backend);
+
+enum Backend {
+    Tcp(TcpBackend),
+    #[cfg(feature = "p2p")]
+    P2p(p2p_client::P2pBackend),
+}
+
+struct TcpBackend {
     addrs: Vec<String>,
     /// Index into `addrs` of the endpoint `stream` is (or was) connected to.
     current: usize,
@@ -97,20 +107,45 @@ impl Client {
         if addrs.is_empty() {
             return Err(NetError::Closed);
         }
-        let mut client = Self {
+        let mut tcp = TcpBackend {
             addrs,
             current: 0,
             stream: None,
         };
-        client.reconnect().await?;
-        Ok(client)
+        tcp.reconnect().await?;
+        Ok(Client(Backend::Tcp(tcp)))
     }
 
-    /// The relay endpoint the live stream is (or was last) connected to.
+    /// Reach a relay over libp2p. `node` is a running [`dante_p2p::Node`];
+    /// `relay_addr` is the relay's full multiaddr ending `/p2p/<peer-id>`.
+    #[cfg(feature = "p2p")]
+    pub async fn connect_p2p(node: dante_p2p::Node, relay_addr: &str) -> Result<Self, NetError> {
+        Ok(Client(Backend::P2p(
+            p2p_client::P2pBackend::connect(node, relay_addr).await?,
+        )))
+    }
+
+    /// The relay endpoint this client is (or was last) talking to.
     pub fn endpoint(&self) -> &str {
-        &self.addrs[self.current]
+        match &self.0 {
+            Backend::Tcp(t) => &t.addrs[t.current],
+            #[cfg(feature = "p2p")]
+            Backend::P2p(p) => p.endpoint(),
+        }
     }
 
+    /// Send one request and await its response, reconnecting once (and, for
+    /// TCP, failing over) if the connection is dead.
+    pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
+        match &mut self.0 {
+            Backend::Tcp(t) => t.request(req).await,
+            #[cfg(feature = "p2p")]
+            Backend::P2p(p) => p.request(req).await,
+        }
+    }
+}
+
+impl TcpBackend {
     /// Drop any stream and open a fresh one, trying every endpoint once
     /// starting from the last-known-good.
     async fn reconnect(&mut self) -> Result<(), NetError> {
@@ -132,9 +167,7 @@ impl Client {
         Err(last)
     }
 
-    /// Send one request and await its response, reconnecting once (and failing
-    /// over) if the connection is dead.
-    pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
+    async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
         let bytes = req.encode();
         let mut last_err = NetError::Closed;
         for attempt in 0..2 {
@@ -162,6 +195,66 @@ impl Client {
             }
         }
         Err(last_err)
+    }
+}
+
+#[cfg(feature = "p2p")]
+mod p2p_client {
+    use dante_p2p::{Multiaddr, Node, PeerId};
+
+    use crate::{
+        error::NetError,
+        wire::{Request, Response},
+    };
+
+    /// A libp2p-backed relay connection: one `/dante/relay/1` request per
+    /// [`Request`]. libp2p handles (re)dialing the relay peer on demand.
+    pub struct P2pBackend {
+        node: Node,
+        peer: PeerId,
+        addr: String,
+    }
+
+    impl P2pBackend {
+        pub async fn connect(node: Node, relay_addr: &str) -> Result<Self, NetError> {
+            let ma: Multiaddr = relay_addr
+                .parse()
+                .map_err(|e| NetError::Peer(format!("bad relay multiaddr: {e}")))?;
+            let peer = ma
+                .iter()
+                .find_map(|p| match p {
+                    dante_p2p::multiaddr::Protocol::P2p(id) => Some(id),
+                    _ => None,
+                })
+                .ok_or_else(|| NetError::Peer("relay multiaddr has no /p2p/<peer-id>".into()))?;
+            node.add_address(peer, ma.clone())
+                .await
+                .map_err(|e| NetError::Peer(e.to_string()))?;
+            // Best-effort warm dial; request-response also dials on demand.
+            let _ = node.dial(ma).await;
+            Ok(Self {
+                node,
+                peer,
+                addr: relay_addr.to_string(),
+            })
+        }
+
+        pub fn endpoint(&self) -> &str {
+            &self.addr
+        }
+
+        pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
+            let bytes = self
+                .node
+                .request(self.peer, req.encode())
+                .await
+                .map_err(|e| NetError::Peer(e.to_string()))?;
+            let res = Response::decode(&bytes)?;
+            if let Response::Error(msg) = &res {
+                return Err(NetError::Peer(msg.clone()));
+            }
+            Ok(res)
+        }
     }
 }
 
@@ -331,6 +424,69 @@ mod tests {
             Response::Pong
         );
         assert_eq!(client.endpoint(), live);
+    }
+
+    #[cfg(feature = "p2p")]
+    #[tokio::test]
+    async fn client_talks_to_a_relay_over_libp2p() {
+        use dante_p2p::Node;
+
+        // The "relay": a p2p node that answers `/dante/relay/1` by running the
+        // Echo handler over the decoded Request.
+        let (relay, mut relay_evt, mut relay_in) = Node::spawn(&[9u8; 32]).unwrap();
+        relay
+            .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .unwrap();
+        let relay_addr = loop {
+            if let Some(dante_p2p::Event::Listening(a)) = relay_evt.recv().await {
+                break a;
+            }
+        };
+        let relay_ma = format!("{relay_addr}/p2p/{}", relay.peer_id());
+
+        tokio::spawn(async move {
+            let handler = Echo;
+            while let Some(req) = relay_in.recv().await {
+                let resp = match Request::decode(&req.body) {
+                    Ok(r) => handler.handle(r, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
+                    Err(e) => Response::Error(format!("bad request: {e}")),
+                };
+                req.respond(resp.encode()).await;
+            }
+        });
+
+        // The client: its own p2p node, pointed at the relay's multiaddr.
+        let (client_node, _c_evt, _c_in) = Node::spawn(&[10u8; 32]).unwrap();
+        client_node
+            .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .unwrap();
+        let mut client = Client::connect_p2p(client_node, &relay_ma).await.unwrap();
+
+        // request-response dials on demand; retry until the mesh is up.
+        let mut pong = None;
+        for _ in 0..20 {
+            match client.request(&Request::Ping).await {
+                Ok(r) => {
+                    pong = Some(r);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+            }
+        }
+        assert_eq!(pong, Some(Response::Pong), "Ping over libp2p answered");
+
+        assert_eq!(
+            client.request(&Request::GetTreeHead).await.unwrap(),
+            Response::TreeHead {
+                size: 3,
+                root: [1u8; 32]
+            }
+        );
+        // A relay Error still surfaces as NetError::Peer over p2p.
+        let err = client.request(&Request::Deposit(vec![])).await.unwrap_err();
+        assert!(matches!(err, NetError::Peer(_)));
     }
 
     #[tokio::test]

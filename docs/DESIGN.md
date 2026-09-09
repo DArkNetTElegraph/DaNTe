@@ -448,12 +448,27 @@ DaNTe/
   (real mesh) and `a_hostile_gossip_frame_cannot_suppress_the_real_message`.
   The relay's ordered log is still the source of truth and the only path for
   offline members / late joiners.
-- **Still deferred:** a DHT / storage-supernode design for the sealed-sender
-  mailbox so a client needs *no* relay (the design's position is that offline
-  delivery inherently needs a storage supernode — relays, now DHT-discovered,
-  are that); health-based relay reordering; flipping the `p2p` Cargo feature
-  on by default (a deployment call — it pulls the whole libp2p tree into
-  every build).
+- **Redundant relay set** *(done, opt-in — feature `p2p`)*: with `--relay
+  dht` the discovered relays act as one store with no server-side
+  coordination. The libp2p `Client` classifies each `Request`: **replicate**
+  (`Deposit`, `PutBlob`, `PublishPrekeys`, `SubmitRecord` — idempotent or
+  content-addressed) goes to *every* relay; **merge** (`Fetch`) queries every
+  relay and concatenates the mailbox envelopes (the engine already de-dups by
+  tag); everything else stays **pinned** to one relay with rotate-on-failure
+  (per-relay `seq` for the channel log, single-use key packages, ephemeral
+  signals, ledger reads). So the sealed-sender DM mailbox depends on no
+  individual relay — deposits replicate, fetches merge, a dead relay drops
+  from the candidate list. `dante-relay --p2p-listen` now also dials its
+  `--p2p-bootstrap` peers so one relay's DHT and provider record span the
+  whole relay set. Test `fan_out_classification`; live-verified on a
+  two-relay swarm.
+- **Still deferred:** a fully serverless mailbox (no relay at all — the
+  design's position is that offline delivery inherently needs a storage
+  supernode, and relays, now DHT-discovered and redundant, are that);
+  relay↔relay ledger/channel replication (clients bridge that today via
+  fan-out + gossip); health-based relay reordering; flipping the `p2p` Cargo
+  feature on by default (a deployment call — it pulls the whole libp2p tree
+  into every build).
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

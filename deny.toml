@@ -13,10 +13,11 @@ ignore = [
     "RUSTSEC-2026-0173",
     # paste is unmaintained (not vulnerable, no CVE). It is a build-time
     # proc-macro helper pulled by netlink-packet-core <- if-watch <- libp2p-tcp,
-    # which libp2p needs to watch interface changes on Linux. Only reachable
-    # when a downstream crate enables its `p2p` feature (default off); it emits
-    # no runtime code. No safe upgrade exists. Drop when the netlink stack moves
-    # to `pastey`, or if we vendor a different TCP transport for libp2p.
+    # which libp2p needs to watch interface changes on Linux. libp2p is now in
+    # the default build (the `p2p` feature is on by default; `--no-default-
+    # features` drops it). It emits no runtime code. No safe upgrade exists.
+    # Drop when the netlink stack moves to `pastey`, or if we vendor a
+    # different TCP transport for libp2p.
     "RUSTSEC-2024-0436",
 ]
 

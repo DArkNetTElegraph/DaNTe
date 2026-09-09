@@ -17,8 +17,9 @@ name = "dante"
 path = "src/main.rs"
 
 [features]
-# Opt-in libp2p support, forwarded to dante-core. Off by default so a plain
-# build does not pull the libp2p dependency tree.
+default = ["p2p"]
+# libp2p transport + DHT, forwarded to dante-core. On by default; build with
+# `--no-default-features` for a relay-only client with no libp2p tree.
 p2p = ["dante-core/p2p"]
 
 [dependencies]

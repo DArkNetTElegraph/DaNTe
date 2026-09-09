@@ -23,8 +23,9 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [features]
-# Opt-in libp2p support: a Kademlia DHT used as a decentralised key-directory
-# fallback alongside the relay. Off by default; pulls the libp2p dependency tree.
+default = ["p2p"]
+# libp2p transport + DHT. On by default (this is a P2P-first project); build
+# with `--no-default-features` for a relay-only client with no libp2p tree.
 p2p = ["dep:dante-p2p", "dante-net/p2p"]
 
 [dev-dependencies]

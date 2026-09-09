@@ -128,6 +128,19 @@ impl Client {
         )))
     }
 
+    /// Reach a relay over libp2p with no relay handed in: enter the DHT via
+    /// `bootstrap` multiaddrs and discover relays from their `dante/relay/v1`
+    /// provider records, keeping the rest as failover.
+    #[cfg(feature = "p2p")]
+    pub async fn connect_p2p_discover(
+        node: dante_p2p::Node,
+        bootstrap: &[String],
+    ) -> Result<Self, NetError> {
+        Ok(Client(Backend::P2p(
+            p2p_client::P2pBackend::connect_discover(node, bootstrap).await?,
+        )))
+    }
+
     /// The relay endpoint this client is (or was last) talking to.
     pub fn endpoint(&self) -> &str {
         match &self.0 {
@@ -203,60 +216,120 @@ impl TcpBackend {
 
 #[cfg(feature = "p2p")]
 mod p2p_client {
-    use dante_p2p::{Multiaddr, Node, PeerId};
+    use std::time::Duration;
+
+    use dante_p2p::{Multiaddr, Node, PeerId, RELAY_CAPABILITY};
 
     use crate::{
         error::NetError,
         wire::{Request, Response},
     };
 
-    /// A libp2p-backed relay connection: one `/dante/relay/1` request per
-    /// [`Request`]. libp2p handles (re)dialing the relay peer on demand.
+    /// A libp2p-backed relay connection. Each [`Request`] is one
+    /// `/dante/relay/1` round trip; libp2p (re)dials the relay peer on demand.
+    /// Holds one or more candidate relay `PeerId`s and rotates to the next on
+    /// a transport failure (a relay-level [`Response::Error`] is a real answer
+    /// and never triggers a rotation).
     pub struct P2pBackend {
         node: Node,
-        peer: PeerId,
-        addr: String,
+        candidates: Vec<PeerId>,
+        current: usize,
+        label: String,
+    }
+
+    fn peer_of(ma: &Multiaddr) -> Option<PeerId> {
+        ma.iter().find_map(|p| match p {
+            dante_p2p::multiaddr::Protocol::P2p(id) => Some(id),
+            _ => None,
+        })
     }
 
     impl P2pBackend {
+        /// Connect to one relay given by its full multiaddr (`…/p2p/<peer-id>`).
         pub async fn connect(node: Node, relay_addr: &str) -> Result<Self, NetError> {
             let ma: Multiaddr = relay_addr
                 .parse()
                 .map_err(|e| NetError::Peer(format!("bad relay multiaddr: {e}")))?;
-            let peer = ma
-                .iter()
-                .find_map(|p| match p {
-                    dante_p2p::multiaddr::Protocol::P2p(id) => Some(id),
-                    _ => None,
-                })
+            let peer = peer_of(&ma)
                 .ok_or_else(|| NetError::Peer("relay multiaddr has no /p2p/<peer-id>".into()))?;
             node.add_address(peer, ma.clone())
                 .await
                 .map_err(|e| NetError::Peer(e.to_string()))?;
-            // Best-effort warm dial; request-response also dials on demand.
-            let _ = node.dial(ma).await;
+            let _ = node.dial(ma).await; // warm dial; request-response also dials
             Ok(Self {
                 node,
-                peer,
-                addr: relay_addr.to_string(),
+                candidates: vec![peer],
+                current: 0,
+                label: relay_addr.to_string(),
+            })
+        }
+
+        /// Enter the DHT via `bootstrap` multiaddrs, then discover relays from
+        /// their `dante/relay/v1` provider records — no relay handed in.
+        pub async fn connect_discover(node: Node, bootstrap: &[String]) -> Result<Self, NetError> {
+            if bootstrap.is_empty() {
+                return Err(NetError::Peer(
+                    "p2p relay discovery needs at least one --bootstrap multiaddr".into(),
+                ));
+            }
+            for b in bootstrap {
+                if let Ok(ma) = b.parse::<Multiaddr>() {
+                    if let Some(p) = peer_of(&ma) {
+                        let _ = node.add_address(p, ma.clone()).await;
+                    }
+                    let _ = node.dial(ma).await;
+                }
+            }
+            let _ = node.bootstrap().await;
+
+            let mut candidates = Vec::new();
+            for _ in 0..25 {
+                if let Ok(mut provs) = node.get_providers(RELAY_CAPABILITY.to_vec()).await {
+                    if !provs.is_empty() {
+                        provs.sort();
+                        provs.dedup();
+                        candidates = provs;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            if candidates.is_empty() {
+                return Err(NetError::Peer(
+                    "no relays found on the DHT (dante/relay/v1 providers)".into(),
+                ));
+            }
+            Ok(Self {
+                node,
+                candidates,
+                current: 0,
+                label: "p2p-dht".into(),
             })
         }
 
         pub fn endpoint(&self) -> &str {
-            &self.addr
+            &self.label
         }
 
         pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
-            let bytes = self
-                .node
-                .request(self.peer, req.encode())
-                .await
-                .map_err(|e| NetError::Peer(e.to_string()))?;
-            let res = Response::decode(&bytes)?;
-            if let Response::Error(msg) = &res {
-                return Err(NetError::Peer(msg.clone()));
+            let bytes = req.encode();
+            let n = self.candidates.len();
+            let mut last = NetError::Closed;
+            for step in 0..n {
+                let idx = (self.current + step) % n;
+                match self.node.request(self.candidates[idx], bytes.clone()).await {
+                    Ok(raw) => {
+                        self.current = idx;
+                        let res = Response::decode(&raw)?;
+                        if let Response::Error(msg) = &res {
+                            return Err(NetError::Peer(msg.clone()));
+                        }
+                        return Ok(res);
+                    }
+                    Err(e) => last = NetError::Peer(e.to_string()),
+                }
             }
-            Ok(res)
+            Err(last)
         }
     }
 }

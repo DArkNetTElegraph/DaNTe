@@ -196,6 +196,11 @@ async fn serve_p2p(handler: Arc<RelayHandler>, listen: &str, seed: [u8; 32]) -> 
     node.listen_str(listen)
         .await
         .map_err(|e| anyhow::anyhow!("p2p listen {listen}: {e}"))?;
+    // Announce on the DHT that we serve `/dante/relay/1` so `--relay dht`
+    // clients can discover us. libp2p republishes it automatically.
+    node.start_providing(dante_p2p::RELAY_CAPABILITY.to_vec())
+        .await
+        .ok();
 
     let pid = node.peer_id();
     tokio::spawn(async move {

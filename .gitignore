@@ -9,17 +9,22 @@ Cargo.lock.orig
 /fuzz/artifacts
 /fuzz/Cargo.lock
 
-# Tauri / client
-/client/node_modules
-/client/dist
-/client/.svelte-kit
-/client/src-tauri/target
+# Desktop shell (apps/dante-desktop is a detached crate with its own .gitignore;
+# this is a belt-and-braces guard for its build output)
+/apps/*/target
+/apps/*/gen
+/apps/*/Cargo.lock
 
 # Local runtime state / keys — must never be committed
 *.dante-key
 *.keystore
 /.dante-data/
 **/dante-local-state/
+
+# Working art asset — the oversized 2000x2000 source logo. Nothing in the repo
+# or docs references it; a properly-sized logo can be added and linked when one
+# is needed.
+/DaNTe.png
 
 # Editor / OS
 .DS_Store

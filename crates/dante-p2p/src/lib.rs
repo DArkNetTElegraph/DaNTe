@@ -54,6 +54,10 @@ const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// `/dante/relay/1`", so a client with only bootstrap peers can discover
 /// relays instead of being handed one.
 pub const RELAY_CAPABILITY: &[u8] = b"dante/relay/v1";
+/// Gossipsub topic carrying encoded ledger `Record`s. Clients publish their
+/// own announce/liveness/revoke records here, and federated relays
+/// re-broadcast every record they accept so relay replicas converge.
+pub const LEDGER_TOPIC: &str = "dante/ledger/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum P2pError {

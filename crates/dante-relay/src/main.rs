@@ -217,31 +217,111 @@ async fn serve_p2p(
     node.start_providing(dante_p2p::RELAY_CAPABILITY.to_vec())
         .await
         .ok();
+    // Federation: fold every ledger record heard on the gossip topic into our
+    // replica, and re-broadcast every record we accept, so sibling relays
+    // converge without any direct relay-to-relay protocol.
+    node.subscribe(dante_p2p::LEDGER_TOPIC).await.ok();
+    // Gossip has no history, so pull each sibling's ledger once on startup;
+    // gossip then keeps replicas live from here.
+    for b in bootstrap {
+        match backfill_ledger_from(node.clone(), b, Arc::clone(&handler)).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(sibling = %b, records = n, "relay federation: backfilled")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(sibling = %b, error = %e, "relay federation: backfill failed"),
+        }
+    }
 
     let pid = node.peer_id();
-    tokio::spawn(async move {
-        // Keep a handle alive so the node's driver task isn't dropped, and log
-        // each dialable multiaddr for the operator.
-        let _node = node;
-        while let Some(ev) = events.recv().await {
-            if let dante_p2p::Event::Listening(a) = ev {
-                tracing::info!(multiaddr = %format!("{a}/p2p/{pid}"), "dante-relay libp2p endpoint");
+    let mut flush = tokio::time::interval(Duration::from_secs(2));
+
+    loop {
+        tokio::select! {
+            ev = events.recv() => match ev {
+                Some(dante_p2p::Event::Listening(a)) => {
+                    tracing::info!(
+                        multiaddr = %format!("{a}/p2p/{pid}"),
+                        "dante-relay libp2p endpoint"
+                    );
+                }
+                Some(dante_p2p::Event::Message { topic, data, .. })
+                    if topic == dante_p2p::LEDGER_TOPIC =>
+                {
+                    let accepted = handler
+                        .state()
+                        .lock()
+                        .await
+                        .ingest_gossiped_record(&data, now_ms());
+                    if accepted {
+                        tracing::debug!("relay federation: accepted a gossiped ledger record");
+                    }
+                }
+                Some(_) => {}
+                None => return Ok(()), // node event loop stopped
+            },
+            _ = flush.tick() => {
+                let pending = handler.state().lock().await.take_ledger_outbox();
+                for blob in pending {
+                    let _ = node.publish(dante_p2p::LEDGER_TOPIC, blob).await;
+                }
+            }
+            req = inbound.recv() => {
+                let Some(req) = req else { return Ok(()); };
+                let handler = Arc::clone(&handler);
+                tokio::spawn(async move {
+                    let ip = peer_pseudo_ip(&req.peer);
+                    let resp = match Request::decode(&req.body) {
+                        Ok(r) => handler.handle(r, ip).await,
+                        Err(e) => Response::Error(format!("bad request: {e}")),
+                    };
+                    req.respond(resp.encode()).await;
+                });
             }
         }
-    });
-
-    while let Some(req) = inbound.recv().await {
-        let handler = Arc::clone(&handler);
-        tokio::spawn(async move {
-            let ip = peer_pseudo_ip(&req.peer);
-            let resp = match Request::decode(&req.body) {
-                Ok(r) => handler.handle(r, ip).await,
-                Err(e) => Response::Error(format!("bad request: {e}")),
-            };
-            req.respond(resp.encode()).await;
-        });
     }
-    Ok(())
+}
+
+/// Pull a sibling relay's whole ledger over `/dante/relay/1` and fold it into
+/// our replica. Returns how many records were newly accepted.
+#[cfg(feature = "p2p")]
+async fn backfill_ledger_from(
+    node: dante_p2p::Node,
+    sibling_addr: &str,
+    handler: Arc<RelayHandler>,
+) -> anyhow::Result<u64> {
+    use dante_net::transport::Client;
+    use dante_net::wire::{Request, Response};
+
+    let mut client = Client::connect_p2p(node, sibling_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let size = match client.request(&Request::GetTreeHead).await {
+        Ok(Response::TreeHead { size, .. }) => size,
+        Ok(other) => anyhow::bail!("unexpected reply to GetTreeHead: {other:?}"),
+        Err(e) => anyhow::bail!("{e}"),
+    };
+    let mut accepted = 0u64;
+    let mut from = 0u64;
+    while from < size {
+        let to = (from + 256).min(size);
+        let blobs = match client.request(&Request::GetRecords { from, to }).await {
+            Ok(Response::Records(b)) => b,
+            Ok(other) => anyhow::bail!("unexpected reply to GetRecords: {other:?}"),
+            Err(e) => anyhow::bail!("{e}"),
+        };
+        if blobs.is_empty() {
+            break;
+        }
+        let mut st = handler.state().lock().await;
+        for blob in &blobs {
+            if st.ingest_gossiped_record(blob, now_ms()) {
+                accepted += 1;
+            }
+        }
+        from = to;
+    }
+    Ok(accepted)
 }
 
 /// A stable synthetic ULA-v6 address per libp2p peer, so the relay's per-IP

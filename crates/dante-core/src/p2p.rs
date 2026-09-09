@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use crate::error::CoreError;
 
 /// Gossipsub topic carrying encoded ledger [`Record`](dante_proto::record::Record)s.
-pub(crate) const LEDGER_TOPIC: &str = "dante/ledger/v1";
+pub(crate) use dante_p2p::LEDGER_TOPIC;
 /// Prefix of the per-channel gossipsub topic: `dante/chan/<base32 channel id>`.
 /// The payload is `seq` (8 bytes, little-endian) followed by the opaque channel
 /// log frame — the same bytes the relay stores under that `seq`.

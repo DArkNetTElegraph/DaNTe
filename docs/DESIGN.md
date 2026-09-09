@@ -416,13 +416,31 @@ DaNTe/
   sealed-sender deposit + mailbox fetch) — no TCP relay connection. Tests
   `a_relay_request_round_trips_over_libp2p` (dante-p2p),
   `client_talks_to_a_relay_over_libp2p` (dante-net). The relay is still a
-  storage node; this makes the *transport* libp2p, which is the layer
-  DHT-discovered / multi-relay / NAT-traversed relaying builds on.
+  storage node; this makes the *transport* libp2p.
+- **DHT relay discovery** *(done, opt-in — feature `p2p`)*: a client no longer
+  needs a relay endpoint at all. `dante-p2p`'s `Node` gained
+  `start_providing` / `get_providers`; `dante-relay --p2p-listen` announces
+  the well-known provider key `dante_p2p::RELAY_CAPABILITY` (`dante/relay/v1`),
+  auto-republished. `P2pBackend` holds a `Vec<PeerId>` of candidate relays and
+  rotates to the next on a *transport* failure (a relay-level `Response::Error`
+  is a real answer, no rotation). `Client::connect_p2p_discover(node,
+  bootstrap)` enters the DHT via the bootstrap multiaddrs and pulls the
+  provider set; `Engine::connect` understands `p2p-discover:<bootstrap,…>`;
+  `dante serve|chat|bot --relay dht --bootstrap <ma,…>` (or just
+  `--bootstrap`, no `--relay`) uses it. Test
+  `a_relay_is_found_through_dht_provider_records`; live-verified end to end
+  (onboard + ready with no relay endpoint given). Bootstrap addresses are
+  still hand-supplied — the "well-known addrs seeded via DNS/GitHub" step is
+  the last config-free piece.
 - **Still deferred:** gossipsub fan-out of channel MLS logs (channel delivery
-  leans on the relay's ordered per-channel log); a DHT / storage-supernode
-  design for the sealed-sender mailbox so a client needs *no* relay; learning
-  relay endpoints from `entry_relays`; health-based relay reordering; flipping
-  the `p2p` feature (and a libp2p `--relay`) on by default.
+  leans on the relay's ordered per-channel log — the accelerator needs a
+  seq-carrying gossip frame + a unified p2p node, and it sits on the core
+  receive path so it is being done carefully, not rushed); a DHT /
+  storage-supernode design for the sealed-sender mailbox so a client needs
+  *no* relay (the design's position is that offline delivery inherently needs
+  a storage supernode — relays, now DHT-discovered, are that); health-based
+  relay reordering; flipping the `p2p` Cargo feature on by default (a
+  deployment call — it pulls the whole libp2p tree into every build).
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

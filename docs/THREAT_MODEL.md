@@ -97,11 +97,17 @@ provide.
    …) before encryption, so the relay learns only a coarse bucket, not the
    exact length. The `channel_id` is shared only with members, but it does not
    rotate. With the `p2p` feature a posted frame is *also* gossiped on a topic
-   derived from the `channel_id` (`dante/chan/<b32 id>`): gossipsub peers on
+   derived from the `channel_id` (`dante/chan/<hex id>`): gossipsub peers on
    that topic — normally other channel members, but the mesh is best-effort —
    see the same opaque frame + timing the relay does, and the content stays
-   MLS-encrypted. It adds no metadata beyond what a member or the relay already
-   observes.
+   MLS-encrypted. **Federated relays** (a relay run with `--p2p-listen` +
+   `--p2p-bootstrap`) replicate ledger records, prekey bundles, sealed-sender
+   envelopes, last-resort key packages and channel-log frames among themselves
+   over gossipsub, so *every relay in that set* sees the metadata a single
+   relay would (recipient hint, size class, timing for envelopes; `channel_id`
+   + size + timing for channel frames) — never the plaintext. An operator who
+   wants to limit metadata exposure runs an unfederated relay (no
+   `--p2p-listen`).
    **Custom server emoji** images are stored in the relay blob store
    **unencrypted** (keyed by SHA-256, 7-day TTL), exactly like Discord's — the
    relay and anyone with the hash can see the artwork. Only the message text

@@ -463,13 +463,35 @@ DaNTe/
   `--p2p-bootstrap` peers so one relay's DHT and provider record span the
   whole relay set. Test `fan_out_classification`; live-verified on a
   two-relay swarm.
+- **Relay federation** *(done, opt-in — feature `p2p`)*: a relay with
+  `--p2p-listen` keeps its state in sync with its `--p2p-bootstrap` siblings
+  with no direct relay↔relay protocol — everything rides gossipsub +
+  `/dante/relay/1`. **Ledger:** startup pull of each sibling's whole ledger,
+  then subscribe `dante/ledger/v1`, fold every heard record, re-broadcast
+  every record accepted (from TCP or gossip). **Prekey bundles** and
+  **sealed-sender envelopes:** re-broadcast on publish/deposit, folded on
+  receipt (envelopes de-duped by SHA-256; the mailbox's caps still apply).
+  **Key packages:** only the reusable last-resort one is shared (single-use
+  KPs stay pinned); a follower adopts it only if it holds none of its own.
+  **Channel logs:** the first relay a client posts to becomes that channel's
+  *writer* and gossips its frames; a relay that lacks a channel a client asks
+  for pulls it from a sibling once (`adopt_channel_log`, seqs verbatim) and
+  then follows the writer's gossip. **Live-verified:** two `dante serve` on
+  two different relays, no shared relay — onboard, cross-relay DM both ways,
+  redeem an invite from a host on the other relay, join the channel and read
+  its history. Tests `federation_folds_a_gossiped_record_and_queues_it_once`,
+  `channel_federation_replicates_but_a_writer_ignores_followers`.
+- **Zero-config bootstrap:** `--bootstrap` merges with `DANTE_BOOTSTRAP` and a
+  compiled-in `DEFAULT_BOOTSTRAP` (empty until a network is deployed), so a
+  distro / systemd unit can point at a network without a flag.
 - **Still deferred:** a fully serverless mailbox (no relay at all — the
   design's position is that offline delivery inherently needs a storage
-  supernode, and relays, now DHT-discovered and redundant, are that);
-  relay↔relay ledger/channel replication (clients bridge that today via
-  fan-out + gossip); health-based relay reordering; flipping the `p2p` Cargo
-  feature on by default (a deployment call — it pulls the whole libp2p tree
-  into every build).
+  supernode, and relays, now DHT-discovered, redundant *and federated*, are
+  that); **concurrent multi-relay channel writes** — two relays both taking
+  `PostToChannel` for one channel diverge on `seq` (each is a local writer);
+  `--relay dht` avoids it (all clients converge on one relay per channel), and
+  a sequencer election / content-addressed message id is a later increment;
+  seeding `DEFAULT_BOOTSTRAP` (needs a deployed network).
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

@@ -432,15 +432,28 @@ DaNTe/
   (onboard + ready with no relay endpoint given). Bootstrap addresses are
   still hand-supplied — the "well-known addrs seeded via DNS/GitHub" step is
   the last config-free piece.
-- **Still deferred:** gossipsub fan-out of channel MLS logs (channel delivery
-  leans on the relay's ordered per-channel log — the accelerator needs a
-  seq-carrying gossip frame + a unified p2p node, and it sits on the core
-  receive path so it is being done carefully, not rushed); a DHT /
-  storage-supernode design for the sealed-sender mailbox so a client needs
-  *no* relay (the design's position is that offline delivery inherently needs
-  a storage supernode — relays, now DHT-discovered, are that); health-based
-  relay reordering; flipping the `p2p` Cargo feature on by default (a
-  deployment call — it pulls the whole libp2p tree into every build).
+- **Channel-log gossip acceleration** *(done, opt-in — feature `p2p`)*: a
+  posted channel frame also fans out on a per-channel gossipsub topic
+  (`dante/chan/<b32 id>`, payload `seq ‖ frame`). `poll_channels` merges a
+  gossiped frame **only at `last_seq + 1`**, and a gossiped frame **never
+  advances `last_seq`** — only a relay-fetched frame does. So a channel
+  member gossiping a junk frame at `last_seq+1` can't make a peer skip the
+  real entry (junk fails MLS, is dropped, cursor untouched, relay backfills
+  next tick); relay frames win the per-seq dedup; a `gossip_shown`
+  `{(channel, seq)}` set stops the authoritative relay copy re-emitting an
+  already-shown message. The libp2p node that carries the relay transport is
+  now *also* the DHT/gossip node (`P2p::adopt`), so `--relay <multiaddr>` /
+  `--relay dht` clients get prekey + ledger + channel gossip without a second
+  swarm. Tests `a_channel_message_arrives_over_gossip_and_is_not_double_delivered`
+  (real mesh) and `a_hostile_gossip_frame_cannot_suppress_the_real_message`.
+  The relay's ordered log is still the source of truth and the only path for
+  offline members / late joiners.
+- **Still deferred:** a DHT / storage-supernode design for the sealed-sender
+  mailbox so a client needs *no* relay (the design's position is that offline
+  delivery inherently needs a storage supernode — relays, now DHT-discovered,
+  are that); health-based relay reordering; flipping the `p2p` Cargo feature
+  on by default (a deployment call — it pulls the whole libp2p tree into
+  every build).
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

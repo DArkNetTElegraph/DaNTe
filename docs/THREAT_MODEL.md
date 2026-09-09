@@ -96,7 +96,12 @@ provide.
    Channel-log plaintexts are now padded to size buckets (64 B / 256 B / 1 KiB /
    …) before encryption, so the relay learns only a coarse bucket, not the
    exact length. The `channel_id` is shared only with members, but it does not
-   rotate.
+   rotate. With the `p2p` feature a posted frame is *also* gossiped on a topic
+   derived from the `channel_id` (`dante/chan/<b32 id>`): gossipsub peers on
+   that topic — normally other channel members, but the mesh is best-effort —
+   see the same opaque frame + timing the relay does, and the content stays
+   MLS-encrypted. It adds no metadata beyond what a member or the relay already
+   observes.
    **Custom server emoji** images are stored in the relay blob store
    **unencrypted** (keyed by SHA-256, 7-day TTL), exactly like Discord's — the
    relay and anyone with the hash can see the artwork. Only the message text

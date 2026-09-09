@@ -123,6 +123,16 @@ pub struct StoredChannel {
     pub log_key: Option<[u8; 32]>,
 }
 
+/// A persisted group-call MLS membership, keyed by the voice channel id.
+/// Lets a client resume a call at the same epoch after a restart instead of
+/// leaving a ghost leaf and rejoining.
+pub struct StoredGroupCall {
+    /// The voice channel whose call this is.
+    pub channel_id: [u8; 32],
+    /// The call group's MLS member state (`dante_mls::Member::export`).
+    pub mls: Vec<u8>,
+}
+
 /// A persisted `ServerRegister` proof of work, keyed by `server_root`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredServerPow {
@@ -203,6 +213,9 @@ pub struct PersistedState {
     /// Per-hosted-server `ServerRegister` proof of work. Solved once at
     /// creation, replayed on every later re-registration.
     pub server_register_pow: Vec<StoredServerPow>,
+    /// Group calls this client is in, so a restart resumes them at the same
+    /// MLS epoch instead of rejoining fresh.
+    pub group_calls: Vec<StoredGroupCall>,
 }
 
 /// Why a store file could not be read.
@@ -426,6 +439,11 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
             .u32(p.t_cost)
             .u8(p.difficulty)
             .fixed(&p.nonce);
+    }
+
+    w.u32(s.group_calls.len() as u32);
+    for gc in &s.group_calls {
+        w.fixed(&gc.channel_id).bytes(&gc.mls);
     }
     w.into_vec()
 }
@@ -701,6 +719,18 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut group_calls = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        group_calls.reserve(n);
+        for _ in 0..n {
+            group_calls.push(StoredGroupCall {
+                channel_id: r.fixed::<32>()?,
+                mls: r.bytes()?.to_vec(),
+            });
+        }
+    }
+
     // Restore message ids onto the aligned history entries.
     for (e, id) in history.iter_mut().zip(dm_msg_ids.iter()) {
         e.msg_id = *id;
@@ -732,6 +762,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         last_fetch_since_ms,
         server_bans,
         server_register_pow,
+        group_calls,
     })
 }
 
@@ -836,11 +867,18 @@ mod tests {
                 difficulty: 8,
                 nonce: [5u8; 16],
             }],
+            group_calls: vec![StoredGroupCall {
+                channel_id: [9u8; 32],
+                mls: vec![1, 2, 3, 4, 5],
+            }],
         };
         save(&path, &id, &state).unwrap();
 
         let back = load(&path, &id).unwrap().unwrap();
         assert_eq!(back.sessions.len(), 1);
+        assert_eq!(back.group_calls.len(), 1);
+        assert_eq!(back.group_calls[0].channel_id, [9u8; 32]);
+        assert_eq!(back.group_calls[0].mls, vec![1, 2, 3, 4, 5]);
         assert_eq!(back.sessions[0].0, peer);
         assert_eq!(back.history, state.history);
         assert_eq!(back.channel_history, state.channel_history);
@@ -897,6 +935,7 @@ mod tests {
             last_fetch_since_ms: 0,
             server_bans: vec![],
             server_register_pow: vec![],
+            group_calls: vec![],
         };
         save(&path, &id, &state).unwrap();
         assert!(matches!(

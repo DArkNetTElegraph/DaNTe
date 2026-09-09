@@ -1,9 +1,12 @@
-//! A minimal framed TCP transport: `u32` big-endian length prefix + body.
+//! Client↔relay transport for the [`Request`]/[`Response`] wire.
 //!
-//! One [`Request`] gets one [`Response`] per frame exchange; a connection may
-//! carry many. This is deliberately not libp2p — point-to-point client↔relay is
-//! all the MVP needs. A DHT / gossip overlay for multi-relay decentralisation
-//! is a later phase.
+//! One [`Request`] gets one [`Response`] per exchange; a connection may carry
+//! many. The default backend is a minimal framed TCP stream (`u32` big-endian
+//! length prefix + body). With the `p2p` feature, [`Client::connect_p2p`]
+//! carries the identical wire over a libp2p `/dante/relay/1` request-response
+//! stream instead, so a client can reach a relay peer-to-peer. The relay's
+//! serving side ([`serve`] / [`RequestHandler`]) is transport-agnostic —
+//! `dante-relay` feeds it both TCP connections and libp2p inbound requests.
 
 use std::{net::IpAddr, sync::Arc, time::Duration};
 

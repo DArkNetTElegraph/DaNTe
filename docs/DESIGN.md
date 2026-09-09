@@ -111,6 +111,17 @@ achievable with no project-run infrastructure.
   messages over the authenticated DM right after the Welcome —
   `ChannelControl::History` (tag 10), accepted only from the recorded channel
   host and only once, surfaced as `Inbound::ChannelBacklog`.
+- **Consent-based direct invites *(done)*:** inviting by fingerprint no longer
+  MLS-adds immediately (that silently confirmed the target holds the identity).
+  `invite_to_channel` sends `ChannelControl::Invite` (tag 11) and records
+  `(channel, member)` in `invites_sent`; the recipient gets
+  `Inbound::ChannelInvite` and answers with `accept_channel_invite`
+  (`InviteAccept`, tag 12) or `decline_channel_invite` (`InviteDecline`, tag
+  13). The host MLS-adds only on an accept matching a pending `invites_sent`
+  entry. Invite links were already accept-based (`Redeem`), so they're
+  unchanged. `GET /api/invites`, `POST /api/invite/{accept,decline}`; the SPA
+  lists pending invites as actionable rows in the notifications tray; CLI
+  `/acceptinvite` / `/declineinvite`.
 - **Public-server browser *(done)*:** `discoverFlow` renders a card grid (a
   25%-height banner over a coloured body with name / description / tags / Join)
   instead of a numbered prompt; the join password is only asked if the first

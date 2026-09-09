@@ -340,6 +340,13 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 .voice-mic-btn { padding: 10px 18px; border: 1px solid var(--divider); border-radius: var(--radius-pill);
   background: var(--bg-raised); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; }
 .voice-mic-btn.off { background: var(--danger, #d83c3e); color: #fff; border-color: transparent; }
+.voice-screens { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center;
+  margin: 16px 0 4px; width: 100%; }
+.voice-screen { display: flex; flex-direction: column; gap: 6px; align-items: center;
+  background: #000; border-radius: var(--radius-lg); border: 1px solid var(--divider);
+  padding: 6px; max-width: 520px; }
+.voice-screen video { width: 100%; max-height: 300px; border-radius: var(--radius); background: #000; }
+.voice-screen-label { font-size: 12px; color: var(--text-muted); }
 
 /* right-click context menus (replace the browser's) */
 .ctx-menu {
@@ -1924,6 +1931,30 @@ function renderVoiceRoom(c, target) {
     wrap.appendChild(stage);
   }
 
+  if (connected) {
+    const shares = [];
+    if (voiceRtc.screenStream) shares.push(["You — sharing", voiceRtc.screenStream]);
+    for (const fp of people) {
+      const link = voiceRtc.peers.get(fp);
+      if (link && link.remoteScreen)
+        shares.push([(dmLabel(fp) || short(fp)) + " — sharing", link.remoteScreen]);
+    }
+    if (shares.length) {
+      const grid = el("div", "voice-screens");
+      for (const [label, stream] of shares) {
+        const cell = el("div", "voice-screen");
+        const v = el("video");
+        v.autoplay = true; v.playsInline = true; v.muted = true;
+        v.srcObject = stream;
+        v.play().catch(() => {});
+        cell.appendChild(v);
+        cell.appendChild(el("div", "voice-screen-label", label));
+        grid.appendChild(cell);
+      }
+      wrap.appendChild(grid);
+    }
+  }
+
   const row = el("div", "voice-room-controls");
   const btn = el("button", "voice-join-btn" + (connected ? " leave" : ""),
     connected ? "Disconnect" : "Join voice");
@@ -1934,6 +1965,10 @@ function renderVoiceRoom(c, target) {
       voiceRtc.micOn ? "🎙 Mute" : "🔇 Unmute");
     mic.onclick = voiceToggleMic;
     row.appendChild(mic);
+    const scr = el("button", "voice-mic-btn" + (voiceRtc.screenStream ? " off" : ""),
+      voiceRtc.screenStream ? "🖥 Stop sharing" : "🖥 Share screen");
+    scr.onclick = voiceToggleScreen;
+    row.appendChild(scr);
   }
   wrap.appendChild(row);
 
@@ -2792,10 +2827,16 @@ async function refreshVoice() {
 const voiceRtc = {
   channelId: null,        // id of the voice channel we're connected to (media)
   localStream: null,      // our mic MediaStream
+  screenStream: null,     // our getDisplayMedia stream while sharing, else null
   micOn: true,
   iceServers: [],
-  peers: new Map(),       // fingerprint -> { pc, audio, polite, pending: [] }
+  peers: new Map(),       // fingerprint -> { pc, audio, polite, pending, screenSenders, remoteScreen }
 };
+
+// Re-paint the voice room if it's the open view (used by async media callbacks).
+function voiceRerender() {
+  if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+}
 
 async function voiceAction(channelId, join) {
   try {
@@ -2853,7 +2894,11 @@ function voiceRtcStop() {
   if (voiceRtc.localStream) {
     for (const t of voiceRtc.localStream.getTracks()) t.stop();
   }
+  if (voiceRtc.screenStream) {
+    for (const t of voiceRtc.screenStream.getTracks()) t.stop();
+  }
   voiceRtc.localStream = null;
+  voiceRtc.screenStream = null;
   voiceRtc.channelId = null;
   voiceRtc.peers.clear();
 }
@@ -2863,6 +2908,47 @@ function voiceToggleMic() {
   voiceRtc.micOn = !voiceRtc.micOn;
   for (const t of voiceRtc.localStream.getAudioTracks()) t.enabled = voiceRtc.micOn;
   render();
+}
+
+// Share (or stop sharing) this screen into the room. Adding / removing the
+// video track fires `onnegotiationneeded`; the perfect-negotiation logic in
+// voicePeerConnect / voiceOnSignal renegotiates each peer transparently.
+async function voiceToggleScreen() {
+  if (!voiceRtc.channelId) return;
+  if (voiceRtc.screenStream) { voiceStopScreen(); render(); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    ui.say("this browser can't share a screen (needs a secure context)");
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 15 }, audio: false,
+    });
+  } catch (e) {
+    if (e && e.name === "NotAllowedError") return;   // user dismissed the picker
+    ui.say("screen share: " + (e && e.message ? e.message : e));
+    return;
+  }
+  voiceRtc.screenStream = stream;
+  const vid = stream.getVideoTracks()[0];
+  if (vid) vid.onended = () => { voiceStopScreen(); render(); };  // "Stop sharing" in the browser chrome
+  for (const entry of voiceRtc.peers.values()) {
+    for (const t of stream.getTracks()) entry.screenSenders.push(entry.pc.addTrack(t, stream));
+  }
+  render();
+}
+
+function voiceStopScreen() {
+  const s = voiceRtc.screenStream;
+  if (!s) return;
+  for (const entry of voiceRtc.peers.values()) {
+    for (const sender of entry.screenSenders.splice(0)) {
+      try { entry.pc.removeTrack(sender); } catch (_) {}
+    }
+  }
+  for (const t of s.getTracks()) t.stop();
+  voiceRtc.screenStream = null;
 }
 
 // Connect to everyone the relay says is present; drop anyone who left.
@@ -2886,33 +2972,49 @@ function voicePeerClose(fp) {
   try { p.pc.close(); } catch (_) {}
   if (p.audio) { try { p.audio.srcObject = null; } catch (_) {} }
   voiceRtc.peers.delete(fp);
-  if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+  voiceRerender();
 }
 
 async function voicePeerConnect(fp, initiator) {
   if (voiceRtc.peers.has(fp)) return;
   const pc = new RTCPeerConnection({ iceServers: voiceRtc.iceServers });
-  const entry = { pc, audio: null, polite: store.me.fingerprint > fp, pending: [], makingOffer: false };
+  const entry = {
+    pc, audio: null, polite: store.me.fingerprint > fp, pending: [], makingOffer: false,
+    screenSenders: [], remoteScreen: null,
+  };
   voiceRtc.peers.set(fp, entry);
 
   for (const t of voiceRtc.localStream.getTracks()) pc.addTrack(t, voiceRtc.localStream);
+  // If we're already sharing when this peer joins, send them the screen too.
+  if (voiceRtc.screenStream) {
+    for (const t of voiceRtc.screenStream.getTracks())
+      entry.screenSenders.push(pc.addTrack(t, voiceRtc.screenStream));
+  }
 
   pc.onicecandidate = e => {
     if (e.candidate) voiceSignalSend(fp, 2, JSON.stringify(e.candidate));
   };
   pc.ontrack = e => {
+    if (e.track.kind === "video") {                 // a peer's shared screen
+      entry.remoteScreen = e.streams[0];
+      e.track.onended = () => { entry.remoteScreen = null; voiceRerender(); };
+      e.track.onmute = voiceRerender;
+      e.track.onunmute = voiceRerender;
+      voiceRerender();
+      return;
+    }
     let a = entry.audio;
     if (!a) { a = new Audio(); a.autoplay = true; entry.audio = a; }
     a.srcObject = e.streams[0];
     a.play().catch(() => {});
-    if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+    voiceRerender();
   };
   pc.onconnectionstatechange = () => {
     if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
       // Let presence-driven voiceSyncPeers re-establish if they're still here.
       if (pc.connectionState === "failed") voicePeerClose(fp);
     }
-    if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+    voiceRerender();
   };
   pc.onnegotiationneeded = async () => {
     try {

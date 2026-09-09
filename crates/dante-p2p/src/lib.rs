@@ -36,7 +36,7 @@ use libp2p::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub use libp2p::{Multiaddr, PeerId};
+pub use libp2p::{multiaddr, Multiaddr, PeerId};
 
 /// Protocol string announced over libp2p `identify`.
 const IDENTIFY_PROTO: &str = "/dante/p2p/1.0.0";

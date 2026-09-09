@@ -8,11 +8,18 @@ repository.workspace = true
 authors.workspace = true
 description = "DaNTe networking: framed TCP transport, relay request/response protocol, mailbox, rate limiting, ledger sync."
 
+[features]
+# Route the relay wire over a libp2p `/dante/relay/1` stream instead of raw TCP.
+# Pulls the libp2p tree, so it is off by default and turned on transitively by
+# `dante-core`/`dante-cli`'s own `p2p` feature.
+p2p = ["dep:dante-p2p"]
+
 [dependencies]
 dante-crypto.workspace = true
 dante-proto.workspace = true
 dante-identity.workspace = true
 dante-ledger.workspace = true
+dante-p2p = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "time", "macros"] }

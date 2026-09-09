@@ -227,14 +227,26 @@ mod p2p_client {
 
     /// A libp2p-backed relay connection. Each [`Request`] is one
     /// `/dante/relay/1` round trip; libp2p (re)dials the relay peer on demand.
-    /// Holds one or more candidate relay `PeerId`s and rotates to the next on
-    /// a transport failure (a relay-level [`Response::Error`] is a real answer
-    /// and never triggers a rotation).
+    /// Holds one or more candidate relays, each with a health score (lower is
+    /// better) so a flaky relay is tried last. A relay-level
+    /// [`Response::Error`] is a real answer and never counts against health.
     pub struct P2pBackend {
         node: Node,
-        candidates: Vec<PeerId>,
-        current: usize,
+        candidates: Vec<Cand>,
         label: String,
+    }
+
+    struct Cand {
+        peer: PeerId,
+        /// Higher = less healthy. Bumped on a transport failure, healed on a
+        /// success. Determines try-order.
+        score: i32,
+    }
+
+    impl Cand {
+        fn new(peer: PeerId) -> Self {
+            Cand { peer, score: 0 }
+        }
     }
 
     fn peer_of(ma: &Multiaddr) -> Option<PeerId> {
@@ -258,8 +270,7 @@ mod p2p_client {
             let _ = node.dial(ma).await; // warm dial; request-response also dials
             Ok(Self {
                 node,
-                candidates: vec![peer],
-                current: 0,
+                candidates: vec![Cand::new(peer)],
                 label: relay_addr.to_string(),
             })
         }
@@ -282,29 +293,42 @@ mod p2p_client {
             }
             let _ = node.bootstrap().await;
 
-            let mut candidates = Vec::new();
+            let mut peers = Vec::new();
             for _ in 0..25 {
                 if let Ok(mut provs) = node.get_providers(RELAY_CAPABILITY.to_vec()).await {
                     if !provs.is_empty() {
                         provs.sort();
                         provs.dedup();
-                        candidates = provs;
+                        peers = provs;
                         break;
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
-            if candidates.is_empty() {
+            if peers.is_empty() {
                 return Err(NetError::Peer(
                     "no relays found on the DHT (dante/relay/v1 providers)".into(),
                 ));
             }
             Ok(Self {
                 node,
-                candidates,
-                current: 0,
+                candidates: peers.into_iter().map(Cand::new).collect(),
                 label: "p2p-dht".into(),
             })
+        }
+
+        /// Candidate indices, healthiest first (stable within a score).
+        fn order(&self) -> Vec<usize> {
+            let mut idx: Vec<usize> = (0..self.candidates.len()).collect();
+            idx.sort_by_key(|&i| self.candidates[i].score);
+            idx
+        }
+
+        fn bump(&mut self, i: usize) {
+            self.candidates[i].score = (self.candidates[i].score + 2).min(20);
+        }
+        fn heal(&mut self, i: usize) {
+            self.candidates[i].score = (self.candidates[i].score - 1).max(0);
         }
 
         pub fn endpoint(&self) -> &str {
@@ -327,6 +351,7 @@ mod p2p_client {
 
         pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
             let bytes = req.encode();
+            let order = self.order();
             match FanOut::of(req) {
                 // Write to every discovered relay so any of them can serve the
                 // recipient later — the DHT-discovered relay set acts as one
@@ -334,11 +359,17 @@ mod p2p_client {
                 FanOut::Write => {
                     let mut ok = None;
                     let mut last = NetError::Closed;
-                    for &peer in &self.candidates {
-                        match self.one(peer, bytes.clone()).await {
-                            Ok(r) => ok = Some(r),
-                            Err(e @ NetError::Peer(_)) if ok.is_none() => last = e,
-                            Err(e) => last = e,
+                    for i in order {
+                        match self.one(self.candidates[i].peer, bytes.clone()).await {
+                            Ok(r) => {
+                                self.heal(i);
+                                ok = Some(r);
+                            }
+                            Err(e @ NetError::Peer(_)) => last = e, // relay refused; not a health hit
+                            Err(e) => {
+                                self.bump(i);
+                                last = e;
+                            }
                         }
                     }
                     ok.ok_or(last)
@@ -349,14 +380,22 @@ mod p2p_client {
                     let mut all = Vec::new();
                     let mut any = false;
                     let mut last = NetError::Closed;
-                    for &peer in &self.candidates {
-                        match self.one(peer, bytes.clone()).await {
+                    for i in order {
+                        match self.one(self.candidates[i].peer, bytes.clone()).await {
                             Ok(Response::Envelopes(v)) => {
+                                self.heal(i);
                                 any = true;
                                 all.extend(v);
                             }
-                            Ok(_) => any = true,
-                            Err(e) => last = e,
+                            Ok(_) => {
+                                self.heal(i);
+                                any = true;
+                            }
+                            Err(e @ NetError::Peer(_)) => last = e,
+                            Err(e) => {
+                                self.bump(i);
+                                last = e;
+                            }
                         }
                     }
                     if any {
@@ -365,20 +404,21 @@ mod p2p_client {
                         Err(last)
                     }
                 }
-                // Everything else: one relay, rotate to the next on a transport
-                // failure (a relay-level error is a real answer, no rotation).
+                // Everything else: one relay, healthiest first, next on a
+                // transport failure (a relay-level error is a real answer).
                 FanOut::One => {
-                    let n = self.candidates.len();
                     let mut last = NetError::Closed;
-                    for step in 0..n {
-                        let idx = (self.current + step) % n;
-                        match self.one(self.candidates[idx], bytes.clone()).await {
+                    for i in order {
+                        match self.one(self.candidates[i].peer, bytes.clone()).await {
                             Ok(res) => {
-                                self.current = idx;
+                                self.heal(i);
                                 return Ok(res);
                             }
                             Err(e @ NetError::Peer(_)) => return Err(e),
-                            Err(e) => last = e,
+                            Err(e) => {
+                                self.bump(i);
+                                last = e;
+                            }
                         }
                     }
                     Err(last)

@@ -25,6 +25,8 @@
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
 //! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
 //! `POST /api/emoji/remove {server,name}`,
+//! `GET /api/sticker?hash=`, `POST /api/sticker {server,name,image_hex}`,
+//! `POST /api/sticker/remove {server,name}`,
 //! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
 //! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
 //! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
@@ -275,6 +277,13 @@ enum Cmd {
     GetEmoji {
         hash: [u8; 32],
         reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
+    /// Add/replace (`image = Some`) or remove (`image = None`) a sticker.
+    Sticker {
+        server: String,
+        name: String,
+        image: Option<Vec<u8>>,
+        reply: oneshot::Sender<Result<String, String>>,
     },
     /// The saved contacts as a ready JSON array.
     Contacts { reply: oneshot::Sender<String> },
@@ -1968,12 +1977,18 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         .iter()
                         .map(|(n, h)| serde_json::json!({ "name": n, "hash": to_hex(h) }))
                         .collect();
+                    let stickers: Vec<_> = p
+                        .stickers
+                        .iter()
+                        .map(|(n, h)| serde_json::json!({ "name": n, "hash": to_hex(h) }))
+                        .collect();
                     serde_json::json!({
                         "version": p.version,
                         "owner": id_b32(&p.owner_id),
                         "roles": roles,
                         "assignments": assignments,
                         "emojis": emojis,
+                        "stickers": stickers,
                         "me_perms": engine.member_perms(&server, &me),
                     })
                     .to_string()
@@ -2030,6 +2045,29 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
         Cmd::GetEmoji { hash, reply } => {
             let blob = engine.fetch_blob(&hash).await.ok().flatten();
             let _ = reply.send(blob);
+        }
+        Cmd::Sticker {
+            server,
+            name,
+            image,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(sr) => match image {
+                    Some(bytes) => engine
+                        .set_server_sticker(&sr, &name, &bytes, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                    None => engine
+                        .remove_server_sticker(&sr, &name, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
         }
         Cmd::Contacts { reply } => {
             let rows: Vec<_> = engine
@@ -3567,6 +3605,73 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
             };
             dispatch(&mut stream, &shared, |reply| Cmd::Emoji {
+                server: r.server,
+                name: r.name,
+                image: None,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/sticker") => {
+            let hex = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("hash="))
+                .unwrap_or("");
+            let Some(hash) = hex_bytes(hex)
+                .filter(|b| b.len() == 32)
+                .map(|b| <[u8; 32]>::try_from(b).unwrap())
+            else {
+                return respond(&mut stream, 400, "text/plain", b"bad hash").await;
+            };
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::GetEmoji { hash, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            match rx.await.ok().flatten() {
+                Some(bytes) => respond(&mut stream, 200, sniff_image(&bytes), &bytes).await,
+                None => respond(&mut stream, 404, "text/plain", b"no such blob").await,
+            }
+        }
+
+        ("POST", "/api/sticker") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                name: String,
+                /// Hex-encoded image bytes.
+                image_hex: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let Some(image) = hex_bytes(&r.image_hex) else {
+                return respond(&mut stream, 400, "text/plain", b"bad image_hex").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Sticker {
+                server: r.server,
+                name: r.name,
+                image: Some(image),
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/sticker/remove") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                name: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Sticker {
                 server: r.server,
                 name: r.name,
                 image: None,

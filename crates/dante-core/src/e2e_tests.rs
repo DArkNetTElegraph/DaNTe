@@ -2254,6 +2254,79 @@ async fn custom_server_emoji_reaches_a_member() {
 }
 
 #[tokio::test]
+async fn server_stickers_reach_a_member_and_coexist_with_emoji() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+    macro_rules! settle {
+        () => {
+            for _ in 0..6 {
+                for e in [&mut host, &mut alice] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+
+    // A sticker and an emoji can share a server; a GIF sticker is allowed.
+    let png = b"\x89PNG\r\n\x1a\n-emoji-".to_vec();
+    host.set_server_emoji(&server, "wave", &png, now)
+        .await
+        .unwrap();
+    let gif = b"GIF89a\x01\x00\x01\x00-fake-sticker-".to_vec();
+    host.set_server_sticker(&server, "big_wave", &gif, now)
+        .await
+        .unwrap();
+
+    // A name already taken by an emoji is refused for a sticker.
+    assert!(host
+        .set_server_sticker(&server, "wave", &gif, now)
+        .await
+        .is_err());
+    // Charset and size are enforced.
+    assert!(host
+        .set_server_sticker(&server, "Bad Name", &gif, now)
+        .await
+        .is_err());
+    let mut too_big = b"GIF89a".to_vec();
+    too_big.resize(512 * 1024 + 1, 0);
+    assert!(host
+        .set_server_sticker(&server, "huge", &too_big, now)
+        .await
+        .is_err());
+    settle!();
+
+    let seen = alice.server_stickers(&server);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "big_wave");
+    assert_eq!(alice.fetch_blob(&seen[0].1).await.unwrap(), Some(gif));
+    // The emoji list is untouched by the sticker traffic.
+    assert_eq!(alice.server_emojis(&server).len(), 1);
+
+    host.remove_server_sticker(&server, "big_wave", now)
+        .await
+        .unwrap();
+    settle!();
+    assert!(alice.server_stickers(&server).is_empty());
+    assert_eq!(alice.server_emojis(&server).len(), 1);
+}
+
+#[tokio::test]
 async fn roles_muting_and_delegated_kick() {
     use crate::roles::PERM_KICK;
 

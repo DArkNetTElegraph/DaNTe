@@ -43,6 +43,9 @@ const SIG_DOMAIN: &[u8] = b"dante/server-policy/v1";
 pub const EMOJI_NAME_MAX: usize = 32;
 /// Max custom emoji a single server may register.
 pub const MAX_SERVER_EMOJIS: usize = 200;
+/// Max stickers a single server may register (fewer than emoji — each is a
+/// much larger image).
+pub const MAX_SERVER_STICKERS: usize = 100;
 
 /// Whether `name` is a valid custom-emoji shortcode: 1..=[`EMOJI_NAME_MAX`]
 /// bytes of `[a-z0-9_]`. Enforced both when an emoji is set and when a received
@@ -108,6 +111,10 @@ pub struct ServerPolicy {
     /// Custom emoji: `shortcode -> SHA-256 of the (plaintext) image blob on the
     /// relay blob store`. Rendered client-side as `:shortcode:`.
     pub emojis: Vec<(String, [u8; 32])>,
+    /// Stickers: `name -> SHA-256 of the (plaintext) image blob`. Like custom
+    /// emoji but a larger image, sent as a message of its own rather than
+    /// inline. Name charset matches an emoji shortcode.
+    pub stickers: Vec<(String, [u8; 32])>,
     /// When it was issued (Unix ms).
     pub issued_ms: u64,
     /// `server_root` over `SHA-256(SIG_DOMAIN || body)`.
@@ -124,6 +131,7 @@ impl ServerPolicy {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             now_ms,
         )
     }
@@ -137,6 +145,7 @@ impl ServerPolicy {
         roles: Vec<Role>,
         assignments: Vec<([u8; 32], Vec<u16>)>,
         emojis: Vec<(String, [u8; 32])>,
+        stickers: Vec<(String, [u8; 32])>,
         now_ms: u64,
     ) -> Self {
         let mut p = Self {
@@ -146,6 +155,7 @@ impl ServerPolicy {
             roles,
             assignments,
             emojis,
+            stickers,
             issued_ms: now_ms,
             sig: [0u8; SIG_LEN],
         };
@@ -156,6 +166,14 @@ impl ServerPolicy {
     /// The relay blob hash for a custom emoji shortcode, if the server has one.
     pub fn emoji_hash(&self, name: &str) -> Option<[u8; 32]> {
         self.emojis.iter().find(|(n, _)| n == name).map(|(_, h)| *h)
+    }
+
+    /// The relay blob hash for a sticker name, if the server has one.
+    pub fn sticker_hash(&self, name: &str) -> Option<[u8; 32]> {
+        self.stickers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, h)| *h)
     }
 
     fn body(&self) -> Vec<u8> {
@@ -177,9 +195,18 @@ impl ServerPolicy {
         }
         // Tail-appended so a policy signed before custom emoji existed still
         // verifies (its body ends after `assignments`, `emojis` is empty).
-        if !self.emojis.is_empty() {
+        // The sticker list is a further tail after that; when it is present the
+        // emoji count is always written (possibly 0) so the reader can tell the
+        // two sections apart.
+        if !self.emojis.is_empty() || !self.stickers.is_empty() {
             w.u32(self.emojis.len() as u32);
             for (name, hash) in &self.emojis {
+                w.string(name).fixed(hash);
+            }
+        }
+        if !self.stickers.is_empty() {
+            w.u32(self.stickers.len() as u32);
+            for (name, hash) in &self.stickers {
                 w.string(name).fixed(hash);
             }
         }
@@ -275,6 +302,18 @@ impl ServerPolicy {
                 emojis.push((name, b.fixed::<32>()?));
             }
         }
+        let mut stickers = Vec::new();
+        if b.remaining() > 0 {
+            let ns = bounded(&mut b)?;
+            stickers.reserve(ns);
+            for _ in 0..ns {
+                let name = b.string()?;
+                if !valid_emoji_name(&name) {
+                    return Err(WireError::Invalid("sticker name"));
+                }
+                stickers.push((name, b.fixed::<32>()?));
+            }
+        }
         b.finish()?;
         Ok(Self {
             server_root,
@@ -283,6 +322,7 @@ impl ServerPolicy {
             roles,
             assignments,
             emojis,
+            stickers,
             issued_ms,
             sig,
         })
@@ -346,6 +386,7 @@ mod tests {
             vec![mod_role, muted],
             vec![(alice, vec![1, 2])],
             vec![],
+            vec![],
             0,
         );
         p.verify().unwrap();
@@ -359,6 +400,7 @@ mod tests {
             6,
             p.roles.clone(),
             vec![(carol, vec![1])],
+            vec![],
             vec![],
             0,
         );
@@ -377,7 +419,7 @@ mod tests {
             ("blobwave".to_string(), [9u8; 32]),
             ("party_parrot".to_string(), [8u8; 32]),
         ];
-        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], emojis.clone(), 0);
+        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], emojis.clone(), vec![], 0);
         p.verify().unwrap();
         assert_eq!(p.emoji_hash("party_parrot"), Some([8u8; 32]));
         assert_eq!(p.emoji_hash("nope"), None);
@@ -386,7 +428,63 @@ mod tests {
         // An emoji-free policy still encodes to the pre-emoji body layout.
         let plain = ServerPolicy::genesis(&root(), owner, 0);
         assert!(plain.emojis.is_empty());
+        assert!(plain.stickers.is_empty());
         assert_eq!(ServerPolicy::decode(&plain.encode()).unwrap(), plain);
+    }
+
+    #[test]
+    fn stickers_roundtrip_and_survive_an_empty_emoji_list() {
+        let owner = [1u8; 32];
+        let stickers = vec![
+            ("wave".to_string(), [4u8; 32]),
+            ("shrug_dog".to_string(), [5u8; 32]),
+        ];
+        // No emoji, only stickers — the emoji count (0) must still be written
+        // so decode can split the two tail sections.
+        let p = ServerPolicy::signed(
+            &root(),
+            owner,
+            7,
+            vec![],
+            vec![],
+            vec![],
+            stickers.clone(),
+            0,
+        );
+        p.verify().unwrap();
+        assert_eq!(p.sticker_hash("wave"), Some([4u8; 32]));
+        assert_eq!(p.sticker_hash("nope"), None);
+        assert_eq!(ServerPolicy::decode(&p.encode()).unwrap(), p);
+
+        // Both lists populated.
+        let both = ServerPolicy::signed(
+            &root(),
+            owner,
+            8,
+            vec![],
+            vec![],
+            vec![("blob".to_string(), [9u8; 32])],
+            stickers,
+            0,
+        );
+        both.verify().unwrap();
+        assert_eq!(ServerPolicy::decode(&both.encode()).unwrap(), both);
+
+        // A hostile sticker name is refused at decode, like an emoji shortcode.
+        let evil = ServerPolicy::signed(
+            &root(),
+            owner,
+            9,
+            vec![],
+            vec![],
+            vec![],
+            vec![(r#"x"><img src=x>"#.to_string(), [1u8; 32])],
+            0,
+        );
+        assert!(matches!(
+            ServerPolicy::decode(&evil.encode()),
+            Err(WireError::Invalid("sticker name"))
+        ));
     }
 
     #[test]
@@ -395,7 +493,7 @@ mod tests {
         // refused at decode, before it can reach a client's render sink.
         let owner = [1u8; 32];
         let evil = vec![(r#"x"><img src=x onerror=alert(1)>"#.to_string(), [9u8; 32])];
-        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], evil, 0);
+        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], evil, vec![], 0);
         // The signature is valid over the hostile bytes...
         p.verify().unwrap();
         // ...but decode refuses the shortcode.

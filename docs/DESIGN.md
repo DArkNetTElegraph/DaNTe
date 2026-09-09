@@ -248,8 +248,8 @@ achievable with no project-run infrastructure.
 `channel_id` + password wrapper. Gossipsub fan-out of the ledger + channel
 logs (the libp2p DHT is wired in as an opt-in key-directory fallback — feature
 `p2p`; see Phase 3); an SFrame layer over the group-call key (Phase 7 — screen
-share itself is done, browser WebRTC); rich features — stickers/soundboards,
-bots, embeds (Phase 8); the Tauri desktop native layer.
+share itself is done, browser WebRTC); rich features — soundboards, bots,
+embeds (Phase 8 — stickers done); the Tauri desktop native layer.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -720,8 +720,23 @@ infrastructure. Reached. ---**
   `POST /api/emoji {server,name,image_hex}`, `POST /api/emoji/remove`,
   `GET /api/emoji?hash=` (MIME-sniffed). SPA renders `:shortcode:` in channel
   messages and reaction chips as `<img>`, and a 😀 button uploads/removes.
-  `chat`: `/emoji <root> <name> <path|remove>`. Stickers / soundboards still to
-  do.
+  `chat`: `/emoji <root> <name> <path|remove>`.
+- **Stickers** *(done)*: `ServerPolicy` gained a second tail field `stickers:
+  Vec<(name, [u8;32])>` after `emojis` — when stickers are present the emoji
+  count is always written (possibly 0) so decode can split the two sections;
+  a pre-sticker policy still verifies. `Engine::set_server_sticker` /
+  `remove_server_sticker` / `server_stickers` mirror the emoji methods, but the
+  image budget is 512 KiB and GIF / WebP are allowed for animation, and a
+  sticker name may not collide with an existing emoji on the same server. A
+  sticker is *sent* as an ordinary text message whose whole body is one
+  `:name:` token — no new `Content` kind — which the SPA renders as a large
+  standalone `<img class="sticker">` (≤180 px) when `name` resolves against the
+  server's sticker set. `serve`: `GET /api/sticker?hash=`, `POST /api/sticker`,
+  `POST /api/sticker/remove`; policy JSON gained `stickers`. SPA: a composer 🖼
+  button opens a sticker grid that sends on click (shown only in a channel of a
+  server that has stickers); owner management is in server settings → "Emoji &
+  stickers". `chat`: `/sticker <root> <name> <path|remove>`. Soundboards still
+  to do.
 - Tenor/Giphy search — opt-in, off by default, warns it contacts a third party.
 - URL embeds — opt-in (leaks IP); optionally via a relay-side unfurler.
 - Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.

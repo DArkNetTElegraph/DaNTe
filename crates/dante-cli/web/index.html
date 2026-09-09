@@ -246,6 +246,10 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
   vertical-align: -0.35em; margin: 0 1px; }
 .react-chip img.emoji { width: 16px; height: 16px; vertical-align: -0.2em; }
 .emoji-cell img.emoji { width: 22px; height: 22px; vertical-align: middle; }
+/* a lone-sticker message renders large and blockish */
+img.sticker { display: block; max-width: 180px; max-height: 180px; object-fit: contain;
+  margin: 2px 0; border-radius: var(--radius); }
+.emoji-cell img.sticker { width: 48px; height: 48px; margin: 0; }
 .chan-row .tag { margin-left: auto; font-size: 11px; color: var(--cornflower-blue); }
 .chan-row.blocked .name { text-decoration: line-through; opacity: .55; }
 #btn-contact.on { color: var(--orange); }
@@ -918,9 +922,11 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
         <button type="button" id="attach" class="ghost-icon" title="Attach a file (DMs only)" data-icon="paperclip" disabled></button>
         <input id="text" autocomplete="off" placeholder="Message" disabled />
         <button type="button" id="emoji-pick" class="ghost-icon" title="Emoji" data-icon="smile" disabled></button>
+        <button type="button" id="sticker-pick" class="ghost-icon" title="Stickers" data-icon="image" disabled hidden></button>
         <button id="send" disabled>Send</button>
       </form>
       <input type="file" id="chat-file" hidden>
+      <input type="file" id="sticker-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
     </div>
   </section>
 
@@ -955,6 +961,7 @@ const short = s => (s && s.includes("-")) ? s.split("-").slice(0, 2).join("-") :
 const ICONS = {
   paperclip: '<path d="M21 8.5 12.8 16.7a3.5 3.5 0 0 1-5-5l8.2-8.2a2.3 2.3 0 0 1 3.3 3.3l-8.2 8.2a1.2 1.2 0 0 1-1.7-1.7l7.6-7.6"/>',
   smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
   bell: '<path d="M18 8a6 6 0 1 0-12 0c0 6-3 8-3 8h18s-3-2-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
   "bell-off": '<path d="M8.7 6.3A6 6 0 0 1 18 8c0 3 .8 5 1.6 6.3M6 8c0 6-3 8-3 8h12"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/><path d="m2 2 20 20"/>',
   phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.9.6 2.9.7a2 2 0 0 1 1.7 2Z"/>',
@@ -1129,6 +1136,7 @@ const store = {
   dmEdits: {},                        // dm msg_id (hex) -> { text, deleted }
   safety: {},                         // dm fp -> {number,verified,available}
   emojis: {},                         // server root -> { shortcode: hexhash }
+  stickers: {},                       // server root -> { name: hexhash }
   contacts: [],                       // [{fp,petname,verified,added_ms}]
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
@@ -1366,6 +1374,7 @@ function selectTarget(server, target) {
   const box = $("#text");
   box.disabled = !target; $("#send").disabled = !target;
   $("#emoji-pick").disabled = !target;
+  updateStickerButton();
   // Attachments go through the DM file-transfer path only.
   $("#attach").disabled = !target || target.startsWith("#") || isSelf(target);
   if (target) box.focus();
@@ -2203,6 +2212,43 @@ async function emojiFlow(root) {
   inp.click();
 }
 
+// Owner-only sticker management for one of your servers (mirrors emojiFlow).
+async function stickerFlow(root) {
+  if (!root) { ui.say("Open one of your own server's channels to manage its stickers."); return; }
+  const listed = Object.keys(store.stickers[root] || {});
+  const name = await ui.ask(
+    "Sticker name — letters, digits, underscore.\n" +
+    "Prefix with '-' to remove one instead.\n\n" +
+    (listed.length ? "current: " + listed.map(n => ":" + n + ":").join("  ") : "none yet"),
+    "");
+  if (!name) return;
+  if (name.startsWith("-")) {
+    api.post("/api/sticker/remove", { server: root, name: name.slice(1).trim() })
+      .then(refreshPolicies)
+      .catch(e => ui.sys("remove failed: " + e.message));
+    return;
+  }
+  const inp = $("#sticker-file");
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    inp.value = "";
+    if (!f) return;
+    if (!/\.(png|jpe?g|gif|webp)$/i.test(f.name) && !/^image\/(png|jpeg|gif|webp)$/.test(f.type)) {
+      ui.say("a sticker must be a PNG, JPEG, GIF or WebP"); return;
+    }
+    if (f.size > 512 * 1024) { ui.say("sticker image must be 512 KiB or smaller"); return; }
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    let hex = "";
+    for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+    try {
+      await api.post("/api/sticker", { server: root, name, image_hex: hex });
+      await refreshPolicies();
+      ui.sys("added sticker :" + name + ":");
+    } catch (e) { ui.sys("upload failed: " + e.message); }
+  };
+  inp.click();
+}
+
 async function toggleReact(channelTarget, seq, emoji, remove) {
   try { await api.post("/api/react", { channel: channelTarget, seq, emoji, remove }); }
   catch (e) { ui.sys("react failed: " + e.message); }
@@ -2527,19 +2573,94 @@ function openEmojiPicker(anchor, onPick) {
 }
 function emojiPopOutside(e) {
   // Ignore clicks on the button that opened it (its own handler toggles).
-  if (emojiPop && !emojiPop.contains(e.target) && !e.target.closest("#emoji-pick, .react-chip.add")) {
+  if (emojiPop && !emojiPop.contains(e.target)
+      && !e.target.closest("#emoji-pick, #sticker-pick, .react-chip.add")) {
     emojiPopClose();
   }
 }
 addEventListener("keydown", e => { if (e.key === "Escape") emojiPopClose(); });
+
+// A flat grid of the current server's stickers; a click sends one immediately.
+function openStickerPicker(anchor) {
+  if (emojiPop) { emojiPopClose(); return; }
+  const entries = Object.entries(stickerMap());
+  if (!entries.length) { ui.say("This server has no stickers yet."); return; }
+  const pop = el("div", "emoji-pop");
+  const grid = el("div", "emoji-grid");
+  for (const [nm, hash] of entries) {
+    const b = el("button", "emoji-cell");
+    const img = el("img", "sticker");
+    img.src = "/api/sticker?hash=" + encodeURIComponent(hash);
+    img.alt = ":" + nm + ":";
+    b.appendChild(img);
+    b.title = ":" + nm + ":";
+    b.onclick = () => { emojiPopClose(); sendSticker(nm); };
+    grid.appendChild(b);
+  }
+  pop.appendChild(grid);
+  pop.style.visibility = "hidden";
+  document.body.appendChild(pop);
+  emojiPop = pop;
+  const r = anchor.getBoundingClientRect();
+  const h = pop.offsetHeight, w = pop.offsetWidth;
+  const above = r.top - 8 - h;
+  pop.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + "px";
+  pop.style.top = (above >= 8 ? above : Math.min(r.bottom + 8, innerHeight - h - 8)) + "px";
+  pop.style.visibility = "";
+  setTimeout(() => addEventListener("click", emojiPopOutside), 0);
+}
+
+// Send `:name:` as its own message on the current target (channel or DM).
+async function sendSticker(name) {
+  const t = curTarget();
+  if (!t) return;
+  const text = ":" + name + ":";
+  try {
+    if (isSelf(t)) {
+      store.messages.push({ kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1 });
+      renderChat();
+    } else if (t.startsWith("#")) {
+      await api.send(t, text, null);
+    } else {
+      store._pendingDmTarget = t;
+      const res = await api.send(t, text);
+      store._pendingDmTarget = null;
+      const mid = res && typeof res.ok === "string" && /^[0-9a-f]{32}$/.test(res.ok) ? res.ok : undefined;
+      store.messages.push({ kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1, msg_id: mid });
+      renderChat();
+    }
+  } catch (err) { ui.sys("Send failed: " + err.message); }
+}
 
 /* custom-emoji map for the server currently in view: { shortcode: hexhash } */
 function emojiMap() {
   const root = store.rootOf(store.view.server);
   return (root && store.emojis[root]) || {};
 }
+function stickerMap() {
+  const root = store.rootOf(store.view.server);
+  return (root && store.stickers[root]) || {};
+}
+// Show the composer sticker button only in a channel of a server that has any.
+function updateStickerButton() {
+  const stk = $("#sticker-pick");
+  if (!stk) return;
+  const target = curTarget();
+  const inChannel = !!(target && target.startsWith("#"));
+  const has = inChannel && Object.keys(stickerMap()).length > 0;
+  stk.hidden = !has;
+  stk.disabled = !has;
+}
 /* escape, then swap :shortcode: for a custom emoji <img> and @fp for a mention */
 function richText(s) {
+  // A message that is nothing but one :name: matching a server sticker renders
+  // as a large standalone image, not an inline emoji.
+  const lone = s.trim().match(/^:([a-z0-9_]{1,32}):$/);
+  if (lone) {
+    const sm = stickerMap();
+    if (sm[lone[1]])
+      return `<img class="sticker" alt=":${lone[1]}:" title=":${lone[1]}:" src="/api/sticker?hash=${sm[lone[1]]}">`;
+  }
   const m = emojiMap();
   let out = esc(s).replace(/:([a-z0-9_]{1,32}):/g, (whole, name) =>
     m[name]
@@ -3209,6 +3330,8 @@ async function refreshPolicies() {
         const changed = JSON.stringify(p) !== JSON.stringify(store.policies[root]);
         store.policies[root] = p;
         store.emojis[root] = Object.fromEntries((p.emojis || []).map(e => [e.name, e.hash]));
+        store.stickers[root] = Object.fromEntries((p.stickers || []).map(e => [e.name, e.hash]));
+        updateStickerButton();
         if (changed) render();
       }
     } catch (_) {}
@@ -3286,6 +3409,7 @@ $("#attach").addEventListener("click", () => $("#chat-file").click());
 $("#emoji-pick").addEventListener("click", () => {
   openEmojiPicker($("#emoji-pick"), s => { insertAtCaret($("#text"), s); $("#text").focus(); });
 });
+$("#sticker-pick").addEventListener("click", () => openStickerPicker($("#sticker-pick")));
 $("#chat-file").addEventListener("change", e => {
   const f = e.target.files && e.target.files[0];
   e.target.value = "";
@@ -3598,6 +3722,15 @@ function openServerSettings(server) {
     ? p.roles.length + " role(s): " + p.roles.map(r => r.name).join(", ")
     : "No custom roles — everyone can send.");
   act(rSec, "Manage roles…", () => rolesFlow(server));
+
+  if (isOwner) {
+    const pSec = sec("Emoji & stickers");
+    const ne = Object.keys((root && store.emojis[root]) || {}).length;
+    const ns = Object.keys((root && store.stickers[root]) || {}).length;
+    note(pSec, `${ne} custom emoji, ${ns} sticker${ns === 1 ? "" : "s"}.`);
+    act(pSec, "Manage custom emoji…", () => emojiFlow(root));
+    act(pSec, "Manage stickers…", () => stickerFlow(root));
+  }
 
   const aSec = sec("Access");
   act(aSec, "Set or change the join password…", () => joinPwFlow(server));

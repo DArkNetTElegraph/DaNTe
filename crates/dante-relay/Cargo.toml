@@ -13,7 +13,10 @@ name = "dante-relay"
 path = "src/main.rs"
 
 [features]
-# Also accept clients over a libp2p `/dante/relay/1` stream (`--p2p-listen`).
+default = ["p2p"]
+# Accept clients over a libp2p `/dante/relay/1` stream (`--p2p-listen`) and
+# federate the ledger with sibling relays. On by default; build with
+# `--no-default-features` for a TCP-only relay with no libp2p tree.
 p2p = ["dep:dante-p2p", "dante-net/p2p"]
 
 [dependencies]

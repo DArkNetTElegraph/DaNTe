@@ -246,14 +246,15 @@ achievable with no project-run infrastructure.
   and the coalescing rule (>3 concurrent → "several people are typing…").
 
 **Not built yet:** private-channel access control beyond the secret
-`channel_id` + password wrapper. Gossipsub fan-out of channel MLS logs, and a
-DHT / storage-supernode mailbox so a client needs no relay at all (the libp2p
-`p2p` feature already gives a DHT key-directory fallback, ledger gossip, and
-the whole relay wire over a `/dante/relay/1` libp2p stream — see Phase 3 —
-but the relay is still the store-and-forward node and the `p2p` feature is
-off by default); the group-call SFU that the Phase 7 SFrame layer is for; the
-Tauri desktop native layer. Phase 8 (stickers, soundboards, opt-in URL
-embeds, headless bot bridge) is done.
+`channel_id` + password wrapper; a fully serverless mailbox so a client needs
+no relay at all (the relay is still the store-and-forward node — but the
+`p2p` feature, **now on by default**, gives DHT relay discovery, the relay
+wire over a `/dante/relay/1` libp2p stream, redundant fan-out/merge across
+the discovered relay set, ledger gossip + startup backfill that federates
+relay replicas, and gossip acceleration for channel logs — see Phase 3);
+the group-call SFU that the Phase 7 SFrame layer is for; the Tauri desktop
+native layer. Phase 8 (stickers, soundboards, opt-in URL embeds, headless
+bot bridge) is done.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before

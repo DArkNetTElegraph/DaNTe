@@ -7,6 +7,7 @@
 //! (`src/main.rs`), which also depends on this crate.
 
 pub mod serve;
+pub mod unfurl;
 
 use anyhow::Result;
 use dante_identity::id::IdentityId;

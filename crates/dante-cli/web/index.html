@@ -249,6 +249,19 @@ img.emoji { width: var(--emoji-size); height: var(--emoji-size); object-fit: con
 /* a lone-sticker message renders large and blockish */
 img.sticker { display: block; max-width: 180px; max-height: 180px; object-fit: contain;
   margin: 2px 0; border-radius: var(--radius); }
+/* opt-in link preview card */
+.embed-card { display: flex; gap: 10px; margin: 6px 0 2px; max-width: 460px;
+  border: 1px solid var(--divider); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); background: var(--bg-raised); padding: 8px 10px;
+  text-decoration: none; color: inherit; overflow: hidden; }
+.embed-card:hover { background: var(--bg-hover); }
+.embed-img { width: 76px; height: 76px; object-fit: cover; border-radius: 4px; flex: 0 0 auto; }
+.embed-text { min-width: 0; }
+.embed-site { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .03em; }
+.embed-title { font-size: 13px; font-weight: 600; color: var(--link, var(--accent));
+  margin: 1px 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.embed-desc { font-size: 12px; color: var(--text-muted); display: -webkit-box;
+  -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .emoji-cell img.sticker { width: 48px; height: 48px; margin: 0; }
 .chan-row .tag { margin-left: auto; font-size: 11px; color: var(--cornflower-blue); }
 .chan-row.blocked .name { text-decoration: line-through; opacity: .55; }
@@ -1145,6 +1158,8 @@ const store = {
   emojis: {},                         // server root -> { shortcode: hexhash }
   stickers: {},                       // server root -> { name: hexhash }
   sounds: {},                         // server root -> { name: hexhash }
+  embedsOn: LS.get("embeds_on", false), // opt-in link previews (leaks IP)
+  embeds: {},                         // url -> preview | null (miss) | "pending"
   contacts: [],                       // [{fp,petname,verified,added_ms}]
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
@@ -1888,6 +1903,7 @@ function renderChat() {
       if (dmEd) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
     }
     g.body.appendChild(line);
+    if (!deleted && store.embedsOn) maybeEmbed(g.body, bodyText);
     if (target.startsWith("#") && m.ref_seq && !m._deleted) {
       addMsgActions(g.body, target, m);
       renderReactions(g.body, target, m.ref_seq);
@@ -1907,6 +1923,48 @@ function renderChat() {
   msgPaintTs = Date.now();
   renderCallbar();
   renderReplyBar();
+}
+
+// Opt-in link preview. Pulls the first http(s) URL out of `text`; asks
+// `dante serve` (once, cached per URL) to unfurl it; appends a card.
+const URL_RE = /https?:\/\/[^\s<>"')\]]+/;
+function maybeEmbed(container, text) {
+  const m = String(text || "").match(URL_RE);
+  if (!m) return;
+  const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
+  const hit = store.embeds[url];
+  if (hit === "pending") return;
+  if (hit === null || hit === undefined) {
+    if (hit === undefined) {
+      store.embeds[url] = "pending";
+      api.post("/api/unfurl", { url })
+        .then(res => {
+          store.embeds[url] = (res && !res.error && (res.title || res.description || res.image))
+            ? res : null;
+          renderChat();
+        })
+        .catch(() => { store.embeds[url] = null; });
+    }
+    return;
+  }
+  const card = embedCard(hit);
+  if (card) container.appendChild(card);
+}
+function embedCard(p) {
+  if (!p || !/^https?:\/\//i.test(p.url || "")) return null;
+  const card = el("a", "embed-card");
+  card.href = p.url; card.target = "_blank"; card.rel = "noopener noreferrer";
+  if (p.image && /^data:image\//.test(p.image)) {
+    const im = el("img", "embed-img");
+    im.src = p.image; im.alt = "";
+    card.appendChild(im);
+  }
+  const t = el("div", "embed-text");
+  if (p.site) t.appendChild(el("div", "embed-site", p.site));
+  if (p.title) t.appendChild(el("div", "embed-title", p.title));
+  if (p.description) t.appendChild(el("div", "embed-desc", p.description));
+  card.appendChild(t);
+  return card;
 }
 
 // A voice channel: no message log, just the room and a Join / Leave control.
@@ -3685,6 +3743,14 @@ function openSettings() {
   const beSec = el("div", "set-sec");
   beSec.appendChild(Object.assign(el("div", "set-h"), { textContent: "Behaviour" }));
   beSec.appendChild(settingToggle("Broadcast typing indicators", typingEnabled(), on => LS.set("typing_off", !on)));
+  beSec.appendChild(settingToggle("Link previews — fetches link metadata, revealing your IP to those sites",
+    store.embedsOn,
+    on => {
+      store.embedsOn = on; LS.set("embeds_on", on);
+      api.post("/api/embeds", { on }).catch(() => {});
+      if (!on) store.embeds = {};
+      renderChat();
+    }));
   const notifBtn = el("button", "set-wide",
     ("Notification" in window && Notification.permission === "granted") ? "Desktop notifications: on" : "Enable desktop notifications");
   notifBtn.onclick = async () => {
@@ -4067,6 +4133,10 @@ async function init() {
   const v = store.view;
   if (v.server !== "@dm" && !store.servers().includes(v.server)) store.view = { server: "@dm", target: store.dms[0] ? store.dms[0].fp : null };
   selectTarget(store.view.server, store.view.target);
+
+  // Re-assert the opt-in link-preview choice; the server defaults it off on
+  // every restart, so a stale enabled flag here can't silently keep it on.
+  if (store.embedsOn) api.post("/api/embeds", { on: true }).catch(() => {});
 
   poll();
   openStream();

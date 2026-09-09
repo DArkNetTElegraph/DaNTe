@@ -29,6 +29,7 @@
 //! `POST /api/sticker/remove {server,name}`,
 //! `GET /api/sound?hash=`, `POST /api/sound {server,name,audio_hex}`,
 //! `POST /api/sound/remove {server,name}`,
+//! `GET /api/embeds`, `POST /api/embeds {on}`, `POST /api/unfurl {url}`,
 //! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
 //! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
 //! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
@@ -588,6 +589,10 @@ struct Shared {
     my_name: Mutex<String>,
     /// True once the engine is connected and the tick loop is running.
     ready: AtomicBool,
+    /// Opt-in link previews. Off by default; the SPA flips it per session
+    /// (`POST /api/embeds`). Gates `POST /api/unfurl`, which reveals this
+    /// machine's IP to linked sites.
+    embeds: AtomicBool,
     cmd: mpsc::Sender<Cmd>,
     /// How to connect the engine after onboarding.
     boot: Bootstrap,
@@ -782,6 +787,7 @@ pub async fn run_on(
         onboard_name: Mutex::new(String::new()),
         my_name: Mutex::new(String::new()),
         ready: AtomicBool::new(false),
+        embeds: AtomicBool::new(false),
         cmd: cmd_tx,
         boot,
         pending_rx: Mutex::new(Some(cmd_rx)),
@@ -3795,6 +3801,60 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 reply,
             })
             .await
+        }
+
+        ("GET", "/api/embeds") => {
+            let on = shared.embeds.load(Ordering::Relaxed);
+            let body = format!("{{\"on\":{on}}}");
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/embeds") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                on: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            shared.embeds.store(r.on, Ordering::Relaxed);
+            respond(&mut stream, 200, "application/json", b"{\"ok\":\"ok\"}").await
+        }
+
+        ("POST", "/api/unfurl") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                url: String,
+            }
+            if !shared.embeds.load(Ordering::Relaxed) {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"link previews are off\"}",
+                )
+                .await;
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            match crate::unfurl::unfurl(&r.url).await {
+                Ok(p) => {
+                    let json = serde_json::json!({
+                        "url": p.url,
+                        "site": p.site,
+                        "title": p.title,
+                        "description": p.description,
+                        "image": p.image_data_uri,
+                    })
+                    .to_string();
+                    respond(&mut stream, 200, "application/json", json.as_bytes()).await
+                }
+                Err(e) => {
+                    let json = serde_json::json!({ "error": e }).to_string();
+                    respond(&mut stream, 200, "application/json", json.as_bytes()).await
+                }
+            }
         }
 
         ("GET", "/api/policy") => {

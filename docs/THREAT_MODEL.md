@@ -115,6 +115,14 @@ provide.
    entry the relay observes on the `channel_id` side channel. It is therefore
    **opt-in** — the setting gates sending only; a non-broadcasting user still
    sees others.
+   **Link previews (URL embeds)** are **opt-in and off by default**. When
+   enabled, `dante serve` (the user's own process, not the browser) makes one
+   metadata `GET` per linked URL — revealing this machine's IP to that site,
+   like clicking the link would. It sends no cookies, runs no JavaScript, caps
+   size/time/redirects, and refuses any target that resolves to a non-public
+   address (loopback, LAN, `169.254.169.254`, …) so a crafted link cannot turn
+   it into an SSRF probe. Enabling it also tells the relay nothing new. A
+   relay-side unfurler that would hide the client IP is a possible future add.
 5. **Anonymity of network location.** DaNTe does not hide your IP address from
    peers you connect to directly or from relays. Run it over Tor/VPN if network-
    level anonymity is required. (A future phase may integrate transport-level

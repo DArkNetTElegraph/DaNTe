@@ -1788,7 +1788,7 @@ impl Engine {
     /// Relay one WebRTC signalling blob to another voice-channel participant.
     /// The browsers own the peer connection; the engine is a dumb pipe. `to` is
     /// the peer's `IdentityId` bytes; `kind` is 0 offer / 1 answer / 2 ICE /
-    /// 3 bye.
+    /// 3 bye / 4 soundboard trigger (`data` = hex blob hash).
     pub async fn send_voice_signal(
         &mut self,
         to: &[u8; 32],
@@ -2874,7 +2874,7 @@ impl Engine {
         rank: u16,
         now_ms: u64,
     ) -> Result<u16, CoreError> {
-        let (mut roles_vec, assignments, emojis, stickers, owner, version, root) =
+        let (mut roles_vec, assignments, emojis, stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
         let id = id.unwrap_or_else(|| roles_vec.iter().map(|r| r.id).max().unwrap_or(0) + 1);
         match roles_vec.iter_mut().find(|r| r.id == id) {
@@ -2901,6 +2901,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         )
         .await?;
@@ -2914,7 +2915,7 @@ impl Engine {
         role_id: u16,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (mut roles_vec, mut assignments, emojis, stickers, owner, version, root) =
+        let (mut roles_vec, mut assignments, emojis, stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
         roles_vec.retain(|r| r.id != role_id);
         for (_, ids) in &mut assignments {
@@ -2930,6 +2931,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         )
         .await
@@ -2944,7 +2946,7 @@ impl Engine {
         add: bool,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, mut assignments, emojis, stickers, owner, version, root) =
+        let (roles_vec, mut assignments, emojis, stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
         if add && !roles_vec.iter().any(|r| r.id == role_id) {
             return Err(CoreError::Channel("no such role"));
@@ -2972,6 +2974,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         )
         .await
@@ -2999,7 +3002,7 @@ impl Engine {
         if !is_png && !is_jpeg {
             return Err(CoreError::Channel("emoji image must be a PNG or JPEG"));
         }
-        let (roles_vec, assignments, mut emojis, stickers, owner, version, root) =
+        let (roles_vec, assignments, mut emojis, stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
         if !emojis.iter().any(|(n, _)| n == name) && emojis.len() >= roles::MAX_SERVER_EMOJIS {
             return Err(CoreError::Channel("server emoji limit reached"));
@@ -3019,6 +3022,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         )
         .await
@@ -3031,7 +3035,7 @@ impl Engine {
         name: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, assignments, mut emojis, stickers, owner, version, root) =
+        let (roles_vec, assignments, mut emojis, stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
         let before = emojis.len();
         emojis.retain(|(n, _)| n != name);
@@ -3047,6 +3051,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         )
         .await
@@ -3086,7 +3091,7 @@ impl Engine {
                 "sticker image must be PNG, JPEG, GIF or WebP",
             ));
         }
-        let (roles_vec, assignments, emojis, mut stickers, owner, version, root) =
+        let (roles_vec, assignments, emojis, mut stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
         if emojis.iter().any(|(n, _)| n == name) {
             return Err(CoreError::Channel("a custom emoji already uses that name"));
@@ -3110,6 +3115,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         )
         .await
@@ -3122,7 +3128,7 @@ impl Engine {
         name: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, assignments, emojis, mut stickers, owner, version, root) =
+        let (roles_vec, assignments, emojis, mut stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
         let before = stickers.len();
         stickers.retain(|(n, _)| n != name);
@@ -3138,6 +3144,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         )
         .await
@@ -3148,6 +3155,100 @@ impl Engine {
         self.server_policies
             .get(server_root)
             .map(|p| p.stickers.clone())
+            .unwrap_or_default()
+    }
+
+    /// Add or replace a soundboard clip on a hosted server. Like a sticker but
+    /// the blob is a short audio clip (OGG / MP3 / WAV, <= 256 KiB) that a
+    /// member plays into a voice channel. `name` shares the emoji-shortcode
+    /// charset and may not collide with an emoji or sticker on the same server.
+    pub async fn set_server_sound(
+        &mut self,
+        server_root: &[u8; 32],
+        name: &str,
+        audio: &[u8],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if !roles::valid_emoji_name(name) {
+            return Err(CoreError::Channel("bad sound name"));
+        }
+        if audio.is_empty() || audio.len() > 256 * 1024 {
+            return Err(CoreError::Channel("sound clip must be 1..=256 KiB"));
+        }
+        let is_ogg = audio.starts_with(b"OggS");
+        let is_wav = audio.len() > 12 && &audio[0..4] == b"RIFF" && &audio[8..12] == b"WAVE";
+        let is_mp3 = audio.starts_with(b"ID3")
+            || audio.starts_with(&[0xff, 0xfb])
+            || audio.starts_with(&[0xff, 0xf3])
+            || audio.starts_with(&[0xff, 0xf2]);
+        if !is_ogg && !is_wav && !is_mp3 {
+            return Err(CoreError::Channel("sound clip must be OGG, MP3 or WAV"));
+        }
+        let (roles_vec, assignments, emojis, stickers, mut sounds, owner, version, root) =
+            self.policy_draft(server_root)?;
+        if emojis.iter().any(|(n, _)| n == name) || stickers.iter().any(|(n, _)| n == name) {
+            return Err(CoreError::Channel(
+                "an emoji or sticker already uses that name",
+            ));
+        }
+        if !sounds.iter().any(|(n, _)| n == name) && sounds.len() >= roles::MAX_SERVER_SOUNDS {
+            return Err(CoreError::Channel("server soundboard limit reached"));
+        }
+        sync::put_blob(&mut self.client, audio).await?;
+        let hash = sha256(audio);
+        match sounds.iter_mut().find(|(n, _)| n == name) {
+            Some(s) => s.1 = hash,
+            None => sounds.push((name.to_owned(), hash)),
+        }
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            emojis,
+            stickers,
+            sounds,
+            now_ms,
+        )
+        .await
+    }
+
+    /// Drop a soundboard clip from a hosted server (the blob is left to expire).
+    pub async fn remove_server_sound(
+        &mut self,
+        server_root: &[u8; 32],
+        name: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let (roles_vec, assignments, emojis, stickers, mut sounds, owner, version, root) =
+            self.policy_draft(server_root)?;
+        let before = sounds.len();
+        sounds.retain(|(n, _)| n != name);
+        if sounds.len() == before {
+            return Err(CoreError::Channel("no such sound"));
+        }
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            emojis,
+            stickers,
+            sounds,
+            now_ms,
+        )
+        .await
+    }
+
+    /// The soundboard clips known for a server (hosted or joined), `(name, hash)`.
+    pub fn server_sounds(&self, server_root: &[u8; 32]) -> Vec<(String, [u8; 32])> {
+        self.server_policies
+            .get(server_root)
+            .map(|p| p.sounds.clone())
             .unwrap_or_default()
     }
 
@@ -3220,6 +3321,7 @@ impl Engine {
             Vec<([u8; 32], Vec<u16>)>,
             Vec<(String, [u8; 32])>,
             Vec<(String, [u8; 32])>,
+            Vec<(String, [u8; 32])>,
             [u8; 32],
             u64,
             SignSecret,
@@ -3241,6 +3343,7 @@ impl Engine {
             p.assignments.clone(),
             p.emojis.clone(),
             p.stickers.clone(),
+            p.sounds.clone(),
             p.owner_id,
             p.version,
             SignSecret::from_bytes(&root_bytes),
@@ -3258,6 +3361,7 @@ impl Engine {
         assignments: Vec<([u8; 32], Vec<u16>)>,
         emojis: Vec<(String, [u8; 32])>,
         stickers: Vec<(String, [u8; 32])>,
+        sounds: Vec<(String, [u8; 32])>,
         now_ms: u64,
     ) -> Result<(), CoreError> {
         let np = ServerPolicy::signed(
@@ -3268,6 +3372,7 @@ impl Engine {
             assignments,
             emojis,
             stickers,
+            sounds,
             now_ms,
         );
         self.server_policies.insert(server_root, np);

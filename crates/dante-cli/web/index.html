@@ -351,6 +351,12 @@ img.sticker { display: block; max-width: 180px; max-height: 180px; object-fit: c
   padding: 6px; max-width: 520px; }
 .voice-screen video { width: 100%; max-height: 300px; border-radius: var(--radius); background: #000; }
 .voice-screen-label { font-size: 12px; color: var(--text-muted); }
+.voice-soundboard { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+  margin: 12px 0 2px; max-width: 460px; }
+.voice-sound-btn { padding: 7px 12px; border: 1px solid var(--divider); border-radius: var(--radius-pill);
+  background: var(--bg-raised); color: var(--text); font-size: 12px; cursor: pointer; }
+.voice-sound-btn:hover { filter: brightness(1.1); }
+.voice-sound-btn:disabled { opacity: .5; cursor: default; }
 
 /* right-click context menus (replace the browser's) */
 .ctx-menu {
@@ -927,6 +933,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
       </form>
       <input type="file" id="chat-file" hidden>
       <input type="file" id="sticker-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+      <input type="file" id="sound-file" accept="audio/ogg,audio/mpeg,audio/mp3,audio/wav,audio/x-wav" hidden>
     </div>
   </section>
 
@@ -1137,6 +1144,7 @@ const store = {
   safety: {},                         // dm fp -> {number,verified,available}
   emojis: {},                         // server root -> { shortcode: hexhash }
   stickers: {},                       // server root -> { name: hexhash }
+  sounds: {},                         // server root -> { name: hexhash }
   contacts: [],                       // [{fp,petname,verified,added_ms}]
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
@@ -1964,6 +1972,21 @@ function renderVoiceRoom(c, target) {
     }
   }
 
+  if (connected) {
+    const sroot = store.rootOf(store.view.server);
+    const clips = Object.entries((sroot && store.sounds[sroot]) || {});
+    if (clips.length) {
+      const board = el("div", "voice-soundboard");
+      for (const [nm, hash] of clips) {
+        const b = el("button", "voice-sound-btn", nm);
+        b.title = "Play :" + nm + ": for the room";
+        b.onclick = () => triggerRoomSound(hash);
+        board.appendChild(b);
+      }
+      wrap.appendChild(board);
+    }
+  }
+
   const row = el("div", "voice-room-controls");
   const btn = el("button", "voice-join-btn" + (connected ? " leave" : ""),
     connected ? "Disconnect" : "Join voice");
@@ -2244,6 +2267,43 @@ async function stickerFlow(root) {
       await api.post("/api/sticker", { server: root, name, image_hex: hex });
       await refreshPolicies();
       ui.sys("added sticker :" + name + ":");
+    } catch (e) { ui.sys("upload failed: " + e.message); }
+  };
+  inp.click();
+}
+
+// Owner-only soundboard management (mirrors stickerFlow; audio clips).
+async function soundFlow(root) {
+  if (!root) { ui.say("Open one of your own server's channels to manage its soundboard."); return; }
+  const listed = Object.keys(store.sounds[root] || {});
+  const name = await ui.ask(
+    "Soundboard clip name — letters, digits, underscore.\n" +
+    "Prefix with '-' to remove one instead.\n\n" +
+    (listed.length ? "current: " + listed.join("  ") : "none yet"),
+    "");
+  if (!name) return;
+  if (name.startsWith("-")) {
+    api.post("/api/sound/remove", { server: root, name: name.slice(1).trim() })
+      .then(refreshPolicies)
+      .catch(e => ui.sys("remove failed: " + e.message));
+    return;
+  }
+  const inp = $("#sound-file");
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    inp.value = "";
+    if (!f) return;
+    if (!/\.(ogg|mp3|wav)$/i.test(f.name) && !/^audio\//.test(f.type)) {
+      ui.say("a soundboard clip must be OGG, MP3 or WAV"); return;
+    }
+    if (f.size > 256 * 1024) { ui.say("sound clip must be 256 KiB or smaller"); return; }
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    let hex = "";
+    for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+    try {
+      await api.post("/api/sound", { server: root, name, audio_hex: hex });
+      await refreshPolicies();
+      ui.sys("added sound :" + name + ":");
     } catch (e) { ui.sys("upload failed: " + e.message); }
   };
   inp.click();
@@ -3153,9 +3213,29 @@ function voiceSignalSend(fp, kind, data) {
   api.post("/api/voice/signal", { channel: voiceRtc.channelId, to: fp, kind, data }).catch(() => {});
 }
 
-// A relayed offer / answer / ICE / bye from another participant.
+// Play a soundboard clip (own trigger or a relayed one). `hashHex` is the
+// server blob's SHA-256; the clip is fetched same-origin and played locally.
+let _lastRoomSoundAt = 0;
+function playRoomSound(hashHex) {
+  if (!/^[0-9a-f]{64}$/.test(hashHex)) return;
+  try {
+    const a = new Audio("/api/sound?hash=" + encodeURIComponent(hashHex));
+    a.volume = 0.8;
+    a.play().catch(() => {});
+  } catch (_) {}
+}
+function triggerRoomSound(hashHex) {
+  const now = Date.now();
+  if (now - _lastRoomSoundAt < 1000) return;   // one clip/sec, client-side
+  _lastRoomSoundAt = now;
+  playRoomSound(hashHex);
+  for (const fp of voiceRtc.peers.keys()) voiceSignalSend(fp, 4, hashHex);
+}
+
+// A relayed offer / answer / ICE / bye / soundboard from another participant.
 async function voiceOnSignal(fp, kind, data) {
   if (!voiceRtc.channelId) return;
+  if (kind === 4) { playRoomSound(data); return; }
   if (kind === 3) { voicePeerClose(fp); return; }
   if (!voiceRtc.peers.has(fp)) {
     if (kind !== 0) return;                 // only an offer bootstraps a peer
@@ -3331,6 +3411,7 @@ async function refreshPolicies() {
         store.policies[root] = p;
         store.emojis[root] = Object.fromEntries((p.emojis || []).map(e => [e.name, e.hash]));
         store.stickers[root] = Object.fromEntries((p.stickers || []).map(e => [e.name, e.hash]));
+        store.sounds[root] = Object.fromEntries((p.sounds || []).map(e => [e.name, e.hash]));
         updateStickerButton();
         if (changed) render();
       }
@@ -3724,12 +3805,14 @@ function openServerSettings(server) {
   act(rSec, "Manage roles…", () => rolesFlow(server));
 
   if (isOwner) {
-    const pSec = sec("Emoji & stickers");
+    const pSec = sec("Emoji, stickers & sounds");
     const ne = Object.keys((root && store.emojis[root]) || {}).length;
     const ns = Object.keys((root && store.stickers[root]) || {}).length;
-    note(pSec, `${ne} custom emoji, ${ns} sticker${ns === 1 ? "" : "s"}.`);
+    const nd = Object.keys((root && store.sounds[root]) || {}).length;
+    note(pSec, `${ne} custom emoji, ${ns} sticker${ns === 1 ? "" : "s"}, ${nd} soundboard clip${nd === 1 ? "" : "s"}.`);
     act(pSec, "Manage custom emoji…", () => emojiFlow(root));
     act(pSec, "Manage stickers…", () => stickerFlow(root));
+    act(pSec, "Manage soundboard…", () => soundFlow(root));
   }
 
   const aSec = sec("Access");

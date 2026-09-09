@@ -46,6 +46,8 @@ pub const MAX_SERVER_EMOJIS: usize = 200;
 /// Max stickers a single server may register (fewer than emoji — each is a
 /// much larger image).
 pub const MAX_SERVER_STICKERS: usize = 100;
+/// Max soundboard clips a single server may register.
+pub const MAX_SERVER_SOUNDS: usize = 50;
 
 /// Whether `name` is a valid custom-emoji shortcode: 1..=[`EMOJI_NAME_MAX`]
 /// bytes of `[a-z0-9_]`. Enforced both when an emoji is set and when a received
@@ -115,6 +117,10 @@ pub struct ServerPolicy {
     /// emoji but a larger image, sent as a message of its own rather than
     /// inline. Name charset matches an emoji shortcode.
     pub stickers: Vec<(String, [u8; 32])>,
+    /// Soundboard clips: `name -> SHA-256 of the (plaintext) audio blob`.
+    /// Played into a voice channel, never a message. Name charset matches an
+    /// emoji shortcode.
+    pub sounds: Vec<(String, [u8; 32])>,
     /// When it was issued (Unix ms).
     pub issued_ms: u64,
     /// `server_root` over `SHA-256(SIG_DOMAIN || body)`.
@@ -128,6 +134,7 @@ impl ServerPolicy {
             root,
             owner_id,
             1,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -146,6 +153,7 @@ impl ServerPolicy {
         assignments: Vec<([u8; 32], Vec<u16>)>,
         emojis: Vec<(String, [u8; 32])>,
         stickers: Vec<(String, [u8; 32])>,
+        sounds: Vec<(String, [u8; 32])>,
         now_ms: u64,
     ) -> Self {
         let mut p = Self {
@@ -156,6 +164,7 @@ impl ServerPolicy {
             assignments,
             emojis,
             stickers,
+            sounds,
             issued_ms: now_ms,
             sig: [0u8; SIG_LEN],
         };
@@ -166,6 +175,11 @@ impl ServerPolicy {
     /// The relay blob hash for a custom emoji shortcode, if the server has one.
     pub fn emoji_hash(&self, name: &str) -> Option<[u8; 32]> {
         self.emojis.iter().find(|(n, _)| n == name).map(|(_, h)| *h)
+    }
+
+    /// The relay blob hash for a soundboard clip name, if the server has one.
+    pub fn sound_hash(&self, name: &str) -> Option<[u8; 32]> {
+        self.sounds.iter().find(|(n, _)| n == name).map(|(_, h)| *h)
     }
 
     /// The relay blob hash for a sticker name, if the server has one.
@@ -195,18 +209,25 @@ impl ServerPolicy {
         }
         // Tail-appended so a policy signed before custom emoji existed still
         // verifies (its body ends after `assignments`, `emojis` is empty).
-        // The sticker list is a further tail after that; when it is present the
-        // emoji count is always written (possibly 0) so the reader can tell the
-        // two sections apart.
-        if !self.emojis.is_empty() || !self.stickers.is_empty() {
+        // The sticker and sound lists are further tails after that. Each list's
+        // count is written whenever it OR any later list is non-empty, so a
+        // reader always sees a count (possibly 0) before it needs the next
+        // section — that's how the sections stay unambiguous.
+        if !self.emojis.is_empty() || !self.stickers.is_empty() || !self.sounds.is_empty() {
             w.u32(self.emojis.len() as u32);
             for (name, hash) in &self.emojis {
                 w.string(name).fixed(hash);
             }
         }
-        if !self.stickers.is_empty() {
+        if !self.stickers.is_empty() || !self.sounds.is_empty() {
             w.u32(self.stickers.len() as u32);
             for (name, hash) in &self.stickers {
+                w.string(name).fixed(hash);
+            }
+        }
+        if !self.sounds.is_empty() {
+            w.u32(self.sounds.len() as u32);
+            for (name, hash) in &self.sounds {
                 w.string(name).fixed(hash);
             }
         }
@@ -314,6 +335,18 @@ impl ServerPolicy {
                 stickers.push((name, b.fixed::<32>()?));
             }
         }
+        let mut sounds = Vec::new();
+        if b.remaining() > 0 {
+            let nsnd = bounded(&mut b)?;
+            sounds.reserve(nsnd);
+            for _ in 0..nsnd {
+                let name = b.string()?;
+                if !valid_emoji_name(&name) {
+                    return Err(WireError::Invalid("sound name"));
+                }
+                sounds.push((name, b.fixed::<32>()?));
+            }
+        }
         b.finish()?;
         Ok(Self {
             server_root,
@@ -323,6 +356,7 @@ impl ServerPolicy {
             assignments,
             emojis,
             stickers,
+            sounds,
             issued_ms,
             sig,
         })
@@ -387,6 +421,7 @@ mod tests {
             vec![(alice, vec![1, 2])],
             vec![],
             vec![],
+            vec![],
             0,
         );
         p.verify().unwrap();
@@ -400,6 +435,7 @@ mod tests {
             6,
             p.roles.clone(),
             vec![(carol, vec![1])],
+            vec![],
             vec![],
             vec![],
             0,
@@ -419,7 +455,17 @@ mod tests {
             ("blobwave".to_string(), [9u8; 32]),
             ("party_parrot".to_string(), [8u8; 32]),
         ];
-        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], emojis.clone(), vec![], 0);
+        let p = ServerPolicy::signed(
+            &root(),
+            owner,
+            3,
+            vec![],
+            vec![],
+            emojis.clone(),
+            vec![],
+            vec![],
+            0,
+        );
         p.verify().unwrap();
         assert_eq!(p.emoji_hash("party_parrot"), Some([8u8; 32]));
         assert_eq!(p.emoji_hash("nope"), None);
@@ -449,6 +495,7 @@ mod tests {
             vec![],
             vec![],
             stickers.clone(),
+            vec![],
             0,
         );
         p.verify().unwrap();
@@ -465,6 +512,7 @@ mod tests {
             vec![],
             vec![("blob".to_string(), [9u8; 32])],
             stickers,
+            vec![],
             0,
         );
         both.verify().unwrap();
@@ -479,6 +527,7 @@ mod tests {
             vec![],
             vec![],
             vec![(r#"x"><img src=x>"#.to_string(), [1u8; 32])],
+            vec![],
             0,
         );
         assert!(matches!(
@@ -488,12 +537,71 @@ mod tests {
     }
 
     #[test]
+    fn sounds_are_a_third_tail_after_stickers() {
+        let owner = [1u8; 32];
+        let sounds = vec![("airhorn".to_string(), [6u8; 32])];
+
+        // Only sounds — both earlier counts (0) must still be written.
+        let p = ServerPolicy::signed(
+            &root(),
+            owner,
+            3,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            sounds.clone(),
+            0,
+        );
+        p.verify().unwrap();
+        assert_eq!(p.sound_hash("airhorn"), Some([6u8; 32]));
+        assert_eq!(ServerPolicy::decode(&p.encode()).unwrap(), p);
+
+        // All three lists populated.
+        let all = ServerPolicy::signed(
+            &root(),
+            owner,
+            4,
+            vec![],
+            vec![],
+            vec![("blob".to_string(), [9u8; 32])],
+            vec![("wave".to_string(), [4u8; 32])],
+            sounds,
+            0,
+        );
+        all.verify().unwrap();
+        assert_eq!(ServerPolicy::decode(&all.encode()).unwrap(), all);
+
+        // A hostile sound name is refused at decode.
+        let evil = ServerPolicy::signed(
+            &root(),
+            owner,
+            5,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![(r#"<script>"#.to_string(), [1u8; 32])],
+            0,
+        );
+        assert!(matches!(
+            ServerPolicy::decode(&evil.encode()),
+            Err(WireError::Invalid("sound name"))
+        ));
+
+        // Pre-asset policy still round-trips with all three lists empty.
+        let plain = ServerPolicy::genesis(&root(), owner, 0);
+        assert!(plain.sounds.is_empty());
+        assert_eq!(ServerPolicy::decode(&plain.encode()).unwrap(), plain);
+    }
+
+    #[test]
     fn decode_rejects_a_malicious_emoji_shortcode() {
         // A (validly signed) policy whose shortcode carries markup must be
         // refused at decode, before it can reach a client's render sink.
         let owner = [1u8; 32];
         let evil = vec![(r#"x"><img src=x onerror=alert(1)>"#.to_string(), [9u8; 32])];
-        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], evil, vec![], 0);
+        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], evil, vec![], vec![], 0);
         // The signature is valid over the hostile bytes...
         p.verify().unwrap();
         // ...but decode refuses the shortcode.

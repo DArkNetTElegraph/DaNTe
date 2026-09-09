@@ -106,6 +106,24 @@ pub struct RelayState {
     /// only drained by `serve_p2p`, so a relay with no `--p2p-listen` just lets
     /// the newest few sit here.
     ledger_outbox: std::collections::VecDeque<Vec<u8>>,
+    /// `(channel_id, seq, blob)` for locally-posted channel frames a federated
+    /// relay should re-broadcast so sibling replicas converge.
+    channel_outbox: std::collections::VecDeque<([u8; 32], u64, Vec<u8>)>,
+    /// Channels a client asked to `FetchChannel` that this relay has no log
+    /// for — `serve_p2p` pulls them from siblings once.
+    channel_backfill: std::collections::VecDeque<[u8; 32]>,
+    /// Prekey bundles published here since the last drain, for a federated
+    /// relay to share so a client on any relay can start a session with any
+    /// identity. Bounded.
+    prekey_outbox: std::collections::VecDeque<Vec<u8>>,
+    /// Envelopes deposited here since the last drain, to replicate to siblings.
+    mbox_outbox: std::collections::VecDeque<Vec<u8>>,
+    /// `SHA-256` of every envelope we've deposited or replicated — so a
+    /// gossiped copy (including our own echo) isn't stored twice. Bounded.
+    mbox_seen: std::collections::HashSet<[u8; 32]>,
+    /// `identity[32] ‖ last-resort keypackage` for identities that published
+    /// KeyPackages here since the last drain, to share with siblings.
+    keypkg_outbox: std::collections::VecDeque<Vec<u8>>,
 }
 
 /// Cap on the pending ledger re-broadcast queue.
@@ -155,8 +173,13 @@ const CHANNEL_STORE_CAP: usize = 128 * 1024 * 1024;
 /// so a full channel can't build an unsendable response.
 const MAX_CHANNEL_FETCH_BYTES: usize = 7 * 1024 * 1024;
 
-/// `(next_seq, entries)` where each entry is `(seq, blob, ts_ms)`.
-type ChannelLog = (u64, Vec<(u64, Vec<u8>, u64)>);
+/// `(next_seq, local_writer, entries)` — `entries` is `(seq, blob, ts_ms)`,
+/// kept sorted by `seq`. `local_writer` is set once a client `PostToChannel`s
+/// here: that makes this relay the channel's sequencer, and it then ignores
+/// gossiped frames (a relay that has only ever replicated stays a follower).
+type ChannelLog = (u64, bool, Vec<(u64, Vec<u8>, u64)>);
+/// Cap on the pending channel re-broadcast / backfill queues.
+const CHANNEL_FED_QUEUE_CAP: usize = 4096;
 
 impl RelayState {
     /// Fresh relay state.
@@ -180,6 +203,12 @@ impl RelayState {
             p2p_seed: Vec::new(),
             p2p_reported: std::collections::VecDeque::new(),
             ledger_outbox: std::collections::VecDeque::new(),
+            channel_outbox: std::collections::VecDeque::new(),
+            channel_backfill: std::collections::VecDeque::new(),
+            prekey_outbox: std::collections::VecDeque::new(),
+            mbox_outbox: std::collections::VecDeque::new(),
+            mbox_seen: std::collections::HashSet::new(),
+            keypkg_outbox: std::collections::VecDeque::new(),
         }
     }
 
@@ -210,6 +239,173 @@ impl RelayState {
     /// publish on the ledger gossip topic.
     pub fn take_ledger_outbox(&mut self) -> Vec<Vec<u8>> {
         self.ledger_outbox.drain(..).collect()
+    }
+
+    /// Locally-posted channel frames to re-broadcast on `dante/chan/<id>`.
+    pub fn take_channel_outbox(&mut self) -> Vec<([u8; 32], u64, Vec<u8>)> {
+        self.channel_outbox.drain(..).collect()
+    }
+
+    /// Channels a client asked for that this relay lacks — pull them from
+    /// siblings.
+    pub fn take_channel_backfill(&mut self) -> Vec<[u8; 32]> {
+        self.channel_backfill.drain(..).collect()
+    }
+
+    /// Prekey bundles published here since the last call, to gossip to siblings.
+    pub fn take_prekey_outbox(&mut self) -> Vec<Vec<u8>> {
+        self.prekey_outbox.drain(..).collect()
+    }
+
+    /// Envelopes deposited here since the last call, to replicate to siblings.
+    pub fn take_mbox_outbox(&mut self) -> Vec<Vec<u8>> {
+        self.mbox_outbox.drain(..).collect()
+    }
+
+    /// KeyPackage-share messages (`identity ‖ kp`) since the last call.
+    pub fn take_keypkg_outbox(&mut self) -> Vec<Vec<u8>> {
+        self.keypkg_outbox.drain(..).collect()
+    }
+
+    /// Adopt a sibling's last-resort KeyPackage for `identity` — but only if we
+    /// hold none of our own (our locally-published single-use KeyPackages
+    /// always take priority; this is purely the cross-relay fallback).
+    pub fn ingest_gossiped_keypackage(&mut self, msg: &[u8]) -> bool {
+        if msg.len() < 33 || msg.len() > 32 + MAX_KEYPKG_BYTES {
+            return false;
+        }
+        let id: [u8; 32] = msg[..32].try_into().unwrap();
+        let kp = msg[32..].to_vec();
+        if !self.key_packages.contains_key(&id) && self.key_packages.len() >= MAX_KEYPKG_IDENTITIES
+        {
+            return false;
+        }
+        let q = self.key_packages.entry(id).or_default();
+        if q.is_empty() {
+            q.push_back(kp);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn note_envelope(&mut self, blob: &[u8]) {
+        if self.mbox_seen.len() > 16_384 {
+            self.mbox_seen.clear();
+        }
+        self.mbox_seen.insert(dante_crypto::hash::sha256(blob));
+    }
+
+    /// Store a sealed-sender envelope replicated from a sibling relay. Skips a
+    /// copy we already hold (dedup by SHA-256). Not rate limited (relay-to-
+    /// relay); the mailbox's own caps still apply. Returns whether it was
+    /// stored.
+    pub fn ingest_gossiped_envelope(&mut self, blob: Vec<u8>, now: u64) -> bool {
+        let h = dante_crypto::hash::sha256(&blob);
+        if self.mbox_seen.contains(&h) {
+            return false;
+        }
+        let Ok(env) = Envelope::decode(&blob) else {
+            return false;
+        };
+        match self.mailbox.deposit(env, now) {
+            Ok(()) => {
+                self.note_envelope(&blob);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Fold a prekey bundle heard from a sibling relay. Latest-wins, keyed by
+    /// the bundle's leading 32-byte identity id. Returns whether it was stored.
+    pub fn ingest_gossiped_prekey(&mut self, blob: Vec<u8>) -> bool {
+        if blob.len() > MAX_PREKEY_BYTES {
+            return false;
+        }
+        let Some(id) = blob.get(..32).and_then(|s| <[u8; 32]>::try_from(s).ok()) else {
+            return false;
+        };
+        if !self.prekeys.contains_key(&id) && self.prekeys.len() >= MAX_PREKEY_IDENTITIES {
+            return false;
+        }
+        self.prekeys.insert(id, blob);
+        true
+    }
+
+    /// Fold a channel-log frame heard on `dante/chan/<id>` into our replica.
+    /// Ignored if we sequence this channel ourselves (`local_writer`), if the
+    /// seq is already present, or if the frame is oversized. Returns whether it
+    /// was stored (so `serve_p2p` can subscribe / re-broadcast).
+    pub fn ingest_gossiped_channel_frame(
+        &mut self,
+        channel_id: [u8; 32],
+        seq: u64,
+        blob: Vec<u8>,
+        now: u64,
+    ) -> bool {
+        if blob.len() > MAX_CHANNEL_BLOB_BYTES {
+            return false;
+        }
+        if !self.channels.contains_key(&channel_id) && self.channels.len() >= MAX_CHANNELS {
+            return false;
+        }
+        if self.channel_bytes.saturating_add(blob.len()) > CHANNEL_STORE_CAP {
+            return false;
+        }
+        let entry = self
+            .channels
+            .entry(channel_id)
+            .or_insert((1, false, Vec::new()));
+        if entry.1 {
+            return false; // we are this channel's writer; ignore followers
+        }
+        if entry.2.iter().any(|(s, _, _)| *s == seq) {
+            return false; // already have it
+        }
+        let added = blob.len();
+        let pos = entry.2.partition_point(|(s, _, _)| *s < seq);
+        entry.2.insert(pos, (seq, blob, now));
+        entry.0 = entry.0.max(seq + 1);
+        let mut removed = 0usize;
+        if entry.2.len() > MAX_CHANNEL_ENTRIES {
+            let excess = entry.2.len() - MAX_CHANNEL_ENTRIES;
+            for (_, b, _) in entry.2.drain(..excess) {
+                removed += b.len();
+            }
+        }
+        self.channel_bytes = self.channel_bytes.saturating_add(added) - removed;
+        true
+    }
+
+    /// Install a sibling's channel log verbatim (seqs preserved) for a channel
+    /// we don't yet have. No-op if we already sequence or hold it.
+    pub fn adopt_channel_log(
+        &mut self,
+        channel_id: [u8; 32],
+        entries: Vec<(u64, Vec<u8>)>,
+        now: u64,
+    ) {
+        if self.channels.contains_key(&channel_id) {
+            return;
+        }
+        if self.channels.len() >= MAX_CHANNELS {
+            return;
+        }
+        let mut rows: Vec<(u64, Vec<u8>, u64)> = entries
+            .into_iter()
+            .filter(|(_, b)| b.len() <= MAX_CHANNEL_BLOB_BYTES)
+            .map(|(s, b)| (s, b, now))
+            .collect();
+        rows.sort_by_key(|(s, _, _)| *s);
+        rows.dedup_by_key(|(s, _, _)| *s);
+        let bytes: usize = rows.iter().map(|(_, b, _)| b.len()).sum();
+        if self.channel_bytes.saturating_add(bytes) > CHANNEL_STORE_CAP {
+            return;
+        }
+        let next = rows.last().map_or(1, |(s, _, _)| s + 1);
+        self.channel_bytes += bytes;
+        self.channels.insert(channel_id, (next, false, rows));
     }
 
     /// Set the ICE servers this relay advertises for calls.
@@ -250,16 +446,17 @@ impl RelayState {
         });
         self.blob_bytes -= freed;
 
-        for (_, entries) in self.channels.values_mut() {
+        for (_, _, entries) in self.channels.values_mut() {
             entries.retain(|(_, _, ts)| now.saturating_sub(*ts) <= BLOB_TTL_MS);
         }
-        self.channels.retain(|_, (_, entries)| !entries.is_empty());
+        self.channels
+            .retain(|_, (_, _, entries)| !entries.is_empty());
         // Resync the byte counter from the surviving entries (authoritative, so
         // incremental drift can't accumulate).
         self.channel_bytes = self
             .channels
             .values()
-            .flat_map(|(_, entries)| entries.iter())
+            .flat_map(|(_, _, entries)| entries.iter())
             .map(|(_, blob, _)| blob.len())
             .sum();
 
@@ -334,7 +531,14 @@ impl RelayState {
                     return Response::Error("rate limited".into());
                 }
                 match self.mailbox.deposit(env, now) {
-                    Ok(()) => Response::Ok,
+                    Ok(()) => {
+                        self.note_envelope(&blob);
+                        self.mbox_outbox.push_back(blob);
+                        while self.mbox_outbox.len() > LEDGER_OUTBOX_CAP {
+                            self.mbox_outbox.pop_front();
+                        }
+                        Response::Ok
+                    }
                     Err(e) => Response::Error(format!("rejected: {e}")),
                 }
             }
@@ -371,7 +575,11 @@ impl RelayState {
                         {
                             return Response::Error("prekey directory full".into());
                         }
-                        self.prekeys.insert(id, blob);
+                        self.prekeys.insert(id, blob.clone());
+                        self.prekey_outbox.push_back(blob);
+                        while self.prekey_outbox.len() > LEDGER_OUTBOX_CAP {
+                            self.prekey_outbox.pop_front();
+                        }
                         Response::Ok
                     }
                     None => Response::Error("malformed prekey bundle".into()),
@@ -429,6 +637,15 @@ impl RelayState {
                 while q.len() > MAX_KEYPKGS_PER_IDENTITY {
                     q.pop_front();
                 }
+                // Share only the reusable last-resort KeyPackage with siblings.
+                if let Some(last) = q.back().cloned() {
+                    let mut msg = identity.to_vec();
+                    msg.extend_from_slice(&last);
+                    self.keypkg_outbox.push_back(msg);
+                    while self.keypkg_outbox.len() > LEDGER_OUTBOX_CAP {
+                        self.keypkg_outbox.pop_front();
+                    }
+                }
                 Response::Ok
             }
 
@@ -482,11 +699,14 @@ impl RelayState {
                     return Response::Error("channel store full".into());
                 }
                 let added = blob.len();
-                let (next_seq, entries) =
-                    self.channels.entry(channel_id).or_insert((1, Vec::new()));
+                let (next_seq, local, entries) =
+                    self.channels
+                        .entry(channel_id)
+                        .or_insert((1, false, Vec::new()));
+                *local = true; // a client posted here → we sequence this channel
                 let seq = *next_seq;
                 *next_seq += 1;
-                entries.push((seq, blob, now));
+                entries.push((seq, blob.clone(), now));
                 let mut removed = 0usize;
                 if entries.len() > MAX_CHANNEL_ENTRIES {
                     let excess = entries.len() - MAX_CHANNEL_ENTRIES;
@@ -495,6 +715,10 @@ impl RelayState {
                     }
                 }
                 self.channel_bytes = self.channel_bytes.saturating_add(added) - removed;
+                self.channel_outbox.push_back((channel_id, seq, blob));
+                while self.channel_outbox.len() > CHANNEL_FED_QUEUE_CAP {
+                    self.channel_outbox.pop_front();
+                }
                 Response::Posted(seq)
             }
 
@@ -507,21 +731,27 @@ impl RelayState {
                 }
                 // Cap the reply so a large log can't build an unsendable frame.
                 let mut used = 0usize;
-                let out = self
-                    .channels
-                    .get(&channel_id)
-                    .map(|(_, entries)| {
-                        entries
-                            .iter()
-                            .filter(|(seq, _, _)| *seq > since_seq)
-                            .take_while(|(_, blob, _)| {
-                                used += blob.len();
-                                used <= MAX_CHANNEL_FETCH_BYTES
-                            })
-                            .map(|(seq, blob, _)| (*seq, blob.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let out = match self.channels.get(&channel_id) {
+                    Some((_, _, entries)) => entries
+                        .iter()
+                        .filter(|(seq, _, _)| *seq > since_seq)
+                        .take_while(|(_, blob, _)| {
+                            used += blob.len();
+                            used <= MAX_CHANNEL_FETCH_BYTES
+                        })
+                        .map(|(seq, blob, _)| (*seq, blob.clone()))
+                        .collect(),
+                    None => {
+                        // Federation: a channel we've never seen — ask siblings
+                        // for it so the next poll can serve it.
+                        if self.channel_backfill.len() < CHANNEL_FED_QUEUE_CAP
+                            && !self.channel_backfill.contains(&channel_id)
+                        {
+                            self.channel_backfill.push_back(channel_id);
+                        }
+                        Vec::new()
+                    }
+                };
                 Response::ChannelLog(out)
             }
 
@@ -725,6 +955,85 @@ mod tests {
         }
         // Garbage is ignored.
         assert!(!b.ingest_gossiped_record(b"not a record", 1_000));
+    }
+
+    #[test]
+    fn channel_federation_replicates_but_a_writer_ignores_followers() {
+        let cid = [7u8; 32];
+
+        // Relay A: a client posts here, so A sequences the channel and queues
+        // the frame for re-broadcast.
+        let mut a = state();
+        assert_eq!(
+            a.handle(
+                Request::PostToChannel {
+                    channel_id: cid,
+                    blob: b"frame-1".to_vec(),
+                },
+                IP,
+                1_000
+            ),
+            Response::Posted(1)
+        );
+        assert_eq!(a.take_channel_outbox(), vec![(cid, 1, b"frame-1".to_vec())]);
+        // A is the writer now: a gossiped frame for this channel is ignored.
+        assert!(!a.ingest_gossiped_channel_frame(cid, 2, b"gossip".to_vec(), 1_000));
+
+        // Relay B: pure follower. It folds the gossiped frame in at the same
+        // seq, so a client polling B sees A's ordering verbatim.
+        let mut b = state();
+        assert!(b.ingest_gossiped_channel_frame(cid, 1, b"frame-1".to_vec(), 1_000));
+        assert!(
+            !b.ingest_gossiped_channel_frame(cid, 1, b"other".to_vec(), 1_000),
+            "seq already present"
+        );
+        assert!(b.ingest_gossiped_channel_frame(cid, 3, b"frame-3".to_vec(), 1_000));
+        match b.handle(
+            Request::FetchChannel {
+                channel_id: cid,
+                since_seq: 0,
+            },
+            IP,
+            1_000,
+        ) {
+            Response::ChannelLog(rows) => {
+                assert_eq!(
+                    rows,
+                    vec![(1, b"frame-1".to_vec()), (3, b"frame-3".to_vec())]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A `FetchChannel` for an unknown channel queues a backfill request.
+        let mut c = state();
+        let _ = c.handle(
+            Request::FetchChannel {
+                channel_id: [9u8; 32],
+                since_seq: 0,
+            },
+            IP,
+            1_000,
+        );
+        assert_eq!(c.take_channel_backfill(), vec![[9u8; 32]]);
+        c.adopt_channel_log(
+            [9u8; 32],
+            vec![(5, b"x".to_vec()), (6, b"y".to_vec())],
+            1_000,
+        );
+        match c.handle(
+            Request::FetchChannel {
+                channel_id: [9u8; 32],
+                since_seq: 4,
+            },
+            IP,
+            1_000,
+        ) {
+            Response::ChannelLog(rows) => {
+                assert_eq!(rows, vec![(5, b"x".to_vec()), (6, b"y".to_vec())])
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

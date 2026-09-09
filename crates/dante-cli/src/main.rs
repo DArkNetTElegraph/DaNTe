@@ -45,21 +45,54 @@ fn arg_value(args: &HashMap<String, String>, key: &str) -> Result<String> {
 /// The `--relay` value, translating the discovery aliases `dht` / `p2p` (and a
 /// bare `--bootstrap` with no `--relay`) into
 /// `p2p-discover:<bootstrap-multiaddr,...>` that `Engine::connect` understands.
+///
+/// Bootstrap multiaddrs come from `--bootstrap`, then the `DANTE_BOOTSTRAP`
+/// environment variable (comma/space-separated), then the compiled-in
+/// [`DEFAULT_BOOTSTRAP`] — so a distro or an operator can point at a network
+/// without a flag, and once well-known addresses exist a bare `dante serve`
+/// needs no relay config at all.
+/// Merged DHT bootstrap multiaddrs: `--bootstrap`, then `DANTE_BOOTSTRAP`,
+/// then the compiled-in [`DEFAULT_BOOTSTRAP`]; de-duplicated, order preserved.
+fn bootstrap_list(flags: &HashMap<String, String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        for a in s
+            .split([',', ' ', '\t', '\n'])
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            let a = a.to_string();
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    };
+    if let Some(b) = flags.get("bootstrap") {
+        push(b);
+    }
+    if let Ok(env) = std::env::var("DANTE_BOOTSTRAP") {
+        push(&env);
+    }
+    for a in DEFAULT_BOOTSTRAP {
+        push(a);
+    }
+    out
+}
+
 fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
-    let boot = flags
-        .get("bootstrap")
-        .map(String::as_str)
-        .unwrap_or("")
-        .trim();
+    let boot = bootstrap_list(flags).join(",");
+
     let relay = match flags.get("relay") {
         Some(r) => r.clone(),
         None if !boot.is_empty() => "dht".to_string(),
-        None => anyhow::bail!("missing --relay (or --bootstrap for DHT relay discovery)"),
+        None => anyhow::bail!(
+            "missing --relay (or --bootstrap / DANTE_BOOTSTRAP for DHT relay discovery)"
+        ),
     };
     if relay == "dht" || relay == "p2p" {
         if boot.is_empty() {
             anyhow::bail!(
-                "--relay {relay} needs --bootstrap <multiaddr,...> to find relays on the DHT"
+                "--relay {relay} needs bootstrap multiaddrs (--bootstrap or DANTE_BOOTSTRAP)"
             );
         }
         Ok(format!("p2p-discover:{boot}"))
@@ -67,6 +100,11 @@ fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
         Ok(relay)
     }
 }
+
+/// Compiled-in DHT bootstrap multiaddrs. Empty until a DaNTe network with
+/// well-known entry points is deployed; `--bootstrap` / `DANTE_BOOTSTRAP`
+/// override or extend it.
+const DEFAULT_BOOTSTRAP: &[&str] = &[];
 
 fn parse_flags(mut it: impl Iterator<Item = String>) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -270,16 +308,7 @@ async fn maybe_enable_p2p(engine: &mut Engine, flags: &HashMap<String, String>) 
         return;
     }
     let listen = listen.unwrap_or("/ip4/0.0.0.0/tcp/0");
-    let boot: Vec<String> = flags
-        .get("bootstrap")
-        .map(|s| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|x| !x.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let boot = bootstrap_list(flags);
     match engine.enable_p2p(listen, &boot).await {
         Ok(addrs) => {
             eprintln!(

@@ -573,6 +573,12 @@ pub struct Engine {
     /// unless [`enable_p2p`](Engine::enable_p2p) ran. Feature `p2p`.
     #[cfg(feature = "p2p")]
     p2p: Option<crate::p2p::P2p>,
+    /// The libp2p node backing the relay transport when `relay_addr` was a
+    /// multiaddr. Kept alive so its driver task stays up; `None` for a TCP
+    /// relay.
+    #[cfg(feature = "p2p")]
+    #[allow(dead_code)]
+    transport_node: Option<dante_p2p::Node>,
     /// When we last re-advertised our p2p addresses to the relay.
     #[cfg(feature = "p2p")]
     last_p2p_announce_ms: u64,
@@ -601,7 +607,9 @@ impl Engine {
     ///
     /// `relay_addr` may be a comma- or whitespace-separated list of `host:port`
     /// endpoints; the client connects to the first reachable one and fails over
-    /// to the rest if the connection drops.
+    /// to the rest if the connection drops. With the `p2p` feature an entry may
+    /// instead be a libp2p multiaddr ending `/p2p/<peer-id>`, in which case the
+    /// relay wire rides a `/dante/relay/1` stream to that peer.
     pub async fn connect(
         identity: Identity,
         relay_addr: &str,
@@ -615,7 +623,31 @@ impl Engine {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect();
-        let client = Client::connect_multi(&relay_addrs).await?;
+
+        #[cfg(feature = "p2p")]
+        let mut transport_node = None;
+
+        let client = if let Some(ma) = relay_addrs.iter().find(|a| a.starts_with('/')) {
+            #[cfg(feature = "p2p")]
+            {
+                let (node, _events, _inbound) = dante_p2p::Node::spawn(&identity.p2p_node_seed())
+                    .map_err(|e| CoreError::P2p(e.to_string()))?;
+                // A listen address lets the DHT route and lets the relay dial us
+                // back; harmless if it fails (request-response still works).
+                let _ = node.listen_str("/ip4/0.0.0.0/tcp/0").await;
+                let c = Client::connect_p2p(node.clone(), ma).await?;
+                transport_node = Some(node);
+                c
+            }
+            #[cfg(not(feature = "p2p"))]
+            {
+                return Err(CoreError::P2p(format!(
+                    "relay endpoint {ma} is a libp2p multiaddr but this build lacks the p2p feature"
+                )));
+            }
+        } else {
+            Client::connect_multi(&relay_addrs).await?
+        };
 
         let restored = match &store_path {
             Some(p) => store::load(p, &identity)?,
@@ -661,6 +693,8 @@ impl Engine {
             relay_addrs,
             #[cfg(feature = "p2p")]
             p2p: None,
+            #[cfg(feature = "p2p")]
+            transport_node,
             #[cfg(feature = "p2p")]
             last_p2p_announce_ms: 0,
             pow,

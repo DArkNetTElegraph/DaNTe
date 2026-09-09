@@ -34,6 +34,15 @@ struct Args {
     turn_public_ip: Option<String>,
     /// libp2p bootstrap multiaddrs handed to `p2p`-enabled clients.
     p2p_bootstrap: Vec<String>,
+    /// If set (feature `p2p`), also accept clients over a libp2p
+    /// `/dante/relay/1` stream, listening on this multiaddr
+    /// (e.g. `/ip4/0.0.0.0/tcp/4020`).
+    #[cfg_attr(not(feature = "p2p"), allow(dead_code))]
+    p2p_listen: Option<String>,
+    /// Hex-encoded 32-byte ed25519 seed for the relay's libp2p identity, so its
+    /// PeerId is stable across restarts. Random (ephemeral) if omitted.
+    #[cfg_attr(not(feature = "p2p"), allow(dead_code))]
+    p2p_seed: Option<String>,
 }
 
 #[tokio::main]
@@ -150,11 +159,95 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding {}", args.listen))?;
     tracing::info!(listen = %args.listen, "dante-relay listening");
 
+    #[cfg(feature = "p2p")]
+    let p2p_task = {
+        let handler = Arc::clone(&handler);
+        async move {
+            let Some(addr) = args.p2p_listen.clone() else {
+                return std::future::pending::<anyhow::Result<()>>().await;
+            };
+            let seed = match &args.p2p_seed {
+                Some(hex) => parse_seed(hex).context("--p2p-seed must be 64 hex chars")?,
+                None => dante_crypto::random_array::<32>(),
+            };
+            serve_p2p(handler, &addr, seed).await
+        }
+    };
+    #[cfg(not(feature = "p2p"))]
+    let p2p_task = std::future::pending::<anyhow::Result<()>>();
+
     tokio::select! {
         r = serve(listener, handler) => { r?; }
+        r = p2p_task => { r?; }
         _ = tokio::signal::ctrl_c() => { tracing::info!("shutting down"); }
     }
     Ok(())
+}
+
+/// Serve inbound `/dante/relay/1` requests over libp2p through the same
+/// [`RelayHandler`] the TCP listener uses.
+#[cfg(feature = "p2p")]
+async fn serve_p2p(handler: Arc<RelayHandler>, listen: &str, seed: [u8; 32]) -> anyhow::Result<()> {
+    use dante_net::transport::RequestHandler;
+    use dante_net::wire::{Request, Response};
+
+    let (node, mut events, mut inbound) =
+        dante_p2p::Node::spawn(&seed).map_err(|e| anyhow::anyhow!("p2p node: {e}"))?;
+    node.listen_str(listen)
+        .await
+        .map_err(|e| anyhow::anyhow!("p2p listen {listen}: {e}"))?;
+
+    let pid = node.peer_id();
+    tokio::spawn(async move {
+        // Keep a handle alive so the node's driver task isn't dropped, and log
+        // each dialable multiaddr for the operator.
+        let _node = node;
+        while let Some(ev) = events.recv().await {
+            if let dante_p2p::Event::Listening(a) = ev {
+                tracing::info!(multiaddr = %format!("{a}/p2p/{pid}"), "dante-relay libp2p endpoint");
+            }
+        }
+    });
+
+    while let Some(req) = inbound.recv().await {
+        let handler = Arc::clone(&handler);
+        tokio::spawn(async move {
+            let ip = peer_pseudo_ip(&req.peer);
+            let resp = match Request::decode(&req.body) {
+                Ok(r) => handler.handle(r, ip).await,
+                Err(e) => Response::Error(format!("bad request: {e}")),
+            };
+            req.respond(resp.encode()).await;
+        });
+    }
+    Ok(())
+}
+
+/// A stable synthetic ULA-v6 address per libp2p peer, so the relay's per-IP
+/// rate limiting still buckets p2p clients by sender. Not routable — a key only.
+#[cfg(feature = "p2p")]
+fn peer_pseudo_ip(peer: &dante_p2p::PeerId) -> std::net::IpAddr {
+    let bytes = peer.to_bytes();
+    let mut ip = [0u8; 16];
+    for (i, b) in bytes.iter().rev().take(15).enumerate() {
+        ip[15 - i] = *b;
+    }
+    ip[0] = 0xfd; // fd00::/8 unique-local
+    std::net::IpAddr::V6(std::net::Ipv6Addr::from(ip))
+}
+
+/// Parse 64 hex chars into a 32-byte seed.
+#[cfg(feature = "p2p")]
+fn parse_seed(hex: &str) -> anyhow::Result<[u8; 32]> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        anyhow::bail!("expected 64 hex chars, got {}", hex.len());
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)?;
+    }
+    Ok(out)
 }
 
 fn parse_args() -> Args {
@@ -169,6 +262,8 @@ fn parse_args() -> Args {
     let mut turn_listen = None;
     let mut turn_public_ip = None;
     let mut p2p_bootstrap = Vec::new();
+    let mut p2p_listen = None;
+    let mut p2p_seed = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -226,6 +321,12 @@ fn parse_args() -> Args {
                     );
                 }
             }
+            "--p2p-listen" => {
+                p2p_listen = it.next();
+            }
+            "--p2p-seed" => {
+                p2p_seed = it.next();
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "usage: dante-relay [--listen ADDR] [--min-pow-bits N]\n  \
@@ -233,6 +334,7 @@ fn parse_args() -> Args {
                      [--stun URL ...] [--turn URL ...] [--turn-secret STR] [--turn-ttl SECS]\n  \
                      [--turn-listen HOST:PORT] [--turn-public-ip IP]  (run an in-process TURN server)\n  \
                      [--p2p-bootstrap MULTIADDR,...]  (libp2p bootstrap peers offered to p2p clients)\n  \
+                     [--p2p-listen MULTIADDR] [--p2p-seed HEX32]  (serve clients over libp2p; feature p2p)\n  \
                      the TURN secret is read from DANTE_TURN_SECRET (preferred) or --turn-secret\n  \
                      defaults: --listen {DEFAULT_LISTEN}, PoW floor from LedgerParams::default()"
                 );
@@ -258,5 +360,7 @@ fn parse_args() -> Args {
         turn_listen,
         turn_public_ip,
         p2p_bootstrap,
+        p2p_listen,
+        p2p_seed,
     }
 }

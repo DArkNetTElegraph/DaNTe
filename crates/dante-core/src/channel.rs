@@ -109,12 +109,15 @@ pub enum ChannelControl {
         /// Encoded [`crate::roles::ServerPolicy`].
         policy: Vec<u8>,
     },
-    /// A member with `PERM_KICK` asks the host to remove someone.
+    /// A member with `PERM_KICK` asks the host to remove someone from the whole
+    /// server (all its channels). `channel_id` only identifies which server.
     KickRequest {
-        /// The channel.
+        /// Any channel of the server whose member is being removed.
         channel_id: [u8; 32],
         /// The member to remove.
         member: [u8; 32],
+        /// Also add them to the server's ban list (blocks re-joining).
+        ban: bool,
     },
     /// A member tells the host it is leaving; the host commits its removal.
     Leave {
@@ -188,8 +191,12 @@ impl ChannelControl {
             ChannelControl::Policy { policy } => {
                 w.u8(5).bytes(policy);
             }
-            ChannelControl::KickRequest { channel_id, member } => {
-                w.u8(6).fixed(channel_id).fixed(member);
+            ChannelControl::KickRequest {
+                channel_id,
+                member,
+                ban,
+            } => {
+                w.u8(6).fixed(channel_id).fixed(member).bool(*ban);
             }
             ChannelControl::Leave { channel_id } => {
                 w.u8(7).fixed(channel_id);
@@ -255,6 +262,7 @@ impl ChannelControl {
             6 => ChannelControl::KickRequest {
                 channel_id: r.fixed::<32>()?,
                 member: r.fixed::<32>()?,
+                ban: r.bool()?,
             },
             7 => ChannelControl::Leave {
                 channel_id: r.fixed::<32>()?,
@@ -448,6 +456,7 @@ mod tests {
             ChannelControl::KickRequest {
                 channel_id: [4u8; 32],
                 member: [5u8; 32],
+                ban: true,
             },
             ChannelControl::Leave {
                 channel_id: [8u8; 32],

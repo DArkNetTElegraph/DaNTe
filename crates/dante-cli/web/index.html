@@ -2313,8 +2313,14 @@ function renderMembers() {
       const isStaff = root && (store.permsOf(root, fp) & (PERM_KICK | PERM_MANAGE_ROLES)) !== 0;
       if (inChannel && !isMe && canKick && !isOwner && (iAmOwner || !isStaff)) {
         const kick = el("button", "kick", "×");
-        kick.title = "Remove from channel";
-        kick.onclick = () => removeMemberFlow(target, fp);
+        kick.title = "Kick / ban from server";
+        kick.onclick = e => {
+          e.stopPropagation();
+          ctxShow(e.clientX, e.clientY, [
+            { iconName: "log-out", label: "Kick from server", run: () => serverKickFlow(target, fp, false) },
+            { iconName: "ban", danger: true, label: "Ban from server", run: () => serverKickFlow(target, fp, true) },
+          ]);
+        };
         row.appendChild(kick);
       }
       wrap.appendChild(row);
@@ -2380,12 +2386,18 @@ async function autoKickFlow(server) {
   } catch (e) { ui.say("Could not set auto-kick (host only): " + e.message); }
 }
 
-async function removeMemberFlow(channelTarget, memberFp) {
-  if (!await ui.confirm("Remove " + short(memberFp) + " from this channel?", { ok: "Remove", danger: true })) return;
+async function serverKickFlow(channelTarget, memberFp, ban) {
+  const who = username(memberFp) || short(memberFp);
+  const verb = ban ? "Ban" : "Kick";
+  const msg = ban
+    ? `Ban ${who} from this server? They're removed from every channel and can't be re-invited until you unban them.`
+    : `Kick ${who} from this server? They're removed from every channel but can be invited back.`;
+  if (!await ui.confirm(msg, { ok: verb, danger: true })) return;
   try {
-    await api.post("/api/remove", { channel: channelTarget, member: memberFp });
-    ui.sys("Removed " + short(memberFp) + ".");
-  } catch (e) { ui.say("Remove failed: " + e.message); }
+    await api.post(ban ? "/api/server/ban" : "/api/server/kick", { channel: channelTarget, member: memberFp });
+    ui.sys(`${verb === "Ban" ? "Banned" : "Kicked"} ${who}.`);
+    setTimeout(refreshChannels, 1500);
+  } catch (e) { ui.say(verb + " failed: " + e.message); }
 }
 
 function renderTyping() { $("#typing").textContent = store.typingText || ""; }
@@ -3424,6 +3436,22 @@ function openSettings() {
   document.body.appendChild(ov);
 }
 
+async function bansFlow(server) {
+  const root = store.rootOf(server);
+  if (!root) return ui.say("Unknown server root.");
+  let bans;
+  try { bans = await api.get("/api/server/bans?server=" + encodeURIComponent(root)); }
+  catch (e) { return ui.say("Could not load bans: " + e.message); }
+  if (!bans.length) return ui.say("No one is banned from " + server + ".");
+  const list = bans.map((fp, i) => `${i + 1}. ${username(fp) || short(fp)}  (${short(fp)})`).join("\n");
+  const pick = parseInt(await ui.ask(
+    "Banned from " + server + ":\n\n" + list + "\n\nUnban which number? (blank to close)"), 10);
+  const fp = bans[pick - 1];
+  if (!fp) return;
+  try { await api.post("/api/server/unban", { server: root, member: fp }); ui.sys("Unbanned " + (username(fp) || short(fp)) + "."); }
+  catch (e) { ui.say("Unban failed: " + e.message); }
+}
+
 /* ---- Server settings: everything that used to be icons by the name ------ */
 function openServerSettings(server) {
   if ($("#server-settings-overlay")) return;
@@ -3472,6 +3500,7 @@ function openServerSettings(server) {
   const aSec = sec("Access");
   act(aSec, "Set or change the join password…", () => joinPwFlow(server));
   act(aSec, akDays ? `Auto-remove inactive members (now: ${akDays} day${akDays === 1 ? "" : "s"})…` : "Auto-remove inactive members…", () => autoKickFlow(server));
+  if (isOwner) act(aSec, "Bans…", () => bansFlow(server));
 
   const dSec = sec("Discovery");
   note(dSec, "List this server in the public directory so anyone can request to join.");

@@ -439,6 +439,9 @@ pub(crate) struct HostedServer {
     /// `SHA-256("dante/join-pw/v1" || server_root || password)` — a second
     /// factor the host checks before honouring an invite-link redemption.
     pub join_pw_hash: Option<[u8; 32]>,
+    /// Identities banned from this server: refused re-entry by every add path
+    /// ([`Engine::mls_add_member`] rejects them). Persisted.
+    pub banned: HashSet<[u8; 32]>,
 }
 
 /// Size classes channel-log plaintexts are padded to, so the relay learns only
@@ -771,12 +774,18 @@ impl Engine {
             engine.blocked = s.blocked.into_iter().collect();
             let autokick: HashMap<[u8; 32], u64> = s.server_autokick.into_iter().collect();
             let joinpw: HashMap<[u8; 32], [u8; 32]> = s.server_join_pw.into_iter().collect();
+            let mut bans: HashMap<[u8; 32], HashSet<[u8; 32]>> = s
+                .server_bans
+                .into_iter()
+                .map(|(root, ids)| (root, ids.into_iter().collect()))
+                .collect();
             for h in s.hosted {
                 engine.hosted.insert(
                     h.root_pub,
                     HostedServer {
                         auto_kick_ms: autokick.get(&h.root_pub).copied(),
                         join_pw_hash: joinpw.get(&h.root_pub).copied(),
+                        banned: bans.remove(&h.root_pub).unwrap_or_default(),
                         name: h.name,
                         root: SignSecret::from_bytes(&h.root_secret),
                         channels: h.channels,
@@ -1022,6 +1031,12 @@ impl Engine {
             seen_envelopes: seen,
             last_announce_ms: self.last_announce_ms,
             last_fetch_since_ms: self.last_fetch_since_ms,
+            server_bans: self
+                .hosted
+                .iter()
+                .filter(|(_, h)| !h.banned.is_empty())
+                .map(|(root, h)| (*root, h.banned.iter().copied().collect()))
+                .collect(),
         };
         store::save(&path, &self.identity, &state)?;
         self.dirty = false;
@@ -2006,6 +2021,7 @@ impl Engine {
                 channels: vec![],
                 auto_kick_ms: None,
                 join_pw_hash: None,
+                banned: HashSet::new(),
             },
         );
         self.dirty = true;
@@ -2191,6 +2207,24 @@ impl Engine {
         peer_id: &[u8; 32],
         now_ms: u64,
     ) -> Result<(), CoreError> {
+        // A server ban blocks every add path — direct invite, link redeem,
+        // re-admit.
+        {
+            let root = self
+                .channels
+                .get(channel_id)
+                .map(|c| c.info.server_root)
+                .ok_or(CoreError::UnknownChannel)?;
+            if self
+                .hosted
+                .get(&root)
+                .is_some_and(|h| h.banned.contains(peer_id))
+            {
+                return Err(CoreError::Channel(
+                    "that identity is banned from this server",
+                ));
+            }
+        }
         let kp = sync::get_key_package(&mut self.client, peer_id)
             .await?
             .ok_or(CoreError::Channel(
@@ -2460,6 +2494,65 @@ impl Engine {
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_COMMIT, &commit);
         sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
         Ok(())
+    }
+
+    /// Remove `member` from every channel of a server we host, and (with
+    /// `ban`) add them to the server's persistent ban list so they can't be
+    /// re-invited or redeem a link. Host only. `#general` is included — there is
+    /// no "in the server but no channels" state.
+    pub async fn kick_from_server(
+        &mut self,
+        server_root: &[u8; 32],
+        member: &[u8; 32],
+        ban: bool,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let h = self
+            .hosted
+            .get(server_root)
+            .ok_or(CoreError::NotServerHost)?;
+        if *member == self.my_member_id() {
+            return Err(CoreError::Channel("cannot remove yourself"));
+        }
+        let channels: Vec<[u8; 32]> = h.channels.clone();
+        for cid in channels {
+            // Only channels the member is actually in; `remove_from_channel` is
+            // a no-op otherwise.
+            if self
+                .channels
+                .get(&cid)
+                .is_some_and(|c| c.roster.contains(member))
+            {
+                let _ = self.remove_from_channel(&cid, member, now_ms).await;
+            }
+        }
+        if ban {
+            if let Some(h) = self.hosted.get_mut(server_root) {
+                h.banned.insert(*member);
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Lift a ban. Host only. Returns whether the identity was banned.
+    pub fn unban_from_server(&mut self, server_root: &[u8; 32], member: &[u8; 32]) -> bool {
+        let removed = self
+            .hosted
+            .get_mut(server_root)
+            .is_some_and(|h| h.banned.remove(member));
+        if removed {
+            self.dirty = true;
+        }
+        removed
+    }
+
+    /// Identities banned from a server we host.
+    pub fn server_bans(&self, server_root: &[u8; 32]) -> Vec<[u8; 32]> {
+        self.hosted
+            .get(server_root)
+            .map(|h| h.banned.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Delete a channel this client hosts: DM every member a
@@ -2923,12 +3016,16 @@ impl Engine {
         Ok(sync::get_blob(&mut self.client, hash).await?)
     }
 
-    /// Ask for a member to be removed. If we host the server, do it directly;
-    /// otherwise (with `PERM_KICK`) DM the host a `KickRequest`.
+    /// Remove `member` from the server that `channel_id` belongs to (and,
+    /// with `ban`, block their return). If we host it, act directly; otherwise
+    /// — with `PERM_KICK` — DM the host a `KickRequest`. Staff (a member with
+    /// `PERM_KICK`/`PERM_MANAGE_ROLES`) and the owner can only be removed by
+    /// the owner.
     pub async fn request_kick(
         &mut self,
         channel_id: &[u8; 32],
         member: &[u8; 32],
+        ban: bool,
         now_ms: u64,
     ) -> Result<(), CoreError> {
         let server_root = self
@@ -2937,9 +3034,7 @@ impl Engine {
             .ok_or(CoreError::UnknownChannel)?
             .info
             .server_root;
-        if self.hosted.contains_key(&server_root) {
-            return self.remove_from_channel(channel_id, member, now_ms).await;
-        }
+        let me = self.my_member_id();
         let owner = self
             .server_policies
             .get(&server_root)
@@ -2947,12 +3042,27 @@ impl Engine {
             .ok_or(CoreError::Channel(
                 "no server policy — cannot reach the host",
             ))?;
-        if self.member_perms(&server_root, &self.my_member_id()) & roles::PERM_KICK == 0 {
+        if *member == owner {
+            return Err(CoreError::Channel("cannot remove the server owner"));
+        }
+        let target_is_staff = self.member_perms(&server_root, member)
+            & (roles::PERM_KICK | roles::PERM_MANAGE_ROLES)
+            != 0;
+        if target_is_staff && me != owner {
+            return Err(CoreError::Channel("only the owner can remove staff"));
+        }
+        if self.hosted.contains_key(&server_root) {
+            return self
+                .kick_from_server(&server_root, member, ban, now_ms)
+                .await;
+        }
+        if self.member_perms(&server_root, &me) & roles::PERM_KICK == 0 {
             return Err(CoreError::Channel("you lack the kick permission"));
         }
         let req = ChannelControl::KickRequest {
             channel_id: *channel_id,
             member: *member,
+            ban,
         };
         self.send_content(&owner, Content::Channel(req.encode()), now_ms)
             .await
@@ -3885,7 +3995,11 @@ impl Engine {
                     self.dirty = true;
                 }
             }
-            ChannelControl::KickRequest { channel_id, member } => {
+            ChannelControl::KickRequest {
+                channel_id,
+                member,
+                ban,
+            } => {
                 let Some(server_root) = self.channels.get(&channel_id).map(|c| c.info.server_root)
                 else {
                     return Ok(());
@@ -3910,7 +4024,7 @@ impl Engine {
                 if self.member_perms(&server_root, &requester) & roles::PERM_KICK != 0
                     && (requester_is_owner || !target_is_staff)
                 {
-                    self.remove_from_channel(&channel_id, &member, now_ms)
+                    self.kick_from_server(&server_root, &member, ban, now_ms)
                         .await?;
                 }
             }

@@ -183,6 +183,8 @@ pub struct PersistedState {
     pub last_announce_ms: u64,
     /// The mailbox `since` cursor.
     pub last_fetch_since_ms: u64,
+    /// Per-hosted-server ban list: `(server_root, banned IdentityIds)`.
+    pub server_bans: Vec<([u8; 32], Vec<[u8; 32]>)>,
 }
 
 /// Why a store file could not be read.
@@ -389,6 +391,14 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
             .fixed(&e.msg_id)
             .string(&e.text)
             .bool(e.deleted);
+    }
+
+    w.u32(s.server_bans.len() as u32);
+    for (root, ids) in &s.server_bans {
+        w.fixed(root).u32(ids.len() as u32);
+        for id in ids {
+            w.fixed(id);
+        }
     }
     w.into_vec()
 }
@@ -634,6 +644,21 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut server_bans = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        server_bans.reserve(n);
+        for _ in 0..n {
+            let root = r.fixed::<32>()?;
+            let m = bounded_count(&mut r)?;
+            let mut ids = Vec::with_capacity(m);
+            for _ in 0..m {
+                ids.push(r.fixed::<32>()?);
+            }
+            server_bans.push((root, ids));
+        }
+    }
+
     // Restore message ids onto the aligned history entries.
     for (e, id) in history.iter_mut().zip(dm_msg_ids.iter()) {
         e.msg_id = *id;
@@ -663,6 +688,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         seen_envelopes,
         last_announce_ms,
         last_fetch_since_ms,
+        server_bans,
     })
 }
 
@@ -759,6 +785,7 @@ mod tests {
             seen_envelopes: vec![[9u8; 32], [8u8; 32]],
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
+            server_bans: vec![([7u8; 32], vec![[1u8; 32], [2u8; 32]])],
         };
         save(&path, &id, &state).unwrap();
 
@@ -818,6 +845,7 @@ mod tests {
             seen_envelopes: vec![],
             last_announce_ms: 0,
             last_fetch_since_ms: 0,
+            server_bans: vec![],
         };
         save(&path, &id, &state).unwrap();
         assert!(matches!(

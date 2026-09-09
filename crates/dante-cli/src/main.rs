@@ -403,6 +403,7 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /kick|/ban #<chan> <fp>  /unban <root> <fp>  \
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off> [current]  \
+         /emoji <root> <name> <path|remove>  /sticker <root> <name> <path|remove>  \
          /renamechannel #<chan> <name>  \
          /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
          /react #<chan> <seq> <emoji> [-]  /pin|/unpin #<chan> <seq>  /pins #<chan>  \
@@ -1263,6 +1264,34 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     Err(e) => println!("bad server root: {e}"),
                 },
                 _ => println!("usage: /emoji <server-root> <name> <image-path|remove>"),
+            },
+            "sticker" => match (a, b) {
+                (Some(root), Some(rest)) => match parse_fingerprint(root) {
+                    Ok(sr) => {
+                        let mut it = rest.split_whitespace();
+                        let name = it.next().unwrap_or("");
+                        let arg = it.next().unwrap_or("");
+                        let res = if arg.eq_ignore_ascii_case("remove") || arg == "-" {
+                            engine.remove_server_sticker(&sr, name, now_ms()).await
+                        } else {
+                            match std::fs::read(arg) {
+                                Ok(img) => {
+                                    engine.set_server_sticker(&sr, name, &img, now_ms()).await
+                                }
+                                Err(e) => {
+                                    println!("cannot read {arg}: {e}");
+                                    return Ok(false);
+                                }
+                            }
+                        };
+                        match res {
+                            Ok(()) => println!("sticker :{name}: updated"),
+                            Err(e) => println!("failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("bad server root: {e}"),
+                },
+                _ => println!("usage: /sticker <server-root> <name> <image-path|remove>"),
             },
             "assignrole" => match (a, b) {
                 (Some(root), Some(rest)) => {

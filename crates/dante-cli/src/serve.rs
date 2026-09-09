@@ -27,6 +27,8 @@
 //! `POST /api/emoji/remove {server,name}`,
 //! `GET /api/sticker?hash=`, `POST /api/sticker {server,name,image_hex}`,
 //! `POST /api/sticker/remove {server,name}`,
+//! `GET /api/sound?hash=`, `POST /api/sound {server,name,audio_hex}`,
+//! `POST /api/sound/remove {server,name}`,
 //! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
 //! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
 //! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
@@ -283,6 +285,13 @@ enum Cmd {
         server: String,
         name: String,
         image: Option<Vec<u8>>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Add/replace (`audio = Some`) or remove (`audio = None`) a soundboard clip.
+    Sound {
+        server: String,
+        name: String,
+        audio: Option<Vec<u8>>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// The saved contacts as a ready JSON array.
@@ -620,6 +629,18 @@ fn sniff_image(b: &[u8]) -> &'static str {
         [b'G', b'I', b'F', b'8', ..] => "image/gif",
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
         _ => "image/png",
+    }
+}
+
+/// Best-effort MIME for a soundboard clip, from magic bytes.
+fn sniff_audio(b: &[u8]) -> &'static str {
+    match b {
+        [b'O', b'g', b'g', b'S', ..] => "audio/ogg",
+        [b'I', b'D', b'3', ..] | [0xFF, 0xFB, ..] | [0xFF, 0xF3, ..] | [0xFF, 0xF2, ..] => {
+            "audio/mpeg"
+        }
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..] => "audio/wav",
+        _ => "application/octet-stream",
     }
 }
 
@@ -1982,6 +2003,11 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         .iter()
                         .map(|(n, h)| serde_json::json!({ "name": n, "hash": to_hex(h) }))
                         .collect();
+                    let sounds: Vec<_> = p
+                        .sounds
+                        .iter()
+                        .map(|(n, h)| serde_json::json!({ "name": n, "hash": to_hex(h) }))
+                        .collect();
                     serde_json::json!({
                         "version": p.version,
                         "owner": id_b32(&p.owner_id),
@@ -1989,6 +2015,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         "assignments": assignments,
                         "emojis": emojis,
                         "stickers": stickers,
+                        "sounds": sounds,
                         "me_perms": engine.member_perms(&server, &me),
                     })
                     .to_string()
@@ -2061,6 +2088,29 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         .map_err(|e| e.to_string()),
                     None => engine
                         .remove_server_sticker(&sr, &name, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::Sound {
+            server,
+            name,
+            audio,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                Ok(sr) => match audio {
+                    Some(bytes) => engine
+                        .set_server_sound(&sr, &name, &bytes, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string()),
+                    None => engine
+                        .remove_server_sound(&sr, &name, now_ms())
                         .await
                         .map(|_| "ok".into())
                         .map_err(|e| e.to_string()),
@@ -3675,6 +3725,73 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 server: r.server,
                 name: r.name,
                 image: None,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/sound") => {
+            let hex = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("hash="))
+                .unwrap_or("");
+            let Some(hash) = hex_bytes(hex)
+                .filter(|b| b.len() == 32)
+                .map(|b| <[u8; 32]>::try_from(b).unwrap())
+            else {
+                return respond(&mut stream, 400, "text/plain", b"bad hash").await;
+            };
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::GetEmoji { hash, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            match rx.await.ok().flatten() {
+                Some(bytes) => respond(&mut stream, 200, sniff_audio(&bytes), &bytes).await,
+                None => respond(&mut stream, 404, "text/plain", b"no such blob").await,
+            }
+        }
+
+        ("POST", "/api/sound") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                name: String,
+                /// Hex-encoded audio bytes.
+                audio_hex: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let Some(audio) = hex_bytes(&r.audio_hex) else {
+                return respond(&mut stream, 400, "text/plain", b"bad audio_hex").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Sound {
+                server: r.server,
+                name: r.name,
+                audio: Some(audio),
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/sound/remove") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                name: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::Sound {
+                server: r.server,
+                name: r.name,
+                audio: None,
                 reply,
             })
             .await

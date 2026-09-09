@@ -248,8 +248,8 @@ achievable with no project-run infrastructure.
 `channel_id` + password wrapper. Gossipsub fan-out of the ledger + channel
 logs (the libp2p DHT is wired in as an opt-in key-directory fallback — feature
 `p2p`; see Phase 3); an SFrame layer over the group-call key (Phase 7 — screen
-share itself is done, browser WebRTC); rich features — soundboards, bots,
-embeds (Phase 8 — stickers done); the Tauri desktop native layer.
+share itself is done, browser WebRTC); rich features — bots, embeds (Phase 8
+— stickers + soundboards done); the Tauri desktop native layer.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -735,8 +735,20 @@ infrastructure. Reached. ---**
   `POST /api/sticker/remove`; policy JSON gained `stickers`. SPA: a composer 🖼
   button opens a sticker grid that sends on click (shown only in a channel of a
   server that has stickers); owner management is in server settings → "Emoji &
-  stickers". `chat`: `/sticker <root> <name> <path|remove>`. Soundboards still
-  to do.
+  stickers". `chat`: `/sticker <root> <name> <path|remove>`.
+- **Soundboards** *(done)*: `ServerPolicy` gained a third asset tail `sounds:
+  Vec<(name, [u8;32])>` after `stickers` (same "write a 0 count if a later list
+  is non-empty" rule keeps the sections unambiguous). `Engine::set_server_sound`
+  / `remove_server_sound` / `server_sounds`: OGG / MP3 / WAV (magic bytes),
+  ≤256 KiB, ≤50/server, name can't collide with an emoji or sticker. Playback
+  rides the voice mesh: a new `Content::VoiceSignal` kind **4** carries the hex
+  blob hash; the trigger plays the clip locally and relays kind 4 to every mesh
+  peer, each of which fetches `GET /api/sound?hash=` and plays it (`new
+  Audio`). Client-side one-clip-per-second guard. `serve`: `GET /api/sound`,
+  `POST /api/sound`, `POST /api/sound/remove`; `sounds` in `/api/policy`. SPA:
+  a button row in the voice room (when connected, if the server has clips);
+  owner management in server settings → "Emoji, stickers & sounds". `chat`:
+  `/sound <root> <name> <path|remove>`.
 - Tenor/Giphy search — opt-in, off by default, warns it contacts a third party.
 - URL embeds — opt-in (leaks IP); optionally via a relay-side unfurler.
 - Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.

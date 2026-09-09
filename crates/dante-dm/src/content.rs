@@ -129,11 +129,13 @@ pub enum Content {
     /// 1:1 `Call*` variants, `dante-core` does not interpret `data` at all — it
     /// just relays it between the two browsers, which own the peer connection.
     /// `kind`: 0 = SDP offer, 1 = SDP answer, 2 = ICE candidate (`data` is the
-    /// candidate line; empty = end-of-candidates), 3 = leg teardown.
+    /// candidate line; empty = end-of-candidates), 3 = leg teardown, 4 =
+    /// soundboard trigger (`data` is the hex SHA-256 of a server blob every
+    /// participant fetches and plays locally).
     VoiceSignal {
         /// The voice channel this leg belongs to.
         channel_id: [u8; 32],
-        /// 0 offer, 1 answer, 2 ICE, 3 bye.
+        /// 0 offer, 1 answer, 2 ICE, 3 bye, 4 soundboard.
         kind: u8,
         /// The opaque signalling payload (SDP or an ICE candidate line).
         data: String,

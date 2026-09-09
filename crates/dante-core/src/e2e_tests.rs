@@ -2327,6 +2327,73 @@ async fn server_stickers_reach_a_member_and_coexist_with_emoji() {
 }
 
 #[tokio::test]
+async fn server_soundboard_reaches_a_member() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+    macro_rules! settle {
+        () => {
+            for _ in 0..6 {
+                for e in [&mut host, &mut alice] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+
+    // An OGG clip is accepted; junk and oversize are refused.
+    let ogg = b"OggS\x00\x02-fake-airhorn-".to_vec();
+    host.set_server_sound(&server, "airhorn", &ogg, now)
+        .await
+        .unwrap();
+    assert!(host
+        .set_server_sound(&server, "airhorn", b"not audio", now)
+        .await
+        .is_err());
+    let mut too_big = b"OggS".to_vec();
+    too_big.resize(256 * 1024 + 1, 0);
+    assert!(host
+        .set_server_sound(&server, "huge", &too_big, now)
+        .await
+        .is_err());
+    // A name already used by an emoji is refused for a sound.
+    host.set_server_emoji(&server, "wave", b"\x89PNG\r\n\x1a\n-x-", now)
+        .await
+        .unwrap();
+    assert!(host
+        .set_server_sound(&server, "wave", &ogg, now)
+        .await
+        .is_err());
+    settle!();
+
+    let seen = alice.server_sounds(&server);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "airhorn");
+    assert_eq!(alice.fetch_blob(&seen[0].1).await.unwrap(), Some(ogg));
+
+    host.remove_server_sound(&server, "airhorn", now)
+        .await
+        .unwrap();
+    settle!();
+    assert!(alice.server_sounds(&server).is_empty());
+}
+
+#[tokio::test]
 async fn roles_muting_and_delegated_kick() {
     use crate::roles::PERM_KICK;
 

@@ -617,17 +617,38 @@ impl Engine {
         pow: Difficulty,
         store_path: Option<PathBuf>,
     ) -> Result<Self, CoreError> {
-        let relay_addrs: Vec<String> = relay_addr
+        #[cfg(feature = "p2p")]
+        let mut transport_node = None;
+
+        // `p2p-discover:<bootstrap-multiaddr,...>` — enter the DHT and find
+        // relays from their `dante/relay/v1` provider records.
+        let discover_bootstrap = relay_addr.strip_prefix("p2p-discover:");
+
+        let relay_addrs: Vec<String> = discover_bootstrap
+            .unwrap_or(relay_addr)
             .split([',', ' ', '\t', '\n'])
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect();
 
-        #[cfg(feature = "p2p")]
-        let mut transport_node = None;
-
-        let client = if let Some(ma) = relay_addrs.iter().find(|a| a.starts_with('/')) {
+        let client = if discover_bootstrap.is_some() {
+            #[cfg(feature = "p2p")]
+            {
+                let (node, _events, _inbound) = dante_p2p::Node::spawn(&identity.p2p_node_seed())
+                    .map_err(|e| CoreError::P2p(e.to_string()))?;
+                let _ = node.listen_str("/ip4/0.0.0.0/tcp/0").await;
+                let c = Client::connect_p2p_discover(node.clone(), &relay_addrs).await?;
+                transport_node = Some(node);
+                c
+            }
+            #[cfg(not(feature = "p2p"))]
+            {
+                return Err(CoreError::P2p(
+                    "p2p relay discovery requested but this build lacks the p2p feature".into(),
+                ));
+            }
+        } else if let Some(ma) = relay_addrs.iter().find(|a| a.starts_with('/')) {
             #[cfg(feature = "p2p")]
             {
                 let (node, _events, _inbound) = dante_p2p::Node::spawn(&identity.p2p_node_seed())

@@ -12,10 +12,12 @@
 //! comma-separated list of `host:port` endpoints; the client uses the first
 //! reachable one and fails over to the rest if the connection drops.
 //!
-//! Built with `--features p2p`, `chat` and `serve` also accept `--p2p` (bring up
-//! a libp2p node listening on `/ip4/0.0.0.0/tcp/0`), `--p2p-listen <multiaddr>`
-//! and `--bootstrap <multiaddr,...>`. The DHT is then a decentralised
-//! key-directory fallback for the relay.
+//! Built with `--features p2p`, `--relay` also accepts a libp2p multiaddr
+//! (`/ip4/…/tcp/N/p2p/<peer-id>`) — the relay wire then rides a `/dante/relay/1`
+//! stream — or the literal `dht` with `--bootstrap <multiaddr,...>`, which
+//! enters the DHT and discovers relays from their `dante/relay/v1` provider
+//! records. `chat`/`serve` also accept `--p2p` / `--p2p-listen <multiaddr>` to
+//! run a node for the DHT key-directory + ledger-gossip fallback.
 //!
 //! In `chat`, lines starting with `/` are commands:
 //! `/to <fingerprint>`, `/file <path>`, `/whoami`, `/peer`, `/quit`.
@@ -38,6 +40,28 @@ fn arg_value(args: &HashMap<String, String>, key: &str) -> Result<String> {
     args.get(key)
         .cloned()
         .with_context(|| format!("missing --{key}"))
+}
+
+/// The `--relay` value, translating the discovery aliases `dht` / `p2p` into
+/// `p2p-discover:<bootstrap-multiaddr,...>` (from `--bootstrap`) that
+/// `Engine::connect` understands.
+fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
+    let relay = arg_value(flags, "relay")?;
+    if relay == "dht" || relay == "p2p" {
+        let boot = flags
+            .get("bootstrap")
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim();
+        if boot.is_empty() {
+            anyhow::bail!(
+                "--relay {relay} needs --bootstrap <multiaddr,...> to find relays on the DHT"
+            );
+        }
+        Ok(format!("p2p-discover:{boot}"))
+    } else {
+        Ok(relay)
+    }
 }
 
 fn parse_flags(mut it: impl Iterator<Item = String>) -> HashMap<String, String> {
@@ -129,7 +153,7 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         .get("http")
         .cloned()
         .unwrap_or_else(|| "127.0.0.1:8080".to_string());
-    let relay = arg_value(flags, "relay")?;
+    let relay = relay_endpoint(flags)?;
     let bits: u8 = flags
         .get("pow-bits")
         .and_then(|v| v.parse().ok())
@@ -190,7 +214,7 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
 /// Shared connect + params logic for `chat` and `serve`.
 async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
     let identity = load_identity(flags)?;
-    let relay = arg_value(flags, "relay")?;
+    let relay = relay_endpoint(flags)?;
     let bits: u8 = flags
         .get("pow-bits")
         .and_then(|v| v.parse().ok())

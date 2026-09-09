@@ -21,7 +21,7 @@
 //! The sealed-sender mailbox stays on `dante-relay`: offline delivery inherently
 //! needs a storage supernode and does not belong on the DHT.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -50,6 +50,10 @@ const RELAY_PROTO: &str = "/dante/relay/1";
 /// Hard cap on a single relay request or response frame (16 MiB — a file chunk
 /// plus overhead).
 const MAX_FRAME: usize = 16 * 1024 * 1024;
+/// Well-known DHT provider key a relay announces to say "I serve
+/// `/dante/relay/1`", so a client with only bootstrap peers can discover
+/// relays instead of being handed one.
+pub const RELAY_CAPABILITY: &[u8] = b"dante/relay/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum P2pError {
@@ -190,6 +194,9 @@ pub enum Event {
 type GetReply = oneshot::Sender<Result<Option<Vec<u8>>, P2pError>>;
 /// Reply channel for a fire-and-forget DHT write / bootstrap round.
 type AckReply = oneshot::Sender<Result<(), P2pError>>;
+/// Reply channel for a `get_providers` query, plus the peer set accumulated so
+/// far across its progress steps.
+type ProvidersReply = oneshot::Sender<Result<Vec<PeerId>, P2pError>>;
 
 enum Command {
     Listen(Multiaddr, oneshot::Sender<Result<(), P2pError>>),
@@ -202,6 +209,8 @@ enum Command {
     Publish(String, Vec<u8>, oneshot::Sender<Result<(), P2pError>>),
     Request(PeerId, Vec<u8>, oneshot::Sender<Result<Vec<u8>, P2pError>>),
     Respond(u64, Vec<u8>),
+    Provide(Vec<u8>, oneshot::Sender<Result<(), P2pError>>),
+    GetProviders(Vec<u8>, oneshot::Sender<Result<Vec<PeerId>, P2pError>>),
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -380,6 +389,19 @@ impl Node {
     pub async fn request(&self, peer: PeerId, body: Vec<u8>) -> Result<Vec<u8>, P2pError> {
         self.call(|tx| Command::Request(peer, body, tx)).await?
     }
+
+    /// Announce on the DHT that this node provides `key` (e.g. a well-known
+    /// "I am a relay" capability tag). libp2p republishes it automatically.
+    pub async fn start_providing(&self, key: Vec<u8>) -> Result<(), P2pError> {
+        self.call(|tx| Command::Provide(key, tx)).await?
+    }
+
+    /// Look up the DHT peers that announced they provide `key`. Their
+    /// addresses are added to the routing table as they are discovered, so a
+    /// follow-up [`request`](Node::request) to one can dial it.
+    pub async fn get_providers(&self, key: Vec<u8>) -> Result<Vec<PeerId>, P2pError> {
+        self.call(|tx| Command::GetProviders(key, tx)).await?
+    }
 }
 
 struct Driver {
@@ -393,6 +415,8 @@ struct Driver {
     pending_put: HashMap<kad::QueryId, AckReply>,
     pending_get: HashMap<kad::QueryId, GetReply>,
     pending_bootstrap: HashMap<kad::QueryId, AckReply>,
+    pending_provide: HashMap<kad::QueryId, AckReply>,
+    pending_providers: HashMap<kad::QueryId, (ProvidersReply, HashSet<PeerId>)>,
     pending_request: HashMap<OutboundRequestId, oneshot::Sender<Result<Vec<u8>, P2pError>>>,
     pending_inbound: HashMap<u64, ResponseChannel<Vec<u8>>>,
     next_inbound_id: u64,
@@ -415,6 +439,8 @@ impl Driver {
             pending_put: HashMap::new(),
             pending_get: HashMap::new(),
             pending_bootstrap: HashMap::new(),
+            pending_provide: HashMap::new(),
+            pending_providers: HashMap::new(),
             pending_request: HashMap::new(),
             pending_inbound: HashMap::new(),
             next_inbound_id: 0,
@@ -512,6 +538,29 @@ impl Driver {
                 if let Some(ch) = self.pending_inbound.remove(&id) {
                     let _ = self.swarm.behaviour_mut().reqres.send_response(ch, body);
                 }
+            }
+            Command::Provide(key, reply) => {
+                match self
+                    .swarm
+                    .behaviour_mut()
+                    .kad
+                    .start_providing(kad::RecordKey::new(&key))
+                {
+                    Ok(id) => {
+                        self.pending_provide.insert(id, reply);
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(P2pError::Store(e.to_string())));
+                    }
+                }
+            }
+            Command::GetProviders(key, reply) => {
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .kad
+                    .get_providers(kad::RecordKey::new(&key));
+                self.pending_providers.insert(id, (reply, HashSet::new()));
             }
         }
     }
@@ -637,6 +686,23 @@ impl Driver {
                     }
                 }
             },
+            kad::QueryResult::StartProviding(res) => {
+                if let Some(reply) = self.pending_provide.remove(&id) {
+                    let _ = reply.send(res.map(|_| ()).map_err(|e| P2pError::Store(e.to_string())));
+                }
+            }
+            kad::QueryResult::GetProviders(res) => {
+                if let Ok(kad::GetProvidersOk::FoundProviders { providers, .. }) = res {
+                    if let Some((_, acc)) = self.pending_providers.get_mut(&id) {
+                        acc.extend(providers);
+                    }
+                }
+                if last {
+                    if let Some((reply, acc)) = self.pending_providers.remove(&id) {
+                        let _ = reply.send(Ok(acc.into_iter().collect()));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -746,6 +812,75 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         assert_eq!(found.as_deref(), Some(&val[..]), "record resolved via DHT");
+    }
+
+    #[tokio::test]
+    async fn a_relay_is_found_through_dht_provider_records() {
+        let (relay, mut relay_evt, mut relay_in) = Node::spawn(&secret(11)).unwrap();
+        let (client, mut client_evt, _c_in) = Node::spawn(&secret(12)).unwrap();
+
+        relay
+            .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .unwrap();
+        let relay_addr = first_listen_addr(&mut relay_evt).await;
+        client
+            .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .unwrap();
+        let _ = first_listen_addr(&mut client_evt).await;
+
+        // The relay serves /dante/relay/1 (echo, uppercased) and announces the
+        // well-known relay capability on the DHT.
+        tokio::spawn(async move {
+            while let Some(req) = relay_in.recv().await {
+                let mut b = req.body.clone();
+                b.make_ascii_uppercase();
+                req.respond(b).await;
+            }
+        });
+
+        client
+            .add_address(relay.peer_id(), relay_addr.clone())
+            .await
+            .unwrap();
+        client.dial(relay_addr).await.unwrap();
+        // let identify make the peers mutually routable
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(Event::PeerRoutable(_)) = client_evt.recv().await {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("client sees the relay routable");
+        let _ = client.bootstrap().await;
+        relay
+            .start_providing(b"dante/relay/v1".to_vec())
+            .await
+            .unwrap();
+
+        // The client discovers the relay purely from the DHT and talks to it.
+        let mut answered = None;
+        for _ in 0..25 {
+            let provs = client
+                .get_providers(b"dante/relay/v1".to_vec())
+                .await
+                .unwrap_or_default();
+            if let Some(&p) = provs.iter().find(|p| **p == relay.peer_id()) {
+                if let Ok(resp) = client.request(p, b"discovered".to_vec()).await {
+                    answered = Some(resp);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(
+            answered.as_deref(),
+            Some(&b"DISCOVERED"[..]),
+            "reached a relay discovered via DHT provider records"
+        );
     }
 
     #[tokio::test]

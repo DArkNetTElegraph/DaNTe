@@ -256,6 +256,16 @@ mod p2p_client {
         })
     }
 
+    /// Rendezvous-hash weight of a relay for a channel. Every client computes
+    /// the same value, so all of them route a given channel's writes to the
+    /// same relay — that relay becomes the channel's sole sequencer and there
+    /// is no `seq` divergence. Lower sorts first.
+    fn hrw(peer: &PeerId, channel_id: &[u8; 32]) -> [u8; 32] {
+        let mut v = peer.to_bytes();
+        v.extend_from_slice(channel_id);
+        dante_crypto::hash::sha256(&v)
+    }
+
     impl P2pBackend {
         /// Connect to one relay given by its full multiaddr (`…/p2p/<peer-id>`).
         pub async fn connect(node: Node, relay_addr: &str) -> Result<Self, NetError> {
@@ -321,6 +331,22 @@ mod p2p_client {
         fn order(&self) -> Vec<usize> {
             let mut idx: Vec<usize> = (0..self.candidates.len()).collect();
             idx.sort_by_key(|&i| self.candidates[i].score);
+            idx
+        }
+
+        /// Candidate indices for a channel op: rendezvous-hash order (so every
+        /// client agrees on the sequencer), with health-maxed relays pushed to
+        /// the back so a genuinely dead one still fails over.
+        fn channel_order(&self, channel_id: &[u8; 32]) -> Vec<usize> {
+            let mut idx: Vec<usize> = (0..self.candidates.len()).collect();
+            idx.sort_by(|&a, &b| {
+                let dead_a = (self.candidates[a].score >= 20) as u8;
+                let dead_b = (self.candidates[b].score >= 20) as u8;
+                dead_a.cmp(&dead_b).then_with(|| {
+                    hrw(&self.candidates[a].peer, channel_id)
+                        .cmp(&hrw(&self.candidates[b].peer, channel_id))
+                })
+            });
             idx
         }
 
@@ -404,6 +430,28 @@ mod p2p_client {
                         Err(last)
                     }
                 }
+                // Channel log: route to the rendezvous-hashed relay for this
+                // channel so every client agrees on one sequencer (no `seq`
+                // divergence). Fall to the next relay in HRW order only when
+                // one looks genuinely dead (health maxed) or the transport
+                // fails; a relay-level error is a real answer.
+                FanOut::Channel(cid) => {
+                    let mut last = NetError::Closed;
+                    for i in self.channel_order(&cid) {
+                        match self.one(self.candidates[i].peer, bytes.clone()).await {
+                            Ok(res) => {
+                                self.heal(i);
+                                return Ok(res);
+                            }
+                            Err(e @ NetError::Peer(_)) => return Err(e),
+                            Err(e) => {
+                                self.bump(i);
+                                last = e;
+                            }
+                        }
+                    }
+                    Err(last)
+                }
                 // Everything else: one relay, healthiest first, next on a
                 // transport failure (a relay-level error is a real answer).
                 FanOut::One => {
@@ -432,6 +480,9 @@ mod p2p_client {
         Write,
         /// Query every relay and concatenate the mailbox envelopes.
         MergeEnvelopes,
+        /// Route to the rendezvous-hashed relay for this channel id (its
+        /// sole sequencer), HRW-ordered failover.
+        Channel([u8; 32]),
         /// One relay, with rotate-on-failure.
         One,
     }
@@ -445,10 +496,67 @@ mod p2p_client {
                 | Request::PublishPrekeys(_)
                 | Request::SubmitRecord(_) => FanOut::Write,
                 Request::Fetch { .. } => FanOut::MergeEnvelopes,
-                // seq-bearing (channel log), single-use (key packages), or
-                // stateful/ephemeral — must stay pinned to one relay.
+                // Channel-log reads and writes: pin to one deterministic
+                // relay per channel so its `seq` has a single writer.
+                Request::PostToChannel { channel_id, .. }
+                | Request::FetchChannel { channel_id, .. } => FanOut::Channel(*channel_id),
+                // Single-use (key packages) or stateful/ephemeral — must stay
+                // pinned to one relay, but no cross-client agreement needed.
                 _ => FanOut::One,
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use dante_p2p::Node;
+
+        use super::*;
+
+        fn backend(node: Node, peers: Vec<PeerId>) -> P2pBackend {
+            P2pBackend {
+                node,
+                candidates: peers.into_iter().map(Cand::new).collect(),
+                label: "test".into(),
+            }
+        }
+
+        #[tokio::test]
+        async fn channel_routing_agrees_across_clients_and_shards() {
+            let (n1, _e1, _i1) = Node::spawn(&[1u8; 32]).unwrap();
+            let (n2, _e2, _i2) = Node::spawn(&[2u8; 32]).unwrap();
+            let (n3, _e3, _i3) = Node::spawn(&[3u8; 32]).unwrap();
+            let peers = vec![n1.peer_id(), n2.peer_id(), n3.peer_id()];
+
+            // Two clients holding the same relay set in opposite local order.
+            let mut a = backend(n1, peers.clone());
+            let mut rev = peers.clone();
+            rev.reverse();
+            let b = backend(n2, rev);
+
+            // They agree on the sequencer for every channel.
+            for k in 0u8..16 {
+                let cid = [k; 32];
+                let wa = a.candidates[a.channel_order(&cid)[0]].peer;
+                let wb = b.candidates[b.channel_order(&cid)[0]].peer;
+                assert_eq!(wa, wb, "clients disagree on the sequencer for {cid:?}");
+            }
+
+            // Channels are spread over the relay set, not all on one.
+            let winners: std::collections::HashSet<_> = (0u8..40)
+                .map(|k| a.candidates[a.channel_order(&[k; 32])[0]].peer)
+                .collect();
+            assert!(
+                winners.len() >= 2,
+                "HRW should shard channels across relays"
+            );
+
+            // A health-maxed relay drops to the back of the order.
+            let cid = [7u8; 32];
+            let top = a.channel_order(&cid)[0];
+            a.candidates[top].score = 20;
+            assert_ne!(a.channel_order(&cid)[0], top);
+            assert_eq!(*a.channel_order(&cid).last().unwrap(), top);
         }
     }
 }
@@ -642,16 +750,23 @@ mod tests {
             }),
             FanOut::MergeEnvelopes
         ));
-        // Pinned to one relay: seq-bearing, single-use, ephemeral, stateful.
-        for r in [
-            Request::PostToChannel {
-                channel_id: [0; 32],
+        // Channel-log ops route by rendezvous hash of the channel id.
+        assert!(matches!(
+            FanOut::of(&Request::PostToChannel {
+                channel_id: [7; 32],
                 blob: vec![1],
-            },
-            Request::FetchChannel {
-                channel_id: [0; 32],
+            }),
+            FanOut::Channel(c) if c == [7; 32]
+        ));
+        assert!(matches!(
+            FanOut::of(&Request::FetchChannel {
+                channel_id: [7; 32],
                 since_seq: 0,
-            },
+            }),
+            FanOut::Channel(c) if c == [7; 32]
+        ));
+        // Pinned to one relay: single-use, ephemeral, stateful.
+        for r in [
             Request::GetKeyPackage([0; 32]),
             Request::GetTreeHead,
             Request::GetRecords { from: 0, to: 1 },

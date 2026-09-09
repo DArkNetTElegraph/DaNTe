@@ -473,25 +473,36 @@ DaNTe/
   receipt (envelopes de-duped by SHA-256; the mailbox's caps still apply).
   **Key packages:** only the reusable last-resort one is shared (single-use
   KPs stay pinned); a follower adopts it only if it holds none of its own.
-  **Channel logs:** the first relay a client posts to becomes that channel's
-  *writer* and gossips its frames; a relay that lacks a channel a client asks
-  for pulls it from a sibling once (`adopt_channel_log`, seqs verbatim) and
-  then follows the writer's gossip. **Live-verified:** two `dante serve` on
-  two different relays, no shared relay — onboard, cross-relay DM both ways,
-  redeem an invite from a host on the other relay, join the channel and read
-  its history. Tests `federation_folds_a_gossiped_record_and_queues_it_once`,
-  `channel_federation_replicates_but_a_writer_ignores_followers`.
+  **Channel logs:** every `p2p` client **rendezvous-hashes** a channel onto
+  one relay (`sha256(relay_peer_id ‖ channel_id)`, lowest wins) and sends
+  *all* of that channel's reads and writes there, so a channel has exactly one
+  `seq` writer no matter how many clients or relays are up. That relay gossips
+  its frames; a relay that lacks a channel a client asks for pulls it from a
+  sibling once (`adopt_channel_log`, seqs verbatim) and then follows the
+  writer's gossip. If the elected relay looks dead (health score maxed) clients
+  fail over to the next in hash order, which — already holding the replicated
+  log — continues the `seq`; a recovered ex-writer that sees a sibling frame
+  at/past its next slot steps down rather than fork the log. **Live-verified:**
+  two `dante serve` on two different relays, each bootstrapped to a *different*
+  one, no shared relay — onboard, cross-relay DM both ways, redeem an invite
+  from a host on the other relay, join the channel, and **both clients see
+  both members' messages** (relay B logged "adopted a sibling channel log").
+  Tests `federation_folds_a_gossiped_record_and_queues_it_once`,
+  `channel_federation_replicates_and_a_writer_steps_down_when_overtaken`,
+  `channel_routing_agrees_across_clients_and_shards`.
 - **Zero-config bootstrap:** `--bootstrap` merges with `DANTE_BOOTSTRAP` and a
   compiled-in `DEFAULT_BOOTSTRAP` (empty until a network is deployed), so a
   distro / systemd unit can point at a network without a flag.
 - **Still deferred:** a fully serverless mailbox (no relay at all — the
   design's position is that offline delivery inherently needs a storage
   supernode, and relays, now DHT-discovered, redundant *and federated*, are
-  that); **concurrent multi-relay channel writes** — two relays both taking
-  `PostToChannel` for one channel diverge on `seq` (each is a local writer);
-  `--relay dht` avoids it (all clients converge on one relay per channel), and
-  a sequencer election / content-addressed message id is a later increment;
-  seeding `DEFAULT_BOOTSTRAP` (needs a deployed network).
+  that); seeding `DEFAULT_BOOTSTRAP` (needs a deployed network). Residual on
+  channel writes: while a relay *flaps* (unreachable long enough for some
+  clients to fail over, then recovers) two relays can briefly both sequence
+  one channel; the step-down rule converges them within a few frames rather
+  than forking permanently. A true split-brain (network partition with live
+  writers on both sides) still needs consensus or content-addressed message
+  ids — out of scope for community relays.
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

@@ -20,6 +20,24 @@ use crate::error::CoreError;
 
 /// Gossipsub topic carrying encoded ledger [`Record`](dante_proto::record::Record)s.
 pub(crate) const LEDGER_TOPIC: &str = "dante/ledger/v1";
+/// Prefix of the per-channel gossipsub topic: `dante/chan/<base32 channel id>`.
+/// The payload is `seq` (8 bytes, little-endian) followed by the opaque channel
+/// log frame — the same bytes the relay stores under that `seq`.
+const CHAN_TOPIC_PREFIX: &str = "dante/chan/";
+
+fn chan_topic(channel_id: &[u8; 32]) -> String {
+    format!(
+        "{CHAN_TOPIC_PREFIX}{}",
+        dante_identity::id::IdentityId::from_bytes(*channel_id).to_base32()
+    )
+}
+
+fn parse_chan_topic(topic: &str) -> Option<[u8; 32]> {
+    let b32 = topic.strip_prefix(CHAN_TOPIC_PREFIX)?;
+    dante_identity::id::IdentityId::from_base32(b32)
+        .ok()
+        .map(|id| *id.as_bytes())
+}
 
 /// Kademlia record key for an identity's prekey bundle: a fixed tag followed by
 /// the 32-byte `IdentityId`.
@@ -40,6 +58,10 @@ pub(crate) struct P2p {
     node: Node,
     listen_addrs: Vec<String>,
     events: mpsc::Receiver<Event>,
+    /// Buffered gossip since the last drain — one `try_recv` sweep feeds both
+    /// the ledger and the channel drains, so neither steals the other's events.
+    ledger_buf: Vec<Vec<u8>>,
+    chan_buf: Vec<([u8; 32], u64, Vec<u8>)>,
 }
 
 impl P2p {
@@ -88,7 +110,66 @@ impl P2p {
             node,
             listen_addrs,
             events,
+            ledger_buf: Vec::new(),
+            chan_buf: Vec::new(),
         })
+    }
+
+    /// Wrap a node the caller already spawned + listened (the libp2p relay
+    /// transport path) so the same node also carries DHT prekeys and
+    /// ledger / channel gossip. Subscribes to the ledger topic.
+    pub(crate) async fn adopt(
+        node: Node,
+        events: mpsc::Receiver<Event>,
+        listen_addrs: Vec<String>,
+    ) -> Self {
+        let _ = node.subscribe(LEDGER_TOPIC).await;
+        let _ = node.bootstrap().await;
+        P2p {
+            node,
+            listen_addrs,
+            events,
+            ledger_buf: Vec::new(),
+            chan_buf: Vec::new(),
+        }
+    }
+
+    /// Take one `try_recv` sweep of pending gossip into the typed buffers.
+    fn pump(&mut self) {
+        while let Ok(ev) = self.events.try_recv() {
+            let Event::Message { topic, data, .. } = ev else {
+                continue;
+            };
+            if topic == LEDGER_TOPIC {
+                self.ledger_buf.push(data);
+            } else if let Some(cid) = parse_chan_topic(&topic) {
+                if data.len() >= 8 {
+                    let seq = u64::from_le_bytes(data[..8].try_into().unwrap());
+                    self.chan_buf.push((cid, seq, data[8..].to_vec()));
+                }
+            }
+        }
+    }
+
+    /// Subscribe to a channel's gossip topic (idempotent in libp2p).
+    pub(crate) async fn subscribe_channel(&self, channel_id: &[u8; 32]) {
+        let _ = self.node.subscribe(&chan_topic(channel_id)).await;
+    }
+
+    /// Fan a just-posted channel frame out to the channel's members. `seq` is
+    /// the relay-log sequence the relay assigned it. Best-effort.
+    pub(crate) async fn publish_channel(&self, channel_id: &[u8; 32], seq: u64, frame: &[u8]) {
+        let mut payload = Vec::with_capacity(8 + frame.len());
+        payload.extend_from_slice(&seq.to_le_bytes());
+        payload.extend_from_slice(frame);
+        let _ = self.node.publish(&chan_topic(channel_id), payload).await;
+    }
+
+    /// Non-blocking: take every `(channel_id, seq, frame)` heard from peers
+    /// since the last call.
+    pub(crate) fn drain_channel_frames(&mut self) -> Vec<([u8; 32], u64, Vec<u8>)> {
+        self.pump();
+        std::mem::take(&mut self.chan_buf)
     }
 
     /// Mirror a prekey bundle onto the DHT. Best-effort.
@@ -121,17 +202,10 @@ impl P2p {
     }
 
     /// Non-blocking: take every ledger record heard from peers since the last
-    /// call. Other event kinds are discarded.
+    /// call.
     pub(crate) fn drain_ledger_records(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        while let Ok(ev) = self.events.try_recv() {
-            if let Event::Message { topic, data, .. } = ev {
-                if topic == LEDGER_TOPIC {
-                    out.push(data);
-                }
-            }
-        }
-        out
+        self.pump();
+        std::mem::take(&mut self.ledger_buf)
     }
 
     /// This node's `PeerId`, rendered as a string.

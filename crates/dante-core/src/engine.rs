@@ -582,6 +582,18 @@ pub struct Engine {
     /// When we last re-advertised our p2p addresses to the relay.
     #[cfg(feature = "p2p")]
     last_p2p_announce_ms: u64,
+    /// Channel-log frames heard over gossipsub since the last `poll_channels`,
+    /// per channel: `(relay-log seq, opaque frame)`. Best-effort acceleration;
+    /// the relay's ordered log is the source of truth.
+    #[cfg(feature = "p2p")]
+    channel_gossip: HashMap<[u8; 32], Vec<(u64, Vec<u8>)>>,
+    /// Channels whose gossip topic we have already subscribed to.
+    #[cfg(feature = "p2p")]
+    subscribed_channels: HashSet<[u8; 32]>,
+    /// `(channel_id, seq)` for messages already surfaced early via a gossip
+    /// frame, so the authoritative relay copy doesn't re-emit them.
+    #[cfg(feature = "p2p")]
+    gossip_shown: HashSet<([u8; 32], u64)>,
     pow: Difficulty,
     /// Position in the relay's ordered record log that the next [`sync`] should
     /// resume from. Tracked separately from `ledger.len()` because records can
@@ -619,6 +631,10 @@ impl Engine {
     ) -> Result<Self, CoreError> {
         #[cfg(feature = "p2p")]
         let mut transport_node = None;
+        // When the transport is libp2p, the same node also carries DHT prekeys
+        // and ledger / channel gossip.
+        #[cfg(feature = "p2p")]
+        let mut adopted_p2p: Option<crate::p2p::P2p> = None;
 
         // `p2p-discover:<bootstrap-multiaddr,...>` — enter the DHT and find
         // relays from their `dante/relay/v1` provider records.
@@ -635,10 +651,11 @@ impl Engine {
         let client = if discover_bootstrap.is_some() {
             #[cfg(feature = "p2p")]
             {
-                let (node, _events, _inbound) = dante_p2p::Node::spawn(&identity.p2p_node_seed())
+                let (node, events, _inbound) = dante_p2p::Node::spawn(&identity.p2p_node_seed())
                     .map_err(|e| CoreError::P2p(e.to_string()))?;
                 let _ = node.listen_str("/ip4/0.0.0.0/tcp/0").await;
                 let c = Client::connect_p2p_discover(node.clone(), &relay_addrs).await?;
+                adopted_p2p = Some(Self::adopt_transport_node(node.clone(), events).await);
                 transport_node = Some(node);
                 c
             }
@@ -651,12 +668,13 @@ impl Engine {
         } else if let Some(ma) = relay_addrs.iter().find(|a| a.starts_with('/')) {
             #[cfg(feature = "p2p")]
             {
-                let (node, _events, _inbound) = dante_p2p::Node::spawn(&identity.p2p_node_seed())
+                let (node, events, _inbound) = dante_p2p::Node::spawn(&identity.p2p_node_seed())
                     .map_err(|e| CoreError::P2p(e.to_string()))?;
                 // A listen address lets the DHT route and lets the relay dial us
                 // back; harmless if it fails (request-response still works).
                 let _ = node.listen_str("/ip4/0.0.0.0/tcp/0").await;
                 let c = Client::connect_p2p(node.clone(), ma).await?;
+                adopted_p2p = Some(Self::adopt_transport_node(node.clone(), events).await);
                 transport_node = Some(node);
                 c
             }
@@ -713,11 +731,17 @@ impl Engine {
             voice_join_intent: HashSet::new(),
             relay_addrs,
             #[cfg(feature = "p2p")]
-            p2p: None,
+            p2p: adopted_p2p,
             #[cfg(feature = "p2p")]
             transport_node,
             #[cfg(feature = "p2p")]
             last_p2p_announce_ms: 0,
+            #[cfg(feature = "p2p")]
+            channel_gossip: HashMap::new(),
+            #[cfg(feature = "p2p")]
+            subscribed_channels: HashSet::new(),
+            #[cfg(feature = "p2p")]
+            gossip_shown: HashSet::new(),
             pow,
             relay_ledger_cursor: 0,
             last_fetch_since_ms: 0,
@@ -1243,6 +1267,57 @@ impl Engine {
         Ok(())
     }
 
+    /// Wrap the libp2p node used for the relay transport so it also carries
+    /// DHT prekeys and ledger / channel gossip. Briefly drains `Listening`
+    /// events so we can advertise our own dial address.
+    #[cfg(feature = "p2p")]
+    async fn adopt_transport_node(
+        node: dante_p2p::Node,
+        mut events: tokio::sync::mpsc::Receiver<dante_p2p::Event>,
+    ) -> crate::p2p::P2p {
+        let mut addrs = Vec::new();
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(400), events.recv()).await
+        {
+            if let dante_p2p::Event::Listening(a) = ev {
+                addrs.push(a.to_string());
+            }
+        }
+        crate::p2p::P2p::adopt(node, events, addrs).await
+    }
+
+    /// Post a channel-log frame to the relay and, when p2p is on, fan it out
+    /// over the channel's gossip topic. Returns the relay-log `seq`.
+    async fn post_channel_frame(
+        &mut self,
+        channel_id: &[u8; 32],
+        frame: &[u8],
+    ) -> Result<u64, CoreError> {
+        let seq = sync::post_to_channel(&mut self.client, channel_id, frame).await?;
+        #[cfg(feature = "p2p")]
+        if let Some(p2p) = &self.p2p {
+            p2p.publish_channel(channel_id, seq, frame).await;
+        }
+        Ok(seq)
+    }
+
+    /// Test hook: pretend a `(seq, frame)` for `channel_id` arrived over
+    /// channel gossip, so a test can exercise the merge path in `poll_channels`
+    /// (including a hostile frame) without standing up a real gossip mesh.
+    #[cfg(all(test, feature = "p2p"))]
+    pub(crate) fn inject_channel_gossip(&mut self, channel_id: [u8; 32], seq: u64, frame: Vec<u8>) {
+        self.channel_gossip
+            .entry(channel_id)
+            .or_default()
+            .push((seq, frame));
+    }
+
+    /// Test hook: the highest channel-log seq this client has consumed.
+    #[cfg(test)]
+    pub(crate) fn channel_last_seq(&self, channel_id: &[u8; 32]) -> u64 {
+        self.channels.get(channel_id).map_or(0, |c| c.last_seq)
+    }
+
     /// Fan a just-submitted ledger record out to peers over gossipsub. No-op
     /// unless the `p2p` feature is on and a node is running.
     async fn gossip_record(&self, rec: &Record) {
@@ -1270,10 +1345,36 @@ impl Engine {
             }
             self.last_p2p_announce_ms = now_ms;
         }
-        let blobs = match self.p2p.as_mut() {
-            Some(p2p) => p2p.drain_ledger_records(),
+        // Subscribe any channel whose gossip topic we don't have yet.
+        let want: Vec<[u8; 32]> = self
+            .channels
+            .keys()
+            .filter(|id| !self.subscribed_channels.contains(*id))
+            .copied()
+            .collect();
+        for id in want {
+            if let Some(p2p) = &self.p2p {
+                p2p.subscribe_channel(&id).await;
+            }
+            self.subscribed_channels.insert(id);
+        }
+
+        let (blobs, frames) = match self.p2p.as_mut() {
+            Some(p2p) => (p2p.drain_ledger_records(), p2p.drain_channel_frames()),
             None => return 0,
         };
+        for (cid, seq, frame) in frames {
+            if !self.channels.contains_key(&cid) {
+                continue;
+            }
+            let buf = self.channel_gossip.entry(cid).or_default();
+            buf.push((seq, frame));
+            // Bound the buffer if `poll_channels` isn't keeping up.
+            if buf.len() > 256 {
+                let drop = buf.len() - 256;
+                buf.drain(..drop);
+            }
+        }
         let mut accepted = 0;
         for blob in blobs {
             if let Ok(rec) = Record::decode(&blob) {
@@ -2052,6 +2153,13 @@ impl Engine {
         listen: &str,
         bootstrap: &[String],
     ) -> Result<Vec<String>, CoreError> {
+        // A libp2p relay transport already brought up a node; reuse it rather
+        // than run a second swarm.
+        if self.p2p.is_some() {
+            let addrs = self.p2p_dial_addrs();
+            let _ = sync::announce_p2p(&mut self.client, &addrs).await;
+            return Ok(addrs);
+        }
         // Merge the caller's bootstrap list with peers the relay knows about.
         let mut boot: Vec<String> = bootstrap.to_vec();
         if let Ok(from_relay) = sync::get_p2p_peers(&mut self.client).await {
@@ -2385,7 +2493,7 @@ impl Engine {
         };
 
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_COMMIT, &commit);
-        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        self.post_channel_frame(channel_id, &frame).await?;
 
         let wc = ChannelControl::MlsWelcome {
             info,
@@ -2627,7 +2735,7 @@ impl Engine {
         self.dirty = true;
 
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_COMMIT, &commit);
-        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        self.post_channel_frame(channel_id, &frame).await?;
         Ok(())
     }
 
@@ -3573,7 +3681,7 @@ impl Engine {
                 .map_err(mls_err)?
         };
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
-        let seq = sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        let seq = self.post_channel_frame(channel_id, &frame).await?;
         let me = self.my_member_id();
         // Record our authorship so we can edit / delete this message later
         // (we never see our own message come back through `poll_channels`).
@@ -3664,7 +3772,7 @@ impl Engine {
                 .map_err(mls_err)?
         };
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
-        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        self.post_channel_frame(channel_id, &frame).await?;
         self.apply_channel_edit(*channel_id, target_seq, me, new_text);
         Ok(())
     }
@@ -3795,7 +3903,7 @@ impl Engine {
                 .map_err(mls_err)?
         };
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
-        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        self.post_channel_frame(channel_id, &frame).await?;
         self.apply_channel_pin(*channel_id, target_seq, me, unpin, now_ms);
         Ok(())
     }
@@ -3919,12 +4027,37 @@ impl Engine {
         let mut evicted: Vec<([u8; 32], [u8; 32], String)> = Vec::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
-            let entries = sync::fetch_channel(&mut self.client, &id, since).await?;
-            for (seq, blob) in entries {
+            let relay = sync::fetch_channel(&mut self.client, &id, since).await?;
+
+            // `(seq, frame, from_relay)`. Merge in gossip frames — but ONLY the
+            // immediately-next seq, and a gossip frame never advances
+            // `last_seq`. Otherwise a channel member could gossip a junk frame
+            // at `since+1` and make us skip the real one the relay has.
+            let mut entries: Vec<(u64, Vec<u8>, bool)> =
+                relay.into_iter().map(|(s, b)| (s, b, true)).collect();
+            #[cfg(feature = "p2p")]
+            if let Some(buf) = self.channel_gossip.remove(&id) {
+                for (seq, frame) in buf {
+                    if seq == since + 1 {
+                        entries.push((seq, frame, false));
+                    }
+                }
+            }
+            // Relay frames sort first for equal seq, so `dedup_by_key` keeps
+            // the authoritative copy and drops any gossip duplicate.
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+            entries.dedup_by_key(|(s, _, _)| *s);
+
+            for (seq, blob, from_relay) in entries {
                 let Some(ch) = self.channels.get_mut(&id) else {
                     continue;
                 };
-                ch.last_seq = ch.last_seq.max(seq);
+                if !from_relay && seq <= ch.last_seq {
+                    continue; // already consumed
+                }
+                if from_relay {
+                    ch.last_seq = ch.last_seq.max(seq);
+                }
                 // Strip the outer password wrapper first, if this channel has one.
                 let inner: std::borrow::Cow<'_, [u8]> = match ch.log_key {
                     Some(k) => match channel::unwrap(&k, &id, &blob) {
@@ -3985,22 +4118,39 @@ impl Engine {
                                         text: None,
                                         deleted: false,
                                     });
-                                new_history.push(ChannelHistoryEntry {
-                                    channel_id: id,
-                                    sender,
-                                    outgoing: false,
-                                    ts_ms: now_ms,
-                                    text: text.clone(),
-                                });
-                                out.push(ChannelMessage {
-                                    channel_id: id,
-                                    channel_name: ch.info.channel_name.clone(),
-                                    sender,
-                                    text,
-                                    seq,
-                                    reply_to,
-                                    forwarded_from,
-                                });
+                                // If we already surfaced this seq from a gossip
+                                // frame, the authoritative relay copy just
+                                // confirms it — don't emit it twice.
+                                #[cfg(feature = "p2p")]
+                                let already_shown =
+                                    from_relay && self.gossip_shown.remove(&(id, seq));
+                                #[cfg(not(feature = "p2p"))]
+                                let already_shown = false;
+                                #[cfg(feature = "p2p")]
+                                if !from_relay {
+                                    self.gossip_shown.insert((id, seq));
+                                    if self.gossip_shown.len() > 4096 {
+                                        self.gossip_shown.clear();
+                                    }
+                                }
+                                if !already_shown {
+                                    new_history.push(ChannelHistoryEntry {
+                                        channel_id: id,
+                                        sender,
+                                        outgoing: false,
+                                        ts_ms: now_ms,
+                                        text: text.clone(),
+                                    });
+                                    out.push(ChannelMessage {
+                                        channel_id: id,
+                                        channel_name: ch.info.channel_name.clone(),
+                                        sender,
+                                        text,
+                                        seq,
+                                        reply_to,
+                                        forwarded_from,
+                                    });
+                                }
                             }
                             Some(Ok(Content::Reaction {
                                 target_seq,
@@ -4075,7 +4225,7 @@ impl Engine {
                 .map_err(mls_err)?
         };
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_APP, &ct);
-        sync::post_to_channel(&mut self.client, channel_id, &frame).await?;
+        self.post_channel_frame(channel_id, &frame).await?;
         let me = self.my_member_id();
         self.record_reaction(*channel_id, target_seq, emoji.to_owned(), me, remove);
         Ok(())

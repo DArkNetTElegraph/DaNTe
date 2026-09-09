@@ -589,6 +589,22 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
   border-radius: 4px; padding: 0 3px; font-weight: 600; }
 .mention.mention-me { background: color-mix(in srgb, var(--orange) 28%, transparent); color: var(--orange); }
 .mention-badge { color: var(--orange) !important; font-weight: 700; }
+/* ---- markdown message formatting ---- */
+.msg-line strong { font-weight: 700; }
+.msg-line em { font-style: italic; }
+.msg-line u { text-decoration: underline; }
+.msg-line s { text-decoration: line-through; opacity: .8; }
+.md-code { font-family: var(--font-mono); font-size: .88em; background: var(--bg-app);
+  border: 1px solid var(--border); border-radius: 4px; padding: .5px 4px; }
+.md-pre { font-family: var(--font-mono); font-size: .86em; background: var(--bg-app);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 4px 0;
+  white-space: pre; overflow-x: auto; }
+.md-pre code { background: none; border: 0; padding: 0; }
+.md-quote { margin: 2px 0; padding: 1px 0 1px 10px; border-left: 3px solid var(--border-strong);
+  color: var(--text); }
+.md-spoiler { background: var(--text); color: transparent; border-radius: 4px; cursor: pointer;
+  padding: 0 3px; transition: color .08s; }
+.md-spoiler.revealed { background: color-mix(in srgb, var(--text) 12%, transparent); color: inherit; }
 #mention-popup { position: fixed; z-index: 95; background: var(--bg-pane); border: 1px solid var(--divider);
   border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.4); overflow: hidden; max-height: 220px; overflow-y: auto; }
 #mention-popup .mrow { padding: 6px 12px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
@@ -974,6 +990,37 @@ const PERM_SEND = 1, PERM_KICK = 2, PERM_MANAGE_CHANNELS = 4, PERM_MANAGE_ROLES 
 const $  = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const initials = s => (s || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
+
+// Discord-style avatars: a stable colour per identity (from its fingerprint),
+// white monogram on top. Colours are drawn from the project's own brand palette
+// (see the :root tokens / DESIGN.md) — flame, amber, cornflower, indigo, green
+// and blends — each darkened enough to keep white text legible.
+const AVATAR_COLORS = [
+  "var(--blazing-flame)",
+  "color-mix(in srgb, var(--orange) 76%, #000)",
+  "color-mix(in srgb, var(--cornflower-blue) 60%, #000)",
+  "var(--space-indigo)",
+  "color-mix(in srgb, var(--ok) 70%, #000)",
+  "color-mix(in srgb, var(--cornflower-blue) 50%, var(--blazing-flame))",
+  "color-mix(in srgb, var(--orange) 55%, var(--blazing-flame))",
+  "color-mix(in srgb, var(--cornflower-blue) 60%, var(--space-indigo))",
+];
+function avatarColor(seed) {
+  let h = 0;
+  const s = seed || "";
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+}
+// Build an avatar div: initials of `label`, coloured by `seed` (optional).
+function avatar(label, seed, cls) {
+  const av = el("div", cls || "avatar", initials(label));
+  if (seed) {
+    av.style.background = avatarColor(seed);
+    av.style.color = "#fff";
+    av.style.boxShadow = "none";
+  }
+  return av;
+}
 const short = s => (s && s.includes("-")) ? s.split("-").slice(0, 2).join("-") : (s || "");
 
 /* ---------- monochrome UI icons (stroke, currentColor) ---------------- */
@@ -1543,7 +1590,7 @@ function renderPane() {
     for (const d of store.dms) if (!isSelf(d.fp) && !fps.includes(d.fp)) fps.push(d.fp);
     for (const fp of fps) {
       const row = el("button", "chan-row" + (curTarget() === fp ? " active" : "") + (isBlocked(fp) ? " blocked" : "") + (store.isMuted(fp) ? " muted" : ""));
-      row.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(dmLabel(fp)) }));
+      row.appendChild(avatar(dmLabel(fp), fp));
       row.appendChild(el("span", "name", dmLabel(fp)));
       if (store.contacts.find(c => c.fp === fp && c.verified)) row.appendChild(Object.assign(el("span", "tag"), { textContent: "✓" }));
       unreadBadge(row, fp);
@@ -1604,7 +1651,7 @@ function renderPane() {
         const pl = el("div", "voice-members");
         for (const fp of room.participants) {
           const m = el("div", "voice-member");
-          m.appendChild(Object.assign(el("div", "avatar"), { textContent: initials(dmLabel(fp) || short(fp)) }));
+          m.appendChild(avatar(dmLabel(fp) || short(fp), fp));
           m.appendChild(el("span", null, dmLabel(fp) || short(fp)));
           pl.appendChild(m);
         }
@@ -2450,7 +2497,7 @@ function groupShell(m, sameAuthor) {
   const node = el("div", "msg-group");
   const name = m.from === "you" ? (store.me.username || short(store.me.fingerprint)) : authorLabel(m.from);
   const fp = m.from === "you" ? store.me.fingerprint : m.from;
-  const av = el("div", "avatar", initials(name));
+  const av = avatar(name, fp);
   if (fp) { av.classList.add("clickable"); av.onclick = () => openProfile(fp); }
   const body = el("div", "body");
   if (!sameAuthor) {
@@ -2498,7 +2545,7 @@ function renderMembers() {
       const isMe = fp === store.me.fingerprint;
       const label = isMe ? (store.me.username || "you") : dmLabel(fp);
       const row = el("div", "member-row" + (isMe ? " you" : ""));
-      const av = el("div", "avatar clickable", initials(label));
+      const av = avatar(label, fp, "avatar clickable");
       av.onclick = () => openProfile(fp);
       row.appendChild(av);
       const nm = el("span", "name", label);
@@ -2702,6 +2749,11 @@ function emojiPopOutside(e) {
   }
 }
 addEventListener("keydown", e => { if (e.key === "Escape") emojiPopClose(); });
+// Click a spoiler to reveal it (Discord-style).
+document.addEventListener("click", e => {
+  const sp = e.target.closest && e.target.closest(".md-spoiler:not(.revealed)");
+  if (sp) { sp.classList.add("revealed"); e.stopPropagation(); }
+});
 
 // A flat grid of the current server's stickers; a click sends one immediately.
 function openStickerPicker(anchor) {
@@ -2784,18 +2836,75 @@ function richText(s) {
     if (sm[lone[1]])
       return `<img class="sticker" alt=":${lone[1]}:" title=":${lone[1]}:" src="/api/sticker?hash=${sm[lone[1]]}">`;
   }
+  return mdRender(s);
+}
+
+/* Discord-flavoured markdown -> safe HTML.
+   Safety: every piece of user text is HTML-escaped before any tag is
+   introduced; code spans are pulled out first so their contents are never
+   re-parsed as markup; autolinks are restricted to http(s) URLs, which after
+   escaping cannot contain a quote or angle bracket, so they are safe in an
+   href. Supports: ```code blocks```, `inline code`, **bold**, *italic* / _italic_,
+   ***bold italic***, __underline__, ~~strike~~, ||spoiler||, > blockquotes,
+   :emoji:, @mentions, links, and line breaks. */
+function mdRender(src) {
+  const codes = [];
+  const stash = (h) => "\u0000" + (codes.push(h) - 1) + "\u0000";
+  // Strip real NULs so a user can't forge a code-span placeholder token.
+  let s = src.replace(/\u0000/g, "").replace(/\r\n?/g, "\n");
+  // 1. Pull out code spans first (their contents are escaped, never re-parsed).
+  s = s.replace(/```(?:[a-zA-Z0-9_+.-]*\n)?([\s\S]*?)```/g,
+    (_, code) => stash('<pre class="md-pre"><code>' + esc(code.replace(/\n+$/, "")) + "</code></pre>"));
+  s = s.replace(/`([^`\n]+)`/g, (_, code) => stash('<code class="md-code">' + esc(code) + "</code>"));
+  // 2. Escape everything that remains.
+  s = esc(s);
+  // 3. Inline emphasis (escaped text; single-level nesting covers the common cases).
+  s = s.replace(/\|\|([\s\S]+?)\|\|/g, '<span class="md-spoiler">$1</span>');
+  s = s.replace(/\*\*\*([^*\n]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__([^_\n]+)__/g, "<u>$1</u>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  s = s.replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~\n]+)~~/g, "<s>$1</s>");
+  // 4. Custom emoji.
   const m = emojiMap();
-  let out = esc(s).replace(/:([a-z0-9_]{1,32}):/g, (whole, name) =>
-    m[name]
-      ? `<img class="emoji" alt=":${name}:" title=":${name}:" src="/api/emoji?hash=${m[name]}">`
-      : whole);
-  out = out.replace(/@([A-Z0-9]{4}(?:-[A-Z0-9]{4}){2,12})/g, (whole, fp) => {
+  s = s.replace(/:([a-z0-9_]{1,32}):/g, (whole, name) =>
+    m[name] ? `<img class="emoji" alt=":${name}:" title=":${name}:" src="/api/emoji?hash=${m[name]}">` : whole);
+  // 5. Mentions.
+  s = s.replace(/@([A-Z0-9]{4}(?:-[A-Z0-9]{4}){2,12})/g, (whole, fp) => {
     const hit = resolveMention(fp);
     if (!hit) return whole;
     const me = hit === store.me.fingerprint;
-    return `<span class="mention${me ? " mention-me" : ""}" title="${hit}">@${esc(mentionLabel(hit))}</span>`;
+    return `<span class="mention${me ? " mention-me" : ""}" title="${esc(hit)}">@${esc(mentionLabel(hit))}</span>`;
   });
-  return out;
+  // 6. Autolink http(s). NB esc() (textContent->innerHTML) does NOT escape
+  // double quotes, so a URL can carry a `"` that would break out of the href
+  // attribute — quote-escape it explicitly. The visible text is in element
+  // content position, where a bare quote is harmless.
+  s = s.replace(/\bhttps?:\/\/[^\s<]+/g, (u) => {
+    const url = u.replace(/[.,;:!?)\]]+$/, "");
+    const tail = u.slice(url.length);
+    const href = url.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>` + tail;
+  });
+  // 7. Blockquotes + line breaks. Code tokens are single-line, so this is safe.
+  const parts = [];
+  let quote = [];
+  const flush = () => { if (quote.length) { parts.push({ q: quote }); quote = []; } };
+  for (const ln of s.split("\n")) {
+    const qm = ln.match(/^&gt;\s?(.*)$/);
+    if (qm) quote.push(qm[1]);
+    else { flush(); parts.push({ t: ln }); }
+  }
+  flush();
+  let out = "";
+  let prevText = false;
+  for (const p of parts) {
+    if (p.q) { out += '<blockquote class="md-quote">' + p.q.join("<br>") + "</blockquote>"; prevText = false; }
+    else { out += (prevText ? "<br>" : "") + p.t; prevText = true; }
+  }
+  // 8. Restore code spans.
+  return out.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[+i] || "");
 }
 
 /* Resolve an @-token (full fp or unambiguous prefix) against people we know. */

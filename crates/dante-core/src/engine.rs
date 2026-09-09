@@ -1724,6 +1724,13 @@ impl Engine {
         self.group_calls.get(channel_id)?.mls.call_key().ok()
     }
 
+    /// The MLS epoch of `channel_id`'s group call, if we are in it. Bumps on
+    /// every membership change; a client keys an SFrame layer off `(key,
+    /// epoch)` and re-derives when the epoch moves.
+    pub fn group_call_epoch(&self, channel_id: &[u8; 32]) -> Option<u64> {
+        self.group_calls.get(channel_id).map(|gc| gc.mls.epoch())
+    }
+
     /// Whether we are in `channel_id`'s group call.
     pub fn in_group_call(&self, channel_id: &[u8; 32]) -> bool {
         self.group_calls.contains_key(channel_id)

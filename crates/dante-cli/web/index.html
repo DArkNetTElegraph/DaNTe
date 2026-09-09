@@ -1988,6 +1988,11 @@ function renderVoiceRoom(c, target) {
   wrap.appendChild(el("div", "voice-room-sub",
     people.length ? (people.length === 1 ? "1 person connected" : people.length + " people connected")
                   : "No one's here yet — jump in."));
+  if (connected) {
+    wrap.appendChild(el("div", "voice-room-sub",
+      sframeActive() ? "🔒 SFrame — audio also encrypted under the channel key"
+                     : "🔒 transport-encrypted (DTLS-SRTP)"));
+  }
 
   if (people.length) {
     const stage = el("div", "voice-stage");
@@ -3070,11 +3075,110 @@ const voiceRtc = {
   micOn: true,
   iceServers: [],
   peers: new Map(),       // fingerprint -> { pc, audio, polite, pending, screenSenders, remoteScreen }
+  // SFrame layer: an extra AES-GCM pass over each Opus frame, keyed off the
+  // channel's MLS group-call key. The mesh's DTLS-SRTP already protects the
+  // audio hop-by-hop; this is what would let a future SFU forward the media
+  // without being able to decode it. No-op unless the browser exposes
+  // WebRTC encoded transforms (Chromium `createEncodedStreams`).
+  sframe: { epoch: -1, key: null, prevKey: null, prevAt: 0, timer: null },
 };
 
 // Re-paint the voice room if it's the open view (used by async media callbacks).
 function voiceRerender() {
   if (curTarget() === "#" + voiceRtc.channelId) renderChat();
+}
+
+/* ---------- SFrame media layer -------------------------------------- */
+const SFRAME_MAGIC = [0x44, 0x53, 0x46, 0x31];   // "DSF1"
+function sframeAvailable() {
+  return typeof RTCRtpSender !== "undefined"
+    && "createEncodedStreams" in RTCRtpSender.prototype
+    && "createEncodedStreams" in RTCRtpReceiver.prototype
+    && typeof crypto !== "undefined" && crypto.subtle;
+}
+function sframeActive() { return !!voiceRtc.sframe.key; }
+function sframePrevValid() {
+  return voiceRtc.sframe.prevKey && (Date.now() - voiceRtc.sframe.prevAt) < 12000;
+}
+
+async function sframeDeriveKey(hex) {
+  const raw = new Uint8Array(hex.match(/../g).map(h => parseInt(h, 16)));
+  const hk = await crypto.subtle.importKey("raw", raw, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0),
+      info: new TextEncoder().encode("dante/sframe/v1") },
+    hk, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+
+// Poll the engine for the current per-epoch call key; re-derive on an epoch bump.
+async function sframeRefreshKey() {
+  if (!voiceRtc.channelId || !sframeAvailable()) return;
+  let r;
+  try { r = await api.get("/api/voice/key?channel=" + encodeURIComponent(voiceRtc.channelId)); }
+  catch (_) { return; }
+  if (!r || !r.key) return;
+  if (r.epoch === voiceRtc.sframe.epoch && voiceRtc.sframe.key) return;
+  try {
+    const next = await sframeDeriveKey(r.key);
+    voiceRtc.sframe.prevKey = voiceRtc.sframe.key;
+    voiceRtc.sframe.prevAt = Date.now();
+    voiceRtc.sframe.key = next;
+    voiceRtc.sframe.epoch = r.epoch;
+    voiceRerender();
+  } catch (_) {}
+}
+
+function sframeStart() {
+  if (!sframeAvailable()) return;
+  sframeRefreshKey();
+  voiceRtc.sframe.timer = setInterval(sframeRefreshKey, 3000);
+}
+function sframeStop() {
+  if (voiceRtc.sframe.timer) clearInterval(voiceRtc.sframe.timer);
+  voiceRtc.sframe = { epoch: -1, key: null, prevKey: null, prevAt: 0, timer: null };
+}
+
+async function sframeEncrypt(frame, controller) {
+  const key = voiceRtc.sframe.key;
+  if (key) {
+    try {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, frame.data));
+      const out = new Uint8Array(4 + 12 + ct.byteLength);
+      out.set(SFRAME_MAGIC, 0); out.set(iv, 4); out.set(ct, 16);
+      frame.data = out.buffer;
+    } catch (_) { /* pass the plaintext frame through */ }
+  }
+  controller.enqueue(frame);
+}
+async function sframeDecrypt(frame, controller) {
+  const buf = new Uint8Array(frame.data);
+  const tagged = buf.length > 16 && SFRAME_MAGIC.every((b, i) => buf[i] === b);
+  if (!tagged) { controller.enqueue(frame); return; }   // a peer without SFrame
+  const iv = buf.subarray(4, 16);
+  const ct = buf.subarray(16);
+  for (const key of [voiceRtc.sframe.key, sframePrevValid() ? voiceRtc.sframe.prevKey : null]) {
+    if (!key) continue;
+    try {
+      frame.data = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+      controller.enqueue(frame);
+      return;
+    } catch (_) {}
+  }
+  // Key desync — drop rather than feed ciphertext to the decoder (Opus PLC
+  // covers the gap; the next key poll recovers).
+}
+
+// Install the transform on one sender / receiver (audio only).
+function sframeAttach(rtpObj, dir) {
+  if (!sframeAvailable() || !rtpObj || !rtpObj.track || rtpObj.track.kind !== "audio") return;
+  if (rtpObj._sframe) return;
+  let streams;
+  try { streams = rtpObj.createEncodedStreams(); }
+  catch (_) { return; }
+  rtpObj._sframe = true;
+  const tx = new TransformStream({ transform: dir === "enc" ? sframeEncrypt : sframeDecrypt });
+  streams.readable.pipeThrough(tx).pipeTo(streams.writable).catch(() => {});
 }
 
 async function voiceAction(channelId, join) {
@@ -3122,10 +3226,12 @@ async function voiceRtcStart(channelId) {
       .filter(s => s.kind === "stun" && s.urls && s.urls.length)
       .map(s => ({ urls: s.urls }));
   } catch (_) { voiceRtc.iceServers = []; }
+  sframeStart();
   voiceSyncPeers();
 }
 
 function voiceRtcStop() {
+  sframeStop();
   for (const fp of [...voiceRtc.peers.keys()]) {
     voiceSignalSend(fp, 3, "");
     voicePeerClose(fp);
@@ -3229,6 +3335,7 @@ async function voicePeerConnect(fp, initiator) {
     for (const t of voiceRtc.screenStream.getTracks())
       entry.screenSenders.push(pc.addTrack(t, voiceRtc.screenStream));
   }
+  for (const s of pc.getSenders()) sframeAttach(s, "enc");
 
   pc.onicecandidate = e => {
     if (e.candidate) voiceSignalSend(fp, 2, JSON.stringify(e.candidate));
@@ -3242,6 +3349,7 @@ async function voicePeerConnect(fp, initiator) {
       voiceRerender();
       return;
     }
+    sframeAttach(e.receiver, "dec");
     let a = entry.audio;
     if (!a) { a = new Audio(); a.autoplay = true; entry.audio = a; }
     a.srcObject = e.streams[0];

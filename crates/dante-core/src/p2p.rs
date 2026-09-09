@@ -18,26 +18,11 @@ use tokio::sync::mpsc;
 
 use crate::error::CoreError;
 
-/// Gossipsub topic carrying encoded ledger [`Record`](dante_proto::record::Record)s.
-pub(crate) use dante_p2p::LEDGER_TOPIC;
-/// Prefix of the per-channel gossipsub topic: `dante/chan/<base32 channel id>`.
-/// The payload is `seq` (8 bytes, little-endian) followed by the opaque channel
-/// log frame — the same bytes the relay stores under that `seq`.
-const CHAN_TOPIC_PREFIX: &str = "dante/chan/";
-
-fn chan_topic(channel_id: &[u8; 32]) -> String {
-    format!(
-        "{CHAN_TOPIC_PREFIX}{}",
-        dante_identity::id::IdentityId::from_bytes(*channel_id).to_base32()
-    )
-}
-
-fn parse_chan_topic(topic: &str) -> Option<[u8; 32]> {
-    let b32 = topic.strip_prefix(CHAN_TOPIC_PREFIX)?;
-    dante_identity::id::IdentityId::from_base32(b32)
-        .ok()
-        .map(|id| *id.as_bytes())
-}
+/// Gossipsub topics: encoded ledger [`Record`](dante_proto::record::Record)s,
+/// and the per-channel `dante/chan/<hex id>` topic (`seq ‖ frame` payload).
+pub(crate) use dante_p2p::{
+    channel_topic as chan_topic, parse_channel_topic as parse_chan_topic, LEDGER_TOPIC,
+};
 
 /// Kademlia record key for an identity's prekey bundle: a fixed tag followed by
 /// the 32-byte `IdentityId`.

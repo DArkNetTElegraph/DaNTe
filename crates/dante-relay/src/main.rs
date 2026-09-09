@@ -220,7 +220,14 @@ async fn serve_p2p(
     // Federation: fold every ledger record heard on the gossip topic into our
     // replica, and re-broadcast every record we accept, so sibling relays
     // converge without any direct relay-to-relay protocol.
-    node.subscribe(dante_p2p::LEDGER_TOPIC).await.ok();
+    for t in [
+        dante_p2p::LEDGER_TOPIC,
+        dante_p2p::PREKEY_TOPIC,
+        dante_p2p::MAILBOX_TOPIC,
+        dante_p2p::KEYPKG_TOPIC,
+    ] {
+        node.subscribe(t).await.ok();
+    }
     // Gossip has no history, so pull each sibling's ledger once on startup;
     // gossip then keeps replicas live from here.
     for b in bootstrap {
@@ -235,6 +242,8 @@ async fn serve_p2p(
 
     let pid = node.peer_id();
     let mut flush = tokio::time::interval(Duration::from_secs(2));
+    // Channels whose gossip topic we're subscribed to.
+    let mut chan_subs: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
     loop {
         tokio::select! {
@@ -257,13 +266,87 @@ async fn serve_p2p(
                         tracing::debug!("relay federation: accepted a gossiped ledger record");
                     }
                 }
+                Some(dante_p2p::Event::Message { topic, data, .. })
+                    if topic == dante_p2p::PREKEY_TOPIC =>
+                {
+                    handler.state().lock().await.ingest_gossiped_prekey(data);
+                }
+                Some(dante_p2p::Event::Message { topic, data, .. })
+                    if topic == dante_p2p::MAILBOX_TOPIC =>
+                {
+                    handler
+                        .state()
+                        .lock()
+                        .await
+                        .ingest_gossiped_envelope(data, now_ms());
+                }
+                Some(dante_p2p::Event::Message { topic, data, .. })
+                    if topic == dante_p2p::KEYPKG_TOPIC =>
+                {
+                    handler.state().lock().await.ingest_gossiped_keypackage(&data);
+                }
+                Some(dante_p2p::Event::Message { topic, data, .. }) => {
+                    if let Some((cid, seq, blob)) = parse_chan_gossip(&topic, &data) {
+                        handler
+                            .state()
+                            .lock()
+                            .await
+                            .ingest_gossiped_channel_frame(cid, seq, blob, now_ms());
+                    }
+                }
                 Some(_) => {}
                 None => return Ok(()), // node event loop stopped
             },
             _ = flush.tick() => {
-                let pending = handler.state().lock().await.take_ledger_outbox();
-                for blob in pending {
+                let (records, prekeys, envelopes, keypkgs, frames, backfill) = {
+                    let mut st = handler.state().lock().await;
+                    (
+                        st.take_ledger_outbox(),
+                        st.take_prekey_outbox(),
+                        st.take_mbox_outbox(),
+                        st.take_keypkg_outbox(),
+                        st.take_channel_outbox(),
+                        st.take_channel_backfill(),
+                    )
+                };
+                for blob in records {
                     let _ = node.publish(dante_p2p::LEDGER_TOPIC, blob).await;
+                }
+                for blob in prekeys {
+                    let _ = node.publish(dante_p2p::PREKEY_TOPIC, blob).await;
+                }
+                for blob in envelopes {
+                    let _ = node.publish(dante_p2p::MAILBOX_TOPIC, blob).await;
+                }
+                for blob in keypkgs {
+                    let _ = node.publish(dante_p2p::KEYPKG_TOPIC, blob).await;
+                }
+                for (cid, seq, blob) in frames {
+                    if chan_subs.insert(cid) {
+                        let _ = node.subscribe(&chan_gossip_topic(&cid)).await;
+                    }
+                    let mut payload = seq.to_le_bytes().to_vec();
+                    payload.extend_from_slice(&blob);
+                    let _ = node.publish(&chan_gossip_topic(&cid), payload).await;
+                }
+                for cid in backfill {
+                    if chan_subs.insert(cid) {
+                        let _ = node.subscribe(&chan_gossip_topic(&cid)).await;
+                    }
+                    for b in bootstrap {
+                        match fetch_channel_from(node.clone(), b, cid).await {
+                            Ok(rows) if !rows.is_empty() => {
+                                let n = rows.len();
+                                handler.state().lock().await.adopt_channel_log(cid, rows, now_ms());
+                                tracing::info!(
+                                    sibling = %b, frames = n,
+                                    "relay federation: adopted a sibling channel log"
+                                );
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             req = inbound.recv() => {
@@ -322,6 +405,63 @@ async fn backfill_ledger_from(
         from = to;
     }
     Ok(accepted)
+}
+
+/// The channel's gossip topic (shared with clients).
+#[cfg(feature = "p2p")]
+fn chan_gossip_topic(channel_id: &[u8; 32]) -> String {
+    dante_p2p::channel_topic(channel_id)
+}
+
+/// Parse a `dante/chan/<hex>` gossip message into `(channel_id, seq, frame)`.
+#[cfg(feature = "p2p")]
+fn parse_chan_gossip(topic: &str, data: &[u8]) -> Option<([u8; 32], u64, Vec<u8>)> {
+    let cid = dante_p2p::parse_channel_topic(topic)?;
+    if data.len() < 8 {
+        return None;
+    }
+    let seq = u64::from_le_bytes(data[..8].try_into().ok()?);
+    Some((cid, seq, data[8..].to_vec()))
+}
+
+/// Pull one channel's whole log from a sibling relay over `/dante/relay/1`,
+/// verbatim (seqs preserved).
+#[cfg(feature = "p2p")]
+async fn fetch_channel_from(
+    node: dante_p2p::Node,
+    sibling_addr: &str,
+    channel_id: [u8; 32],
+) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
+    use dante_net::transport::Client;
+    use dante_net::wire::{Request, Response};
+
+    let mut client = Client::connect_p2p(node, sibling_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut out = Vec::new();
+    let mut since = 0u64;
+    loop {
+        let rows = match client
+            .request(&Request::FetchChannel {
+                channel_id,
+                since_seq: since,
+            })
+            .await
+        {
+            Ok(Response::ChannelLog(r)) => r,
+            Ok(other) => anyhow::bail!("unexpected reply to FetchChannel: {other:?}"),
+            Err(e) => anyhow::bail!("{e}"),
+        };
+        if rows.is_empty() {
+            break;
+        }
+        since = rows.iter().map(|(s, _)| *s).max().unwrap_or(since);
+        out.extend(rows);
+        if out.len() > 100_000 {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// A stable synthetic ULA-v6 address per libp2p peer, so the relay's per-IP
@@ -451,6 +591,19 @@ fn parse_args() -> Args {
         ice.turn_secret = std::env::var("DANTE_TURN_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
+    }
+    // Sibling relays may also be supplied out of band so a distro / systemd
+    // unit doesn't need to bake them into the command line.
+    if let Ok(env) = std::env::var("DANTE_BOOTSTRAP") {
+        for a in env
+            .split([',', ' ', '\t', '\n'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !p2p_bootstrap.iter().any(|x| x == a) {
+                p2p_bootstrap.push(a.to_string());
+            }
+        }
     }
     Args {
         listen,

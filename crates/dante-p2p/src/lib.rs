@@ -58,6 +58,46 @@ pub const RELAY_CAPABILITY: &[u8] = b"dante/relay/v1";
 /// own announce/liveness/revoke records here, and federated relays
 /// re-broadcast every record they accept so relay replicas converge.
 pub const LEDGER_TOPIC: &str = "dante/ledger/v1";
+/// Gossipsub topic carrying encoded X3DH prekey bundles (public data —
+/// anyone can already fetch one by id). Federated relays share them so a
+/// client on any relay can start a session with any identity.
+pub const PREKEY_TOPIC: &str = "dante/prekey/v1";
+/// Gossipsub topic carrying sealed-sender `Envelope`s. Federated relays
+/// replicate every deposit so the recipient can fetch it from whichever
+/// relay it polls. The relay still sees only hint + size + timing.
+pub const MAILBOX_TOPIC: &str = "dante/mbox/v1";
+/// Gossipsub topic carrying an identity's *last-resort* MLS KeyPackage
+/// (`identity[32] ‖ keypackage`). Single-use KeyPackages stay pinned to the
+/// relay they were published to; only the reusable fallback is shared, so a
+/// host on any relay can still add a member whose relay it can't reach.
+pub const KEYPKG_TOPIC: &str = "dante/keypkg/v1";
+/// Prefix of the per-channel gossipsub topic. The topic is
+/// `dante/chan/<lowercase hex channel id>`; the payload is `seq` (8 bytes,
+/// little-endian) followed by the opaque channel-log frame.
+const CHAN_TOPIC_PREFIX: &str = "dante/chan/";
+
+/// The gossip topic for a channel id.
+pub fn channel_topic(channel_id: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(CHAN_TOPIC_PREFIX.len() + 64);
+    s.push_str(CHAN_TOPIC_PREFIX);
+    for b in channel_id {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// The channel id in a `dante/chan/<hex>` topic, if it is one.
+pub fn parse_channel_topic(topic: &str) -> Option<[u8; 32]> {
+    let hex = topic.strip_prefix(CHAN_TOPIC_PREFIX)?;
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum P2pError {

@@ -358,7 +358,14 @@ impl RelayState {
             .entry(channel_id)
             .or_insert((1, false, Vec::new()));
         if entry.1 {
-            return false; // we are this channel's writer; ignore followers
+            // We think we sequence this channel. If a sibling has produced a
+            // frame at or past our next slot, the client set has rendezvous-
+            // hashed the channel onto it (e.g. we flapped and a follower was
+            // promoted) — step down and fold, rather than fork the log.
+            if seq < entry.0 {
+                return false; // still ours, and this is old news
+            }
+            entry.1 = false;
         }
         if entry.2.iter().any(|(s, _, _)| *s == seq) {
             return false; // already have it
@@ -958,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_federation_replicates_but_a_writer_ignores_followers() {
+    fn channel_federation_replicates_and_a_writer_steps_down_when_overtaken() {
         let cid = [7u8; 32];
 
         // Relay A: a client posts here, so A sequences the channel and queues
@@ -976,8 +983,35 @@ mod tests {
             Response::Posted(1)
         );
         assert_eq!(a.take_channel_outbox(), vec![(cid, 1, b"frame-1".to_vec())]);
-        // A is the writer now: a gossiped frame for this channel is ignored.
-        assert!(!a.ingest_gossiped_channel_frame(cid, 2, b"gossip".to_vec(), 1_000));
+        // A is the writer: a stale gossiped frame (seq below our next slot) is
+        // ignored and A keeps sequencing.
+        assert!(!a.ingest_gossiped_channel_frame(cid, 1, b"dup".to_vec(), 1_000));
+        assert_eq!(
+            a.handle(
+                Request::PostToChannel {
+                    channel_id: cid,
+                    blob: b"frame-2".to_vec(),
+                },
+                IP,
+                1_000
+            ),
+            Response::Posted(2)
+        );
+        let _ = a.take_channel_outbox();
+        // But a sibling frame at/past our next slot means the client set has
+        // re-homed the channel: A steps down, folds it, and stops sequencing.
+        assert!(a.ingest_gossiped_channel_frame(cid, 3, b"sibling-3".to_vec(), 1_000));
+        assert_eq!(
+            a.handle(
+                Request::FetchChannel {
+                    channel_id: cid,
+                    since_seq: 2,
+                },
+                IP,
+                1_000,
+            ),
+            Response::ChannelLog(vec![(3, b"sibling-3".to_vec())])
+        );
 
         // Relay B: pure follower. It folds the gossiped frame in at the same
         // seq, so a client polling B sees A's ordering verbatim.

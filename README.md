@@ -5,22 +5,25 @@ Discord-equivalent feature scope (servers, channels, roles, voice, custom emoji,
 discovery). No central server, no project-run infrastructure, anonymous
 identities.
 
-> **Status: pre-1.0, actively built.** The MVP and most of the Discord-scope
-> feature set work today against a local relay: identities, servers & channels
-> over MLS, roles, 1:1 + group voice, persistent voice channels, reactions &
-> custom emoji, and a single-file browser client (`dante serve`). The native
-> desktop app and libp2p-as-default transport are the main gaps. Wire formats
-> still change without notice. See the [roadmap](#roadmap) below and
-> [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
+> **Status: pre-1.0, actively built.** The MVP and the Discord-scope feature set
+> work today: identities, servers & channels over MLS, roles, 1:1 + group +
+> persistent-channel voice, screen share, reactions / custom emoji / stickers /
+> soundboards, opt-in link previews, a headless bot bridge, and a single-file
+> browser client (`dante serve`). The libp2p transport (DHT relay discovery,
+> redundant relay set, relay federation) is **on by default**. Main gaps: a
+> native desktop app, a group-call SFU, and browser runtime-verification of the
+> media paths. Wire formats still change without notice. See the
+> [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
 ## What it is
 
 - **End-to-end encrypted.** 1:1 messages use X3DH + Double Ratchet (forward
   secrecy + post-compromise security). Servers, channels and group voice use
   MLS (RFC 9420, via OpenMLS).
-- **Peer-to-peer.** Peers can find each other over a libp2p DHT (opt-in today).
-  Offline delivery is handled by community-run relay nodes that see only
-  ciphertext.
+- **Peer-to-peer.** A libp2p layer (on by default) carries relay discovery over
+  a Kademlia DHT, gossips the ledger and channel logs, and lets relays federate.
+  Offline delivery is still handled by community-run relay nodes — which see
+  only ciphertext and coarse routing metadata.
 - **Anonymous.** An identity is a keypair. No phone number, email, payment, or
   invite required. Your unique ID is your public-key fingerprint ("block-ID");
   you also pick a non-unique display username at registration.
@@ -38,29 +41,33 @@ above — it states precisely what is and is not protected.
 |---|---|
 | **Identity** | Ed25519 + X25519 keypairs, Argon2id keystore + recovery backup, Crockford-base32 / BIP39 fingerprints, safety-number verification, memory-hard registration PoW, liveness proofs, key rotation, **key revocation**, self-chosen **usernames** (non-unique, carried on the ledger) |
 | **Verifiable ledger** | Append-only RFC 6962 Merkle log, inclusion + consistency proofs, identity / rotation chains, server registry, deterministic 90-day evaporation GC |
-| **Relay + transport** | Framed-TCP client↔relay protocol, sealed-sender envelopes (day-rotating hint + size padding), mailbox store-and-forward, prekey directory, blob store, per-IP rate limiting, multi-relay failover, `dante-relay` binary with in-process zero-config TURN |
+| **Relay + transport** | Client↔relay `Request`/`Response` wire over framed TCP **or** a libp2p `/dante/relay/1` stream; sealed-sender envelopes (day-rotating hint + size padding), mailbox store-and-forward, prekey + key-package directories, blob store, per-IP rate limiting, multi-relay failover, `dante-relay` binary with in-process zero-config TURN |
 | **1:1 DMs** | X3DH + Double Ratchet (FS + PCS), chunked encrypted file transfer, edit / delete, typing indicators, forwarding, block list, contacts / petnames, full-text search over local history |
 | **Servers & channels** | MLS group per channel (host is sole committer); create server / channel, direct invites + invite links, **server-level join password**, roles & permissions v1, member kick + inactivity auto-kick, channel history, delete server / channel, leave channel, rename channel, always-present `#general`, public **discovery** & join |
-| **In-channel** | Emoji reactions (unicode + custom), **categorised emoji picker**, edit / delete, replies, pinned messages, @mentions, message forwarding, per-conversation unread counts + mute, **custom per-server emoji** (PNG / JPEG ≤ 1 MiB, fixed inline size) |
-| **Voice** | 1:1 calls, group calls (shared MLS media key + 1:1 mesh), **persistent Discord-style voice channels with real browser audio**, ≥ 64 kbps Opus floor, STUN / TURN plumbing |
-| **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates |
-| **P2P (opt-in, `--features p2p`)** | `dante-p2p` libp2p node (Kademlia + gossipsub + identify + ping); DHT prekey-directory fallback, relay-assisted bootstrap, ledger-record gossip |
+| **In-channel** | Emoji reactions (unicode + custom), **categorised emoji picker**, edit / delete, replies, pinned messages, @mentions, message forwarding, per-conversation unread counts + mute, **custom per-server emoji / stickers / soundboards** |
+| **Voice** | 1:1 calls, group calls (shared MLS media key + 1:1 mesh), **persistent Discord-style voice channels with real browser audio**, **screen share**, optional **SFrame** media encryption under the group-call key, ≥ 64 kbps Opus floor, STUN / TURN plumbing |
+| **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `bot` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates, opt-in link previews; `dante bot` — a JSON-lines headless bridge |
+| **P2P (on by default; `--no-default-features` for a lean TCP build)** | `dante-p2p` libp2p node (Kademlia + gossipsub + identify + ping); the relay wire over `/dante/relay/1`; **DHT relay discovery**, a redundant relay set with health scoring, **relay↔relay federation** (ledger, prekeys, mailbox, key packages, channel logs), rendezvous-hashed single-writer channel logs, relay-assisted bootstrap + `DANTE_BOOTSTRAP` |
 
 ### Partial / caveats
 
-- **Voice-channel audio** is written to the standard WebRTC perfect-negotiation
-  pattern but has not been runtime-verified in CI (no browser / mic there). Only
-  STUN is wired to the browser (TURN credentials aren't exposed yet), so it
-  connects on localhost / same-LAN today.
+- **Media paths not runtime-verified.** Voice-channel audio, screen share and
+  the SFrame transform are written to the standard browser WebRTC patterns but
+  have never been exercised in a real browser (none in the dev env / CI). The
+  Rust relay/signalling halves have e2e tests; the browser halves do not.
+- **Browser TURN.** Only STUN is exposed to the browser (TURN credentials
+  aren't), so cross-NAT voice channels don't connect yet — localhost / same-LAN
+  today.
 - **1:1 and group call audio**: the engine has the full WebRTC + Opus transport,
-  but `dante serve` has no browser microphone path — only voice channels do.
-  Real mic / speaker for 1:1 needs the desktop shell.
-- **P2P is off by default.** The relay is still the sealed-sender mailbox and the
-  primary directory; the DHT is a fallback. Channel-log fan-out uses the relay's
-  ordered per-channel log, not gossipsub.
-- **Restart gaps**: MLS state for calls isn't persisted across a restart
-  (channels' is); a few client-side derivations (reaction / pin / edit
+  but `dante serve` has no browser microphone path for these — only voice
+  channels do. Real mic / speaker for 1:1 needs the desktop shell.
+- **Restart gaps**: a few client-side derivations (reaction / pin / edit
   authorship, the "forwarded from" chip) don't fully survive a client restart.
+  Channel and group-call MLS state *do* persist.
+- **Multi-relay channel writes** converge via rendezvous hashing while every
+  relay is up; a relay that flaps then recovers can briefly double-sequence one
+  channel (the step-down rule converges it within a few frames). A true network
+  partition needs consensus — out of scope for community relays.
 
 ### Not done yet
 
@@ -68,12 +75,10 @@ above — it states precisely what is and is not protected.
   reuses `dante serve`; native menus / tray / notifications / auto-update and a
   buildable CI target are outstanding. A mic / speaker bridge (`dante-audio`)
   exists for it.
-- Screen share.
-- An SFrame layer applying the group-call key to media (so an untrusted SFU
-  could forward it) and an SFU path for large voice rooms (mesh only now).
-- Stickers, soundboards, bots, URL embeds / unfurler, Tenor / Giphy.
+- A **group-call SFU** for large voice rooms (full mesh only now, fine to ~8).
+- Tenor / Giphy GIF search.
 - Custom profiles, per-server nicknames / avatars; emoji in roles.
-- libp2p / DHT as the **default** transport.
+- Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
 - Reproducible builds + signed releases; external security audit; a
   `cargo-fuzz` corpus in CI.
 
@@ -102,16 +107,16 @@ talk to yourself. `dante chat --keystore … --relay …` is the terminal client
 | `crates/dante-identity` | Identity keys, fingerprints, encrypted keystore, liveness proofs, backup |
 | `crates/dante-ledger` | Verifiable Merkle log: records, proofs, evaporation GC |
 | `crates/dante-proto` | Canonical wire types + explicit binary codec |
-| `crates/dante-net` | Framed-TCP relay client/server, sealed-sender envelopes, sync |
-| `crates/dante-relay` | Relay node binary (mailbox, ledger replica, blob store, TURN) |
+| `crates/dante-net` | Relay client/server wire (framed TCP or libp2p), sealed-sender envelopes, mailbox, rate limiting, sync |
+| `crates/dante-p2p` | libp2p node: Kademlia, gossipsub, identify, ping, the `/dante/relay/1` protocol (default-on, kept out of the bare `cargo build` set) |
+| `crates/dante-relay` | Relay node binary (mailbox, ledger replica, prekey/key-package dirs, blob store, per-channel log, TURN, federation) |
 | `crates/dante-mls` | OpenMLS 0.9 wrapper — one MLS group per channel / group call |
 | `crates/dante-dm` | 1:1 DM sessions (X3DH + Double Ratchet), file transfer, `Content` payloads |
 | `crates/dante-core` | Orchestration engine consumed by every client |
 | `crates/dante-voice` | WebRTC (webrtc-rs) call transport + Opus track tuning |
 | `crates/dante-audio` | Opus codec + cpal capture/playback for the desktop shell (detached) |
-| `crates/dante-p2p` | libp2p node: Kademlia, gossipsub, identify, ping (opt-in) |
 | `crates/dante-group` | Retired sender-keys ratchet — kept only for its fuzz target |
-| `crates/dante-cli` | `dante` binary: `gen` / `fp` / `chat` / `serve` / `revoke` + the browser SPA |
+| `crates/dante-cli` | `dante` binary: `gen` / `fp` / `chat` / `serve` / `bot` / `revoke` + the browser SPA |
 | `apps/dante-desktop` | Tauri 2 desktop shell (detached workspace) |
 | `docs/` | `DESIGN.md`, `ARCHITECTURE.md`, `THREAT_MODEL.md`, `PROTOCOL.md` |
 

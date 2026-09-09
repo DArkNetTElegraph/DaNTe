@@ -100,7 +100,12 @@ provide.
    derived from the `channel_id` (`dante/chan/<hex id>`): gossipsub peers on
    that topic — normally other channel members, but the mesh is best-effort —
    see the same opaque frame + timing the relay does, and the content stays
-   MLS-encrypted. **Federated relays** (a relay run with `--p2p-listen` +
+   MLS-encrypted. A `--relay dht` client also **rendezvous-hashes** each
+   channel onto one relay (`H(relay_peer_id ‖ channel_id)`, lowest wins) and
+   sends all of that channel's traffic there, so that one relay sees the whole
+   channel's timing/size side channel — and, because the choice is a public
+   function of the relay set and the `channel_id`, an observer who has both can
+   compute which relay carries a given channel without watching traffic. **Federated relays** (a relay run with `--p2p-listen` +
    `--p2p-bootstrap`) replicate ledger records, prekey bundles, sealed-sender
    envelopes, last-resort key packages and channel-log frames among themselves
    over gossipsub, so *every relay in that set* sees the metadata a single

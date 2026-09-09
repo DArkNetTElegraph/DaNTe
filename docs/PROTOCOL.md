@@ -142,7 +142,7 @@ record):
 
 ### 2.4 Replication & split-view detection
 
-- New records are flooded over a gossipsub topic (`dante/ledger/v0`).
+- New records are flooded over a gossipsub topic (`dante/ledger/v1`).
 - A joining or re-syncing node fetches ranges via request-response and verifies
   every record.
 - Nodes periodically gossip their current `TreeHead { size: u64, root: [u8;32],
@@ -182,14 +182,34 @@ bits, where `challenge` is the kind-specific 32-byte value from 2.2.
 
 ### 4.1 libp2p stack
 
-- Transports: QUIC (preferred) and TCP.
-- Security: Noise (`XX`).
-- Muxing: Yamux (TCP path); QUIC is natively muxed.
-- Discovery: Kademlia DHT. DHT keys used:
-  - `identity/<IdentityId>` → latest known `Record`s + provider peer IDs.
-  - `prekeys/<IdentityId>` → current `PreKeyBundle` (§4.3).
-  - `server/<ServerId>` → `ServerRegister` + entry relay addresses.
-- Pubsub: gossipsub for `dante/ledger/v0` and per-server topics (later phase).
+The libp2p layer lives in `dante-p2p` and is compiled in by the `p2p` feature
+(**on by default** for `dante-cli` and `dante-relay`; a `--no-default-features`
+build is TCP-only with no libp2p tree).
+
+- Transport: **TCP** only. QUIC is not enabled in this phase; bootstrap is by
+  `/ip4/.../tcp/N/p2p/<peer-id>` multiaddr (no `/dnsaddr` — the `dns` feature is
+  off to avoid a resolver-side DoS advisory).
+- Security: **Noise** (`XX`). Muxing: **Yamux**.
+- Node identity: an Ed25519 key derived per-device as
+  `H("dante/p2p-node-seed/v1" ‖ idk_secret)` — stable across restarts,
+  **unlinkable** to the `IdentityId` (the raw idk secret never leaves
+  `dante-identity`). A relay's node key is a 32-byte seed from `--p2p-seed`.
+- Sub-protocols:
+  - `/dante/kad/1.0.0` — Kademlia DHT (`MemoryStore`, `Server` mode).
+  - `/dante/p2p/1.0.0` — identify (feeds observed addrs into the Kad table).
+  - `/dante/relay/1` — the relay request/response wire (§4.5), length-prefixed
+    opaque bytes, 16 MiB frame cap.
+  - libp2p ping.
+- DHT usage:
+  - **Record** `dante/prekey/v1:<IdentityId>` → the current `PreKeyBundle`
+    (§4.3). Written by the publisher, used as a fallback when the relay prekey
+    directory has no bundle.
+  - **Provider** key `dante/relay/v1` (`RELAY_CAPABILITY`) → every relay run
+    with `--p2p-listen` advertises itself here; a client with only a bootstrap
+    multiaddr discovers the relay set from these provider records.
+  - The **ledger is not in the DHT** — it is relay-replicated and gossiped
+    (§2.4). There are no `identity/` or `server/` DHT keys.
+- Pubsub (gossipsub, signed, strict): see §4.5 for the full topic list.
 
 ### 4.2 Sealed-sender envelope
 
@@ -213,7 +233,8 @@ revealing a stable identifier to the relay across epochs.
 
 ### 4.3 1:1 DM (X3DH + Double Ratchet)
 
-`PreKeyBundle` published to the DHT and refreshed by the client:
+`PreKeyBundle` published to the relay prekey directory (and the DHT as a
+fallback, §4.1) and refreshed by the client:
 
 ```
 PreKeyBundle {
@@ -236,18 +257,83 @@ PreKeyBundle {
 
 ### 4.4 Groups (servers, channels, group voice)
 
-MLS (RFC 9420) via `OpenMLS`. One MLS group per channel (a private channel is its
-own group). Covered in detail in a Phase 6 addendum to this document; Phase 0
-fixes only:
+MLS (RFC 9420) via `OpenMLS` 0.9. One MLS group per channel and one per group
+voice call; a private channel is its own group.
 
-- Ciphersuite: `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` (baseline;
-  revisit before Phase 6).
+- Ciphersuite: `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`.
+- Channels are **host-centric**: only the channel host's Commits are honoured
+  (`process_from(_, Some(host_id))`), so members converge on one epoch without
+  a consensus round. The relay log frame is tagged `FRAME_APP` (MLS
+  application message) or `FRAME_COMMIT` (MLS Commit); a member replays the log
+  in `seq` order to catch up to the latest epoch before it may send.
+- Each client keeps a small pool of single-use `KeyPackage`s published to the
+  relay (`PublishKeyPackages{identity, [kp]}` — one rate-limit charge for the
+  batch); the relay hands out the oldest and keeps the last as a reusable
+  last-resort. A `KeyPackage` joins exactly one group.
 - Membership changes (join/leave/kick) MUST trigger an MLS commit → new epoch.
 - Password-gated server: `Argon2id(password, salt = ServerId[0..16], m=262144,
   t=3, p=1)` → 32-byte PSK injected via an MLS `PreSharedKey` proposal; the
   relay also checks a `H(psk)` token before admitting the joiner to the topic.
 - Group voice: SRTP keys are exported from the MLS exporter secret
   (`exporter("dante-srtp", channel_id, 32)`); a new epoch = an SRTP rekey.
+  An optional **SFrame** layer (Chromium `RTCRtpScriptTransform`) additionally
+  AES-GCM-encrypts each Opus frame under a key derived from the per-epoch
+  `group_call_key` (`HKDF … info = "dante/sframe/v1"`), so media stays
+  end-to-end encrypted through an SFU that only ever sees ciphertext; it
+  falls back to pass-through where the browser lacks the API. The mesh path is
+  DTLS-SRTP regardless.
+
+### 4.5 Relay wire over libp2p + relay federation (`p2p` feature)
+
+The relay request/response protocol (`dante-net::wire::{Request, Response}`,
+the same enum used over plain TCP) also rides a libp2p `/dante/relay/1`
+request-response stream, so a client reaches a relay peer-to-peer with no
+`host:port`. Per-IP rate limiting still applies: an inbound libp2p request is
+bucketed by a synthetic `fd00::/8` address hashed from the peer id.
+
+**Client relay selection** (`--relay dht`, discovering relays from the
+`dante/relay/v1` provider records):
+
+- **Idempotent / content-addressed writes** (`Deposit`, `PutBlob`,
+  `PublishPrekeys`, `SubmitRecord`) → sent to **every** discovered relay.
+- **Mailbox `Fetch`** → queried from every relay, envelopes concatenated
+  (the engine de-dups by tag).
+- **Channel log** (`PostToChannel`, `FetchChannel`) → **rendezvous-hashed**:
+  the relay with the lowest `H(relay_peer_id ‖ channel_id)` gets *all* of that
+  channel's reads and writes. Every client computes the same winner, so a
+  channel has exactly **one `seq` writer** regardless of how many clients or
+  relays are online. A health-maxed relay drops to the back of the hash order,
+  so a genuinely dead one fails over to the next relay (which already holds the
+  replicated log and continues the `seq`).
+- Everything else (single-use key packages, ephemeral signals, ledger reads)
+  → one relay, healthiest first, rotate on transport failure.
+
+**Relay ↔ relay federation** (a relay run with `--p2p-listen` +
+`--p2p-bootstrap`). Relays in a set replicate to each other so a client on any
+one of them sees the whole network. Each accepted item is re-broadcast on its
+gossipsub topic and folded on receipt (idempotently — the ledger's own rules,
+a SHA-256 envelope-dedup set, latest-wins prekeys, seq-keyed channel frames):
+
+| Topic | Payload | Fold rule |
+|---|---|---|
+| `dante/ledger/v1` | encoded `Record` | `Ledger::append` (dedups/rejects) |
+| `dante/prekey/v1` | encoded `PreKeyBundle` | latest-wins, keyed by leading `IdentityId` |
+| `dante/mbox/v1` | encoded `Envelope` | `Mailbox::deposit`, SHA-256 dedup |
+| `dante/keypkg/v1` | `IdentityId ‖ last-resort KeyPackage` | adopt only if the follower holds none |
+| `dante/chan/<hex channel_id>` | `seq` (LE `u64`) ‖ frame | insert at `seq`; a writer that sees a sibling frame at/past its next slot steps down rather than fork |
+
+On startup a federated relay also pulls the ledger and any already-known
+channel logs from each `--p2p-bootstrap` sibling over `/dante/relay/1`
+(gossip carries no history). A relay with **no** `--p2p-listen` federates
+nothing — its clients' metadata stays with that one operator (THREAT_MODEL
+§5.4).
+
+**Relay-assisted bootstrap** (no manual multiaddr exchange):
+`Request::AnnounceP2p([multiaddr])` self-reports a client's dial addresses to a
+relay (1 h TTL, capped); `Request::GetP2pPeers` returns the operator seed set
+first, then fresh self-reports. `--bootstrap` on the CLI merges with the
+`DANTE_BOOTSTRAP` env var and a compiled-in `DEFAULT_BOOTSTRAP` (empty until a
+network is deployed).
 
 ## 5. Versioning & compatibility
 

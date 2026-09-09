@@ -248,9 +248,8 @@ achievable with no project-run infrastructure.
 `channel_id` + password wrapper. Gossipsub fan-out of the ledger + channel
 logs (the libp2p DHT is wired in as an opt-in key-directory fallback — feature
 `p2p`; see Phase 3); an SFrame layer over the group-call key (Phase 7 — screen
-share itself is done, browser WebRTC); rich features — bots (Phase 8 —
-stickers, soundboards, opt-in URL embeds done); the Tauri desktop native
-layer.
+share itself is done, browser WebRTC); the Tauri desktop native layer. Phase 8
+(stickers, soundboards, opt-in URL embeds, headless bot bridge) is done.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -302,7 +301,7 @@ DaNTe/
     dante-dm/                # 1:1 sessions: prekey bundles, X3DH, Double Ratchet, chunked file transfer, encrypted SQLite store
     dante-core/              # orchestration engine consumed by the UI (identity + net + ledger + dm)
     dante-cli/               # BINARY: headless client for tests/dev
-  crates/dante-cli/          # [lib] serve (engine + HTTP/JSON API + embedded SPA) + [bin] dante (gen/fp/chat/serve/revoke)
+  crates/dante-cli/          # [lib] serve (engine + HTTP/JSON API + embedded SPA) + [bin] dante (gen/fp/chat/serve/bot/revoke)
   apps/dante-desktop/        # Tauri 2 shell — spawns dante_cli::serve, opens a WebviewWindow at it (detached from the workspace)
   docs/
     ARCHITECTURE.md
@@ -769,7 +768,22 @@ infrastructure. Reached. ---**
   privacy cost (your IP reaches the linked site) is stated in the toggle
   label. A relay-side unfurler that hides the client IP is still a possible
   future enhancement.
-- Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.
+- **Bots** *(done — headless bridge)*: a bot is an **ordinary DaNTe identity**
+  (its own keystore, PoW-announced, X3DH/ratchet) — nothing bot-specific at the
+  protocol level. `dante bot --keystore K --relay R [--name N] [--auto-join]`
+  runs `dante-core` headless and speaks a line-delimited JSON protocol on
+  stdio: one command object per stdin line, one event object per stdout line.
+  Commands: `whoami`, `announce {name}`, `channels`, `join {invite[,password]}`,
+  `accept {channel}`, `send {channel,text}`, `reply {channel,seq,text}`,
+  `react {channel,seq,emoji[,remove]}`, `dm {to,text}`. Events: `ready`,
+  `channel`, `message` (with a `mention` flag — text contains `@<fp>` or its
+  head), `dm`, `invite`, `joining` (auto-join), `sent`, `reacted`, `error`, …
+  Its "per-server capability grant" is just the existing role system — add the
+  bot's fingerprint to a server and give it a role like any member;
+  `--auto-join` accepts channel invites automatically (a bot can't click a
+  consent prompt). Persists on `SIGTERM` / `Ctrl-C` and after any
+  membership-changing event. A user writes a bot in any language as a loop over
+  those JSON lines. WASM sandboxing / an in-process RPC socket can come later.
 - Custom profiles, per-server nicknames/avatars — stored in the relevant MLS group state.
 - **Typing indicators.** Ephemeral "is typing" signals, never persisted and
   never written to the channel log. They ride a dedicated relay *signal* channel

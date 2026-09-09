@@ -22,6 +22,11 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 struct Args {
     listen: String,
     min_pow_bits: Option<u8>,
+    /// Argon2 memory-cost floor (KiB) a PoW proof must meet. Defaults to the
+    /// registration puzzle; `--min-pow-bits` drops it to 0 unless pinned here.
+    min_pow_m_cost_kib: Option<u32>,
+    /// Argon2 time-cost floor.
+    min_pow_t_cost: Option<u32>,
     ice: IcePolicy,
     /// `host:port` to run an in-process TURN server on (UDP).
     turn_listen: Option<String>,
@@ -84,10 +89,25 @@ async fn main() -> anyhow::Result<()> {
     if let Some(bits) = args.min_pow_bits {
         params.min_announce_pow_bits = bits;
         params.min_liveness_pow_bits = bits.saturating_sub(4).max(1);
+        // `--min-pow-bits` is the "this is a dev/test network" switch. A lowered
+        // bit floor is meaningless if the Argon2 cost floor still demands
+        // registration-strength hashing, so drop that too unless the operator
+        // pinned it explicitly.
+        params.min_pow_m_cost_kib = args.min_pow_m_cost_kib.unwrap_or(0);
+        params.min_pow_t_cost = args.min_pow_t_cost.unwrap_or(0);
         tracing::warn!(
             bits,
+            m_cost_kib = params.min_pow_m_cost_kib,
+            t_cost = params.min_pow_t_cost,
             "PoW floor lowered from the default -- for local testing only"
         );
+    } else {
+        if let Some(m) = args.min_pow_m_cost_kib {
+            params.min_pow_m_cost_kib = m;
+        }
+        if let Some(t) = args.min_pow_t_cost {
+            params.min_pow_t_cost = t;
+        }
     }
 
     let mut relay_state = RelayState::new(params, Limits::default());
@@ -140,6 +160,8 @@ async fn main() -> anyhow::Result<()> {
 fn parse_args() -> Args {
     let mut listen = DEFAULT_LISTEN.to_string();
     let mut min_pow_bits = None;
+    let mut min_pow_m_cost_kib = None;
+    let mut min_pow_t_cost = None;
     let mut ice = IcePolicy {
         turn_ttl_secs: 3600,
         ..Default::default()
@@ -157,6 +179,12 @@ fn parse_args() -> Args {
             }
             "--min-pow-bits" => {
                 min_pow_bits = it.next().and_then(|v| v.parse().ok());
+            }
+            "--min-pow-m-cost-kib" => {
+                min_pow_m_cost_kib = it.next().and_then(|v| v.parse().ok());
+            }
+            "--min-pow-t-cost" => {
+                min_pow_t_cost = it.next().and_then(|v| v.parse().ok());
             }
             "--stun" => {
                 if let Some(v) = it.next() {
@@ -201,6 +229,7 @@ fn parse_args() -> Args {
             "--help" | "-h" => {
                 eprintln!(
                     "usage: dante-relay [--listen ADDR] [--min-pow-bits N]\n  \
+                     [--min-pow-m-cost-kib N] [--min-pow-t-cost N]  (Argon2 cost floor)\n  \
                      [--stun URL ...] [--turn URL ...] [--turn-secret STR] [--turn-ttl SECS]\n  \
                      [--turn-listen HOST:PORT] [--turn-public-ip IP]  (run an in-process TURN server)\n  \
                      [--p2p-bootstrap MULTIADDR,...]  (libp2p bootstrap peers offered to p2p clients)\n  \
@@ -223,6 +252,8 @@ fn parse_args() -> Args {
     Args {
         listen,
         min_pow_bits,
+        min_pow_m_cost_kib,
+        min_pow_t_cost,
         ice,
         turn_listen,
         turn_public_ip,

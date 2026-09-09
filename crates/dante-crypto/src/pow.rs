@@ -128,10 +128,24 @@ pub fn solve(challenge: &[u8; 32], difficulty: Difficulty) -> PowProof {
     }
 }
 
-/// Verify a proof against `challenge`. Also enforces a caller-supplied floor so
-/// a solver cannot downgrade the puzzle by claiming a low `difficulty`.
-pub fn verify(challenge: &[u8; 32], proof: &PowProof, min_bits: u8) -> Result<(), CryptoError> {
-    if proof.difficulty < min_bits {
+/// Verify a proof against `challenge`, enforcing a caller-supplied floor on
+/// every axis so a solver cannot downgrade the puzzle:
+///
+/// * `min_bits` — minimum leading-zero-bit target.
+/// * `min_m_cost_kib` / `min_t_cost` — minimum Argon2 memory / time cost. The
+///   bit target alone is not enough: a proof with the right zeros but a tiny
+///   Argon2 cost is far cheaper to grind than an honest one, so a spammer would
+///   claim the weakest costs the verifier still accepts. Pass `0` for no floor
+///   (dev / tests); a deployed network passes its real solver parameters.
+pub fn verify(
+    challenge: &[u8; 32],
+    proof: &PowProof,
+    min_bits: u8,
+    min_m_cost_kib: u32,
+    min_t_cost: u32,
+) -> Result<(), CryptoError> {
+    if proof.difficulty < min_bits || proof.m_cost_kib < min_m_cost_kib || proof.t_cost < min_t_cost
+    {
         return Err(CryptoError::PowUnmetDifficulty);
     }
     // Reject before touching Argon2: the costs are untrusted wire data and
@@ -158,6 +172,14 @@ mod tests {
         t_cost: 1,
         bits: 8,
     };
+    // Higher bit target for the "wrong input is rejected" tests: at 8 bits a
+    // random digest clears the target ~1/256 of the time (a spurious pass). At
+    // 14 that drops to ~1/16k while the solve stays well under a second.
+    const TEST_STRICT: Difficulty = Difficulty {
+        m_cost_kib: 32,
+        t_cost: 1,
+        bits: 14,
+    };
 
     #[test]
     fn leading_zero_bits_counts_correctly() {
@@ -172,13 +194,13 @@ mod tests {
         let challenge = [0x42u8; 32];
         let proof = solve(&challenge, TEST);
         assert_eq!(proof.difficulty, 8);
-        verify(&challenge, &proof, 8).unwrap();
+        verify(&challenge, &proof, 8, 0, 0).unwrap();
     }
 
     #[test]
     fn proof_is_bound_to_its_challenge() {
-        let proof = solve(&[1u8; 32], TEST);
-        assert!(verify(&[2u8; 32], &proof, 8).is_err());
+        let proof = solve(&[1u8; 32], TEST_STRICT);
+        assert!(verify(&[2u8; 32], &proof, TEST_STRICT.bits, 0, 0).is_err());
     }
 
     #[test]
@@ -186,7 +208,7 @@ mod tests {
         let challenge = [7u8; 32];
         let proof = solve(&challenge, TEST);
         assert!(matches!(
-            verify(&challenge, &proof, 16),
+            verify(&challenge, &proof, 16, 0, 0),
             Err(CryptoError::PowUnmetDifficulty)
         ));
     }
@@ -204,7 +226,7 @@ mod tests {
             nonce: [0u8; NONCE_LEN],
         };
         assert!(matches!(
-            verify(&challenge, &bomb, 8),
+            verify(&challenge, &bomb, 8, 0, 0),
             Err(CryptoError::PowUnmetDifficulty)
         ));
         // The boundary: one over the ceiling on either axis is refused.
@@ -214,22 +236,22 @@ mod tests {
             difficulty: 8,
             nonce: [0u8; NONCE_LEN],
         };
-        assert!(verify(&challenge, &over_m, 8).is_err());
+        assert!(verify(&challenge, &over_m, 8, 0, 0).is_err());
         let over_t = PowProof {
             m_cost_kib: 32,
             t_cost: MAX_VERIFY_T_COST + 1,
             difficulty: 8,
             nonce: [0u8; NONCE_LEN],
         };
-        assert!(verify(&challenge, &over_t, 8).is_err());
+        assert!(verify(&challenge, &over_t, 8, 0, 0).is_err());
     }
 
     #[test]
     fn tampered_nonce_fails_verification() {
         let challenge = [9u8; 32];
-        let mut proof = solve(&challenge, TEST);
+        let mut proof = solve(&challenge, TEST_STRICT);
         proof.nonce[0] ^= 0xff;
-        // Overwhelmingly likely to now miss the 8-bit target.
-        assert!(verify(&challenge, &proof, 8).is_err());
+        // With a 20-bit target a tampered nonce misses it ~1e6:1.
+        assert!(verify(&challenge, &proof, TEST_STRICT.bits, 0, 0).is_err());
     }
 }

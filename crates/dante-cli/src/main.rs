@@ -135,6 +135,10 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
     let params = LedgerParams {
         min_announce_pow_bits: bits,
         min_liveness_pow_bits: bits.saturating_sub(4).max(1),
+        // Match the light dev solver below; a deployed network keeps the
+        // Default (REGISTRATION-strength) Argon2 floor.
+        min_pow_m_cost_kib: 4_096,
+        min_pow_t_cost: 1,
         ..Default::default()
     };
     let pow = Difficulty {
@@ -192,6 +196,10 @@ async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
     let params = LedgerParams {
         min_announce_pow_bits: bits,
         min_liveness_pow_bits: bits.saturating_sub(4).max(1),
+        // Match the light dev solver below; a deployed network keeps the
+        // Default (REGISTRATION-strength) Argon2 floor.
+        min_pow_m_cost_kib: 4_096,
+        min_pow_t_cost: 1,
         ..Default::default()
     };
     // Light Argon2 cost for the local dev path; the deployed network's PoW

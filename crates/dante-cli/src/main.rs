@@ -391,7 +391,8 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     println!(
         "commands: /to <fp|#chan>  /server <name>  /channel <root> <name>  \
          /vchannel <root> <name>  /vc join|leave #<chan>  \
-         /invitelink #<chan> [days] [uses]  /redeem <link>  /kick #<chan> <fp>  \
+         /invitelink #<chan> [days] [uses]  /redeem <link>  \
+         /kick|/ban #<chan> <fp>  /unban <root> <fp>  \
          /autokick <root> <days|off>  /roles <root>  /role <root> <name> [kick|mute|manage]  \
          /assignrole <root> <fp> <id> [remove]  /joinpw <root> <pw|off> [current]  \
          /renamechannel #<chan> <name>  \
@@ -1277,20 +1278,38 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 }
                 _ => println!("usage: /assignrole <server-root> <fp> <role-id> [remove]"),
             },
-            "kick" => match (a, b) {
-                (Some(chan), Some(fp)) => {
+            "kick" | "ban" => match (a, b) {
+                (Some(chan), Some(spec)) => {
                     let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    let fp = spec.split_whitespace().next().unwrap_or("");
                     match (parse_fingerprint(chan), parse_fingerprint(fp)) {
                         (Ok(cid), Ok(mid)) => {
-                            match engine.request_kick(&cid, &mid, now_ms()).await {
-                                Ok(()) => println!("kick requested"),
-                                Err(e) => println!("kick failed: {e}"),
+                            let ban = cmd == "ban";
+                            match engine.request_kick(&cid, &mid, ban, now_ms()).await {
+                                Ok(()) => println!(
+                                    "{} from the server",
+                                    if ban { "banned" } else { "kicked" }
+                                ),
+                                Err(e) => println!("failed: {e}"),
                             }
                         }
                         _ => println!("bad channel id or fingerprint"),
                     }
                 }
-                _ => println!("usage: /kick #<channel-id> <fingerprint>"),
+                _ => println!("usage: /{cmd} #<any-server-channel> <fingerprint>"),
+            },
+            "unban" => match (a, b) {
+                (Some(root), Some(fp)) => match (parse_fingerprint(root), parse_fingerprint(fp)) {
+                    (Ok(sr), Ok(mid)) => {
+                        if engine.unban_from_server(&sr, &mid) {
+                            println!("unbanned");
+                        } else {
+                            println!("that identity was not banned");
+                        }
+                    }
+                    _ => println!("bad server root or fingerprint"),
+                },
+                _ => println!("usage: /unban <server-root> <fingerprint>"),
             },
             "leave" => match a {
                 Some(chan) => {

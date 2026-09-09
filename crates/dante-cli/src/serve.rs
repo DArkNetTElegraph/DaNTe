@@ -166,10 +166,24 @@ enum Cmd {
         data: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Remove a member from the whole server `channel` belongs to; `ban` also
+    /// blocks their return.
     RemoveMember {
         channel: String,
         member: String,
+        ban: bool,
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Lift a server ban.
+    Unban {
+        server: String,
+        member: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The server's ban list as a ready JSON array of fingerprints.
+    ServerBans {
+        server: String,
+        reply: oneshot::Sender<String>,
     },
     AutoKick {
         server: String,
@@ -993,8 +1007,15 @@ async fn engine_task(
                 {
                     let evicted = engine.take_evicted_channels();
                     if !evicted.is_empty() {
+                        // A server kick evicts many channels at once — one
+                        // notice per server, not per channel.
+                        let mut by_server: std::collections::HashMap<[u8; 32], String> =
+                            std::collections::HashMap::new();
+                        for (_cid, root, name) in evicted {
+                            by_server.entry(root).or_insert(name);
+                        }
                         let mut inbox = engine_shared.inbox.lock().await;
-                        for (cid, root, name) in evicted {
+                        for (root, name) in by_server {
                             let where_ = if name.is_empty() {
                                 format!("server {}", &id_b32(&root)[..9])
                             } else {
@@ -1006,7 +1027,6 @@ async fn engine_task(
                                 text: format!("You were removed from {where_}."),
                                 scope: id_b32(&root),
                             });
-                            let _ = cid;
                         }
                         while inbox.len() > INBOX_CAP { inbox.pop_front(); }
                         drop(inbox);
@@ -1761,18 +1781,40 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
         Cmd::RemoveMember {
             channel,
             member,
+            ban,
             reply,
         } => {
             let channel = channel.strip_prefix('#').unwrap_or(&channel);
             let r = match (parse_fingerprint(channel), parse_fingerprint(&member)) {
                 (Ok(cid), Ok(mid)) => engine
-                    .request_kick(&cid, &mid, now_ms())
+                    .request_kick(&cid, &mid, ban, now_ms())
                     .await
                     .map(|_| "ok".into())
                     .map_err(|e| e.to_string()),
                 _ => Err("bad channel id or fingerprint".into()),
             };
             let _ = reply.send(r);
+        }
+        Cmd::Unban {
+            server,
+            member,
+            reply,
+        } => {
+            let r = match (parse_fingerprint(&server), parse_fingerprint(&member)) {
+                (Ok(sr), Ok(mid)) => {
+                    engine.unban_from_server(&sr, &mid);
+                    Ok("ok".into())
+                }
+                _ => Err("bad server root or fingerprint".into()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::ServerBans { server, reply } => {
+            let list: Vec<String> = match parse_fingerprint(&server) {
+                Ok(sr) => engine.server_bans(&sr).iter().map(id_b32).collect(),
+                Err(_) => vec![],
+            };
+            let _ = reply.send(serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()));
         }
         Cmd::SetRole {
             server,
@@ -3053,21 +3095,65 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             .await
         }
 
-        ("POST", "/api/remove") => {
+        // `channel` is any channel of the target server; the member is removed
+        // from all of them. `/api/remove` keeps working as a kick (ban:false).
+        ("POST", "/api/remove") | ("POST", "/api/server/kick") | ("POST", "/api/server/ban") => {
             #[derive(serde::Deserialize)]
             struct Req {
                 channel: String,
+                member: String,
+                #[serde(default)]
+                ban: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let ban = r.ban || path.ends_with("ban");
+            dispatch(&mut stream, &shared, |reply| Cmd::RemoveMember {
+                channel: r.channel,
+                member: r.member,
+                ban,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/server/unban") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
                 member: String,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
             };
-            dispatch(&mut stream, &shared, |reply| Cmd::RemoveMember {
-                channel: r.channel,
+            dispatch(&mut stream, &shared, |reply| Cmd::Unban {
+                server: r.server,
                 member: r.member,
                 reply,
             })
             .await
+        }
+
+        ("GET", "/api/server/bans") => {
+            let server = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("server="))
+                .map(percent_decode)
+                .unwrap_or_default();
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::ServerBans { server, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 503, "text/plain", b"engine down").await;
+            }
+            match rx.await {
+                Ok(body) => respond(&mut stream, 200, "application/json", body.as_bytes()).await,
+                Err(_) => respond(&mut stream, 503, "text/plain", b"engine down").await,
+            }
         }
 
         ("POST", "/api/autokick") => {

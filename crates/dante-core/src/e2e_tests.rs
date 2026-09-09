@@ -1770,6 +1770,81 @@ async fn host_removes_a_member_from_a_channel() {
 }
 
 #[tokio::test]
+async fn server_ban_removes_from_every_channel_and_blocks_return() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let a = host.create_channel(&server, "general", true, None).unwrap();
+    let b = host.create_channel(&server, "random", true, None).unwrap();
+    invite_accept(&mut host, &mut bob, &a, &bob_id, now).await;
+    invite_accept(&mut host, &mut bob, &b, &bob_id, now).await;
+    assert_eq!(bob.channels().len(), 2);
+
+    // Ban from the server — removed from both channels, added to the ban list.
+    host.kick_from_server(&server, &bob_id, true, now)
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        for e in [&mut host, &mut bob] {
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
+        }
+    }
+    assert!(bob.channels().is_empty(), "removed from every channel");
+    assert_eq!(host.server_bans(&server), vec![bob_id]);
+
+    // A fresh invite to a banned identity is refused at the add path.
+    host.invite_to_channel(&a, &bob_id, now).await.unwrap();
+    let seen = {
+        // pump the invite to Bob and have him accept
+        let mut got = false;
+        for _ in 0..15 {
+            bob.receive_all(now).await.unwrap();
+            host.receive_all(now).await.unwrap();
+            if bob
+                .pending_channel_invites()
+                .iter()
+                .any(|(c, _, _)| *c == a)
+            {
+                got = true;
+                break;
+            }
+        }
+        got
+    };
+    assert!(seen, "the invite DM still reaches a banned identity");
+    bob.accept_channel_invite(&a, now).await.unwrap();
+    for _ in 0..10 {
+        for e in [&mut host, &mut bob] {
+            e.receive_all(now).await.unwrap();
+        }
+    }
+    assert!(
+        bob.channels().is_empty(),
+        "the host refuses to re-add a banned identity"
+    );
+    assert!(!host.channel_roster(&a).contains(&bob_id));
+
+    // Unban, then a new invite works.
+    assert!(host.unban_from_server(&server, &bob_id));
+    assert!(host.server_bans(&server).is_empty());
+    invite_accept(&mut host, &mut bob, &a, &bob_id, now).await;
+    assert!(bob.channels().iter().any(|c| c.channel_id == a));
+}
+
+#[tokio::test]
 async fn inactivity_auto_kick() {
     let now = now_ms();
     let relay = spawn_relay().await;
@@ -2231,7 +2306,7 @@ async fn roles_muting_and_delegated_kick() {
 
     // Alice without a mod role cannot kick.
     assert!(matches!(
-        alice.request_kick(&chan, &bob_id, now).await,
+        alice.request_kick(&chan, &bob_id, false, now).await,
         Err(crate::CoreError::Channel(_))
     ));
 
@@ -2245,7 +2320,10 @@ async fn roles_muting_and_delegated_kick() {
         .unwrap();
     settle!();
 
-    alice.request_kick(&chan, &bob_id, now).await.unwrap();
+    alice
+        .request_kick(&chan, &bob_id, false, now)
+        .await
+        .unwrap();
     settle!();
 
     host.send_channel(&chan, "bob is gone", now).await.unwrap();

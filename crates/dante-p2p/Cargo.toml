@@ -21,10 +21,11 @@ description = "libp2p transport for DaNTe: Kademlia key directory + gossipsub fo
 # configured by IP multiaddr; add "dns" back once libp2p ships hickory >= 0.26.1.
 libp2p = { version = "0.56", features = [
     "tokio", "tcp", "noise", "yamux",
-    "kad", "gossipsub", "identify", "ping", "macros",
+    "kad", "gossipsub", "identify", "ping", "macros", "request-response",
 ] }
 tokio = { workspace = true }
 futures = "0.3"
+async-trait = "0.1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

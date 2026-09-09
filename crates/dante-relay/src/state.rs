@@ -101,7 +101,15 @@ pub struct RelayState {
     /// (no TTL) first, then self-reported by clients `(addr, last_seen_ms)`.
     p2p_seed: Vec<String>,
     p2p_reported: std::collections::VecDeque<(String, u64)>,
+    /// Encoded ledger records accepted since the last drain, for a federated
+    /// relay to re-broadcast on the gossip topic so replicas converge. Bounded;
+    /// only drained by `serve_p2p`, so a relay with no `--p2p-listen` just lets
+    /// the newest few sit here.
+    ledger_outbox: std::collections::VecDeque<Vec<u8>>,
 }
+
+/// Cap on the pending ledger re-broadcast queue.
+const LEDGER_OUTBOX_CAP: usize = 1024;
 
 /// Cap on client-reported p2p bootstrap addresses kept.
 const MAX_P2P_REPORTED: usize = 64;
@@ -171,7 +179,37 @@ impl RelayState {
             ice: IcePolicy::default(),
             p2p_seed: Vec::new(),
             p2p_reported: std::collections::VecDeque::new(),
+            ledger_outbox: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Fold a ledger record heard from a peer relay over gossip into this
+    /// replica. No rate limiting (it is relay-to-relay); the ledger's own
+    /// acceptance rules dedup and reject. Returns whether it was newly
+    /// accepted (and therefore queued for onward re-broadcast).
+    pub fn ingest_gossiped_record(&mut self, blob: &[u8], now: u64) -> bool {
+        let Ok(rec) = Record::decode(blob) else {
+            return false;
+        };
+        if self.ledger.append(rec, now).is_ok() {
+            self.queue_rebroadcast(blob.to_vec());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn queue_rebroadcast(&mut self, blob: Vec<u8>) {
+        self.ledger_outbox.push_back(blob);
+        while self.ledger_outbox.len() > LEDGER_OUTBOX_CAP {
+            self.ledger_outbox.pop_front();
+        }
+    }
+
+    /// Take the records accepted since the last call, for `serve_p2p` to
+    /// publish on the ledger gossip topic.
+    pub fn take_ledger_outbox(&mut self) -> Vec<Vec<u8>> {
+        self.ledger_outbox.drain(..).collect()
     }
 
     /// Set the ICE servers this relay advertises for calls.
@@ -280,7 +318,10 @@ impl RelayState {
                     return Response::Error("rate limited".into());
                 }
                 match self.ledger.append(rec, now) {
-                    Ok(_) => Response::Ok,
+                    Ok(_) => {
+                        self.queue_rebroadcast(blob);
+                        Response::Ok
+                    }
                     Err(e) => Response::Error(format!("rejected: {e}")),
                 }
             }
@@ -651,6 +692,39 @@ mod tests {
             Response::Records(v) => assert_eq!(v, vec![rec.encode()]),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn federation_folds_a_gossiped_record_and_queues_it_once() {
+        let id = Identity::generate(1_000);
+        let rec = IdentityAnnounce::build(&id, "", D).to_record(&id, 1_000);
+        let blob = rec.encode();
+
+        // A record the operator submitted is queued for re-broadcast.
+        let mut a = state();
+        assert_eq!(
+            a.handle(Request::SubmitRecord(blob.clone()), IP, 1_000),
+            Response::Ok
+        );
+        assert_eq!(a.take_ledger_outbox(), vec![blob.clone()]);
+        assert!(a.take_ledger_outbox().is_empty(), "drained");
+
+        // A sibling relay hears it over gossip: folded in, queued for onward
+        // relay, and a second copy is a no-op (ledger rejects the dup).
+        let mut b = state();
+        assert!(b.ingest_gossiped_record(&blob, 1_000));
+        assert_eq!(b.take_ledger_outbox(), vec![blob.clone()]);
+        assert!(
+            !b.ingest_gossiped_record(&blob, 1_000),
+            "dup not re-accepted"
+        );
+        assert!(b.take_ledger_outbox().is_empty());
+        match b.handle(Request::GetTreeHead, IP, 1_000) {
+            Response::TreeHead { size, .. } => assert_eq!(size, 1),
+            other => panic!("{other:?}"),
+        }
+        // Garbage is ignored.
+        assert!(!b.ingest_gossiped_record(b"not a record", 1_000));
     }
 
     #[test]

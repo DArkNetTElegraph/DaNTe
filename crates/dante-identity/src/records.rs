@@ -66,8 +66,15 @@ impl IdentityAnnounce {
     }
 
     /// Verify the key binding and the PoW. `idk_pub` is the record's `author`;
-    /// `min_pow_bits` the verifier's difficulty floor.
-    pub fn verify(&self, idk_pub: &SignPublic, min_pow_bits: u8) -> Result<(), IdentityError> {
+    /// `min_pow_bits` / `min_pow_m_cost_kib` / `min_pow_t_cost` are the
+    /// verifier's floor on the puzzle (see [`pow::verify`]).
+    pub fn verify(
+        &self,
+        idk_pub: &SignPublic,
+        min_pow_bits: u8,
+        min_pow_m_cost_kib: u32,
+        min_pow_t_cost: u32,
+    ) -> Result<(), IdentityError> {
         if self.display_hint.len() > DISPLAY_HINT_MAX {
             return Err(IdentityError::FieldTooLong);
         }
@@ -78,6 +85,8 @@ impl IdentityAnnounce {
             &Self::challenge(&idk_pub.to_bytes(), &self.ik_pub),
             &self.pow,
             min_pow_bits,
+            min_pow_m_cost_kib,
+            min_pow_t_cost,
         )
         .map_err(|_| IdentityError::BadPow)
     }
@@ -148,11 +157,15 @@ impl LivenessProof {
         idk_pub: &SignPublic,
         created_ms: u64,
         min_pow_bits: u8,
+        min_pow_m_cost_kib: u32,
+        min_pow_t_cost: u32,
     ) -> Result<(), IdentityError> {
         pow::verify(
             &Self::challenge(&idk_pub.to_bytes(), created_ms),
             &self.pow,
             min_pow_bits,
+            min_pow_m_cost_kib,
+            min_pow_t_cost,
         )
         .map_err(|_| IdentityError::BadPow)
     }
@@ -440,12 +453,12 @@ mod tests {
     fn announce_build_encode_decode_verify() {
         let id = Identity::generate(1_700_000_000_000);
         let ann = IdentityAnnounce::build(&id, "captain", TEST_POW);
-        ann.verify(&id.sign_public(), 8).unwrap();
+        ann.verify(&id.sign_public(), 8, 0, 0).unwrap();
         assert_eq!(ann.ik_pub, id.agree_public().to_bytes());
 
         let back = IdentityAnnounce::decode(&ann.encode()).unwrap();
         assert_eq!(ann, back);
-        back.verify(&id.sign_public(), 8).unwrap();
+        back.verify(&id.sign_public(), 8, 0, 0).unwrap();
     }
 
     #[test]
@@ -453,15 +466,15 @@ mod tests {
         let id = Identity::generate(0);
         let other = Identity::generate(0);
         let ann = IdentityAnnounce::build(&id, "", TEST_POW);
-        assert!(ann.verify(&other.sign_public(), 8).is_err());
+        assert!(ann.verify(&other.sign_public(), 8, 0, 0).is_err());
         assert!(matches!(
-            ann.verify(&id.sign_public(), 16),
+            ann.verify(&id.sign_public(), 16, 0, 0),
             Err(IdentityError::BadPow)
         ));
 
         let mut bad = ann.clone();
         bad.ik_pub[0] ^= 1;
-        assert!(bad.verify(&id.sign_public(), 8).is_err());
+        assert!(bad.verify(&id.sign_public(), 8, 0, 0).is_err());
     }
 
     #[test]
@@ -477,8 +490,8 @@ mod tests {
         let id = Identity::generate(0);
         let t = 1_700_000_000_000u64;
         let proof = LivenessProof::build(&id, t, TEST_POW);
-        proof.verify(&id.sign_public(), t, 8).unwrap();
-        proof.verify(&id.sign_public(), t + 1000, 8).unwrap(); // same 7-day bucket
+        proof.verify(&id.sign_public(), t, 8, 0, 0).unwrap();
+        proof.verify(&id.sign_public(), t + 1000, 8, 0, 0).unwrap(); // same 7-day bucket
 
         // The proof is bound to its 7-day bucket and must not verify in a later
         // one. A random PoW solution clears the 8-bit target for an unrelated
@@ -486,7 +499,7 @@ mod tests {
         // binding is broken only if *none* of them reject.
         assert!(
             (1..=8u64).any(|k| proof
-                .verify(&id.sign_public(), t + k * LIVENESS_BUCKET_MS, 8)
+                .verify(&id.sign_public(), t + k * LIVENESS_BUCKET_MS, 8, 0, 0)
                 .is_err()),
             "liveness proof verified in every probed future bucket"
         );
@@ -532,7 +545,7 @@ mod tests {
         match IdentityRecord::from_record(&rec).unwrap() {
             IdentityRecord::Announce(b) => {
                 assert_eq!(b, ann);
-                b.verify(&id.sign_public(), 8).unwrap();
+                b.verify(&id.sign_public(), 8, 0, 0).unwrap();
             }
             _ => panic!("wrong variant"),
         }

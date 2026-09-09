@@ -168,6 +168,14 @@ bits, where `challenge` is the kind-specific 32-byte value from 2.2.
   `LIVENESS_BUCKET_MS`.
 - Relays additionally rate-limit accepted `IdentityAnnounce` per source IP and
   per `/24` to `RELAY_ANNOUNCE_RATE` (default 10 / hour, token-bucket).
+- A verifier enforces a **three-axis floor** on every proof: `difficulty`,
+  `m_cost_kib` and `t_cost` must each be at least the network's minimum (the
+  registration puzzle's parameters by default). Meeting only the bit target
+  with a trivially cheap Argon2 pass is a downgrade and is rejected. The
+  verifier also caps `m_cost_kib`/`t_cost` at `MAX_VERIFY_M_COST_KIB` /
+  `MAX_VERIFY_T_COST` (128 MiB / 8) so a single unauthenticated proof cannot
+  drive a multi-GiB allocation or a multi-year hash. A dev network lowers all
+  three floors together (`dante-relay --min-pow-bits …`).
 - Difficulty values are advisory network parameters; a relay MAY require higher.
 
 ## 4. Transport & messaging

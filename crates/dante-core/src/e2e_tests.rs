@@ -31,6 +31,9 @@ fn test_params() -> LedgerParams {
     LedgerParams {
         min_announce_pow_bits: 8,
         min_liveness_pow_bits: 8,
+        // The tests solve at the tiny `D` cost — no Argon2 floor.
+        min_pow_m_cost_kib: 0,
+        min_pow_t_cost: 0,
         ..Default::default()
     }
 }

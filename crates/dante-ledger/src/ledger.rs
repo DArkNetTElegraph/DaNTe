@@ -28,6 +28,12 @@ pub struct LedgerParams {
     pub min_announce_pow_bits: u8,
     /// Minimum PoW difficulty for a `LivenessProof`.
     pub min_liveness_pow_bits: u8,
+    /// Minimum Argon2 memory cost (KiB) a PoW proof may claim. Without a floor
+    /// a spammer meets the bit target with a trivially cheap Argon2 pass — far
+    /// less total work than an honest solver. `0` disables it (dev / tests).
+    pub min_pow_m_cost_kib: u32,
+    /// Minimum Argon2 time cost a PoW proof may claim. `0` disables it.
+    pub min_pow_t_cost: u32,
 }
 
 impl Default for LedgerParams {
@@ -36,6 +42,10 @@ impl Default for LedgerParams {
             identity_ttl_ms: IDENTITY_TTL_MS,
             min_announce_pow_bits: dante_crypto::pow::REGISTRATION.bits,
             min_liveness_pow_bits: dante_crypto::pow::LIVENESS.bits,
+            // The deployed floor tracks the registration puzzle, like the bit
+            // floor above. A dev network overrides all of these.
+            min_pow_m_cost_kib: dante_crypto::pow::REGISTRATION.m_cost_kib,
+            min_pow_t_cost: dante_crypto::pow::REGISTRATION.t_cost,
         }
     }
 }
@@ -337,6 +347,8 @@ impl<S: RecordStore> Ledger<S> {
         body.verify(
             &Self::author_key(&record)?,
             self.params.min_announce_pow_bits,
+            self.params.min_pow_m_cost_kib,
+            self.params.min_pow_t_cost,
         )?;
 
         let chain_id = self.chains.len();
@@ -380,6 +392,8 @@ impl<S: RecordStore> Ledger<S> {
             &Self::author_key(&record)?,
             record.created_ms,
             self.params.min_liveness_pow_bits,
+            self.params.min_pow_m_cost_kib,
+            self.params.min_pow_t_cost,
         )?;
 
         self.chains[chain_id].last_activity_ms = record.created_ms;
@@ -567,6 +581,9 @@ mod tests {
             identity_ttl_ms: 10_000,
             min_announce_pow_bits: 8,
             min_liveness_pow_bits: 8,
+            // Tests solve at the tiny `D` cost — no Argon2 floor.
+            min_pow_m_cost_kib: 0,
+            min_pow_t_cost: 0,
         }
     }
 
@@ -651,6 +668,32 @@ mod tests {
         );
         let id = Identity::generate(0);
         assert!(l.append(announce(&id, 1_000), 1_000).is_err());
+    }
+
+    #[test]
+    fn announce_below_argon2_cost_floor_is_rejected() {
+        // Bits met, but the proof was solved with a weaker Argon2 cost than the
+        // network's floor — a spammer's cheap grind must not be accepted.
+        let mut l = Ledger::new(
+            MemoryStore::default(),
+            LedgerParams {
+                min_pow_m_cost_kib: D.m_cost_kib + 1,
+                ..params()
+            },
+        );
+        let id = Identity::generate(0);
+        assert!(l.append(announce(&id, 1_000), 1_000).is_err());
+        // At/above the floor it is accepted.
+        let mut ok = Ledger::new(
+            MemoryStore::default(),
+            LedgerParams {
+                min_pow_m_cost_kib: D.m_cost_kib,
+                min_pow_t_cost: D.t_cost,
+                ..params()
+            },
+        );
+        ok.append(announce(&Identity::generate(1), 1_000), 1_000)
+            .unwrap();
     }
 
     #[test]

@@ -23,6 +23,10 @@ pub enum LedgerError {
     #[error("record signature is invalid")]
     BadSignature,
 
+    /// A record's proof of work is missing, malformed, or below the floor.
+    #[error("record proof of work is invalid")]
+    BadPow,
+
     /// A body failed to decode or failed its own checks.
     #[error(transparent)]
     Body(#[from] dante_identity::IdentityError),

@@ -18,6 +18,12 @@ use tokio::net::TcpListener;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:9944";
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+/// Cap on distinct channel gossip topics a relay subscribes to. `FetchChannel`
+/// for an unknown channel drives a subscription, so without a ceiling a stream
+/// of unknown ids grows gossip-mesh state without bound. Generous — a real
+/// relay sequences far fewer channels than this.
+#[cfg(feature = "p2p")]
+const MAX_CHAN_SUBS: usize = 16_384;
 
 struct Args {
     listen: String,
@@ -322,31 +328,49 @@ async fn serve_p2p(
                     let _ = node.publish(dante_p2p::KEYPKG_TOPIC, blob).await;
                 }
                 for (cid, seq, blob) in frames {
-                    if chan_subs.insert(cid) {
+                    if chan_subs.len() < MAX_CHAN_SUBS && chan_subs.insert(cid) {
                         let _ = node.subscribe(&chan_gossip_topic(&cid)).await;
                     }
                     let mut payload = seq.to_le_bytes().to_vec();
                     payload.extend_from_slice(&blob);
                     let _ = node.publish(&chan_gossip_topic(&cid), payload).await;
                 }
+                // Subscribe (cheap) here, but do the sibling fetches — which dial
+                // and round-trip, and stall on an unresponsive peer — off the
+                // event loop, so backfill never blocks inbound requests/gossip.
+                let mut to_fetch = Vec::new();
                 for cid in backfill {
-                    if chan_subs.insert(cid) {
+                    if chan_subs.len() < MAX_CHAN_SUBS && chan_subs.insert(cid) {
                         let _ = node.subscribe(&chan_gossip_topic(&cid)).await;
                     }
-                    for b in bootstrap {
-                        match fetch_channel_from(node.clone(), b, cid).await {
-                            Ok(rows) if !rows.is_empty() => {
-                                let n = rows.len();
-                                handler.state().lock().await.adopt_channel_log(cid, rows, now_ms());
-                                tracing::info!(
-                                    sibling = %b, frames = n,
-                                    "relay federation: adopted a sibling channel log"
-                                );
-                                break;
+                    to_fetch.push(cid);
+                }
+                if !to_fetch.is_empty() {
+                    let node = node.clone();
+                    let handler = Arc::clone(&handler);
+                    let siblings = bootstrap.to_vec();
+                    tokio::spawn(async move {
+                        for cid in to_fetch {
+                            for b in &siblings {
+                                match fetch_channel_from(node.clone(), b, cid).await {
+                                    Ok(rows) if !rows.is_empty() => {
+                                        let n = rows.len();
+                                        handler
+                                            .state()
+                                            .lock()
+                                            .await
+                                            .adopt_channel_log(cid, rows, now_ms());
+                                        tracing::info!(
+                                            sibling = %b, frames = n,
+                                            "relay federation: adopted a sibling channel log"
+                                        );
+                                        break;
+                                    }
+                                    _ => {}
+                                }
                             }
-                            _ => {}
                         }
-                    }
+                    });
                 }
             }
             req = inbound.recv() => {

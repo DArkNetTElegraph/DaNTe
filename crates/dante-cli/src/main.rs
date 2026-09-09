@@ -561,10 +561,10 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                     println!("\u{1f4de} call with {} ended", short_fp(&from_idk));
                                 }
                                 dante_core::Inbound::GroupCallInvite { channel_id, from_idk } => {
-                                    println!("\u{1f4de} {} invited you to a group call in #{} — /groupcall join #{}",
-                                        short_fp(&from_idk),
-                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""),
-                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""));
+                                    // The full base32 id is what `/groupcall join` parses.
+                                    let cid = IdentityId::from_bytes(channel_id).to_base32();
+                                    println!("\u{1f4de} {} invited you to a group call — /groupcall join #{cid}",
+                                        short_fp(&from_idk));
                                 }
                                 dante_core::Inbound::GroupCallMembersChanged { channel_id } => {
                                     println!("\u{1f4de} group call #{} membership changed",
@@ -581,11 +581,12 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                 dante_core::Inbound::ChannelInvite {
                                     channel_id, channel_name, server_name, ..
                                 } => {
+                                    // Print the full base32 id — that is what
+                                    // `/acceptinvite` / `/declineinvite` parse.
+                                    let cid = IdentityId::from_bytes(channel_id).to_base32();
                                     println!(
                                         "\u{1f4e8} invited to #{channel_name} in {server_name} — \
-                                         /acceptinvite #{} or /declineinvite #{}",
-                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""),
-                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""),
+                                         /acceptinvite #{cid} or /declineinvite #{cid}",
                                     );
                                 }
                             }

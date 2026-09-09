@@ -171,6 +171,11 @@ pub struct ChannelEdit {
 
 /// Max bytes of a contact petname.
 const PETNAME_MAX: usize = 64;
+/// Max display length kept for an invite's (untrusted) channel/server name.
+const INVITE_NAME_MAX: usize = 64;
+/// Cap on pending channel invites held at once. Anyone who can DM us can send
+/// `ChannelControl::Invite`, so the map must be bounded.
+const MAX_PENDING_INVITES: usize = 256;
 
 /// A saved contact: a local, private label for another identity. Never leaves
 /// the device.
@@ -3203,6 +3208,16 @@ impl Engine {
         }
         let (roles_vec, assignments, mut emojis, stickers, sounds, owner, version, root) =
             self.policy_draft(server_root)?;
+        // Keep the emoji / sticker / sound shortcodes one namespace (the other
+        // two setters already reject cross-collisions).
+        if stickers.iter().any(|(n, _)| n == name) {
+            return Err(CoreError::Channel("a sticker already uses that name"));
+        }
+        if sounds.iter().any(|(n, _)| n == name) {
+            return Err(CoreError::Channel(
+                "a soundboard clip already uses that name",
+            ));
+        }
         if !emojis.iter().any(|(n, _)| n == name) && emojis.len() >= roles::MAX_SERVER_EMOJIS {
             return Err(CoreError::Channel("server emoji limit reached"));
         }
@@ -3496,8 +3511,19 @@ impl Engine {
                 .kick_from_server(&server_root, member, ban, now_ms)
                 .await;
         }
-        if self.member_perms(&server_root, &me) & roles::PERM_KICK == 0 {
-            return Err(CoreError::Channel("you lack the kick permission"));
+        // A ban needs PERM_BAN; a plain kick needs PERM_KICK (mirrors the host's
+        // check on the receiving end).
+        let required = if ban {
+            roles::PERM_BAN
+        } else {
+            roles::PERM_KICK
+        };
+        if self.member_perms(&server_root, &me) & required == 0 {
+            return Err(CoreError::Channel(if ban {
+                "you lack the ban permission"
+            } else {
+                "you lack the kick permission"
+            }));
         }
         let req = ChannelControl::KickRequest {
             channel_id: *channel_id,
@@ -4434,10 +4460,23 @@ impl Engine {
                 channel_name,
                 server_name,
             } => {
-                // Already a member, or already have this invite pending — no-op.
+                // Already a member — ignore.
                 if self.channels.contains_key(&channel_id) {
                     return Ok(());
                 }
+                // First invite for a channel wins: a later sender who merely
+                // knows the channel_id must not overwrite a pending invite and
+                // silently redirect where the accept is sent.
+                if self.invites_received.contains_key(&channel_id) {
+                    return Ok(());
+                }
+                // Bound the map against invite spam from anyone who can DM us.
+                if self.invites_received.len() >= MAX_PENDING_INVITES {
+                    return Ok(());
+                }
+                // Clamp the untrusted display strings.
+                let channel_name: String = channel_name.chars().take(INVITE_NAME_MAX).collect();
+                let server_name: String = server_name.chars().take(INVITE_NAME_MAX).collect();
                 self.invites_received.insert(
                     channel_id,
                     (*from, channel_name.clone(), server_name.clone()),
@@ -4510,7 +4549,15 @@ impl Engine {
                 if Some(member) == owner {
                     return Ok(());
                 }
-                if self.member_perms(&server_root, &requester) & roles::PERM_KICK != 0
+                // A ban is strictly stronger than a kick, so it needs its own
+                // permission — otherwise any PERM_KICK moderator could
+                // permanently ban members.
+                let required = if ban {
+                    roles::PERM_BAN
+                } else {
+                    roles::PERM_KICK
+                };
+                if self.member_perms(&server_root, &requester) & required != 0
                     && (requester_is_owner || !target_is_staff)
                 {
                     self.kick_from_server(&server_root, &member, ban, now_ms)

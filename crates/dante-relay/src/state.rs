@@ -112,6 +112,10 @@ pub struct RelayState {
     /// Channels a client asked to `FetchChannel` that this relay has no log
     /// for — `serve_p2p` pulls them from siblings once.
     channel_backfill: std::collections::VecDeque<[u8; 32]>,
+    /// Membership mirror of `channel_backfill` for O(1) dedup — the queue is
+    /// scanned per `FetchChannel` for an unknown channel, which is only
+    /// read-rate-limited, so a linear scan under the state mutex is a lever.
+    channel_backfill_set: std::collections::HashSet<[u8; 32]>,
     /// Prekey bundles published here since the last drain, for a federated
     /// relay to share so a client on any relay can start a session with any
     /// identity. Bounded.
@@ -205,6 +209,7 @@ impl RelayState {
             ledger_outbox: std::collections::VecDeque::new(),
             channel_outbox: std::collections::VecDeque::new(),
             channel_backfill: std::collections::VecDeque::new(),
+            channel_backfill_set: std::collections::HashSet::new(),
             prekey_outbox: std::collections::VecDeque::new(),
             mbox_outbox: std::collections::VecDeque::new(),
             mbox_seen: std::collections::HashSet::new(),
@@ -249,6 +254,7 @@ impl RelayState {
     /// Channels a client asked for that this relay lacks — pull them from
     /// siblings.
     pub fn take_channel_backfill(&mut self) -> Vec<[u8; 32]> {
+        self.channel_backfill_set.clear();
         self.channel_backfill.drain(..).collect()
     }
 
@@ -319,6 +325,13 @@ impl RelayState {
 
     /// Fold a prekey bundle heard from a sibling relay. Latest-wins, keyed by
     /// the bundle's leading 32-byte identity id. Returns whether it was stored.
+    ///
+    /// One-time prekeys are **stripped** before storing: OTP consumption
+    /// (`GetPrekeys` popping one) happens on the origin relay only and is not
+    /// federated, so if siblings also served OTPs two initiators could receive
+    /// the same one, breaking X3DH's one-time-use invariant. A sibling therefore
+    /// serves the OTP-less bundle (the signed-prekey fallback X3DH already
+    /// defines); a client that needs an OTP reaches the origin relay.
     pub fn ingest_gossiped_prekey(&mut self, blob: Vec<u8>) -> bool {
         if blob.len() > MAX_PREKEY_BYTES {
             return false;
@@ -329,7 +342,16 @@ impl RelayState {
         if !self.prekeys.contains_key(&id) && self.prekeys.len() >= MAX_PREKEY_IDENTITIES {
             return false;
         }
-        self.prekeys.insert(id, blob);
+        // Strip the OTPs so this sibling never double-spends one.
+        let stored = match dante_dm::PreKeyBundle::decode(&blob) {
+            Ok(mut bundle) if !bundle.otps.is_empty() => {
+                bundle.otps.clear();
+                bundle.encode()
+            }
+            Ok(_) => blob,          // already OTP-less
+            Err(_) => return false, // undecodable — don't store a bad bundle
+        };
+        self.prekeys.insert(id, stored);
         true
     }
 
@@ -752,7 +774,7 @@ impl RelayState {
                         // Federation: a channel we've never seen — ask siblings
                         // for it so the next poll can serve it.
                         if self.channel_backfill.len() < CHANNEL_FED_QUEUE_CAP
-                            && !self.channel_backfill.contains(&channel_id)
+                            && self.channel_backfill_set.insert(channel_id)
                         {
                             self.channel_backfill.push_back(channel_id);
                         }
@@ -1065,6 +1087,42 @@ mod tests {
         ) {
             Response::ChannelLog(rows) => {
                 assert_eq!(rows, vec![(5, b"x".to_vec()), (6, b"y".to_vec())])
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_fetch_of_an_unknown_channel_queues_one_backfill() {
+        let mut c = state();
+        for t in 0..5u64 {
+            let _ = c.handle(
+                Request::FetchChannel {
+                    channel_id: [4u8; 32],
+                    since_seq: 0,
+                },
+                IP,
+                1_000 + t,
+            );
+        }
+        // Deduped, not one entry per request.
+        assert_eq!(c.take_channel_backfill(), vec![[4u8; 32]]);
+    }
+
+    #[test]
+    fn a_gossiped_prekey_is_stored_without_its_otps() {
+        use dante_dm::x3dh::PreKeySecrets;
+        use dante_dm::PreKeyBundle;
+        let mut s = state();
+        let id = Identity::generate(0);
+        let bundle = PreKeySecrets::generate(3).bundle(&id);
+        assert_eq!(bundle.otps.len(), 3);
+        assert!(s.ingest_gossiped_prekey(bundle.encode()));
+        // A client fetching from this sibling gets an OTP-less bundle, so the
+        // sibling can never hand out an OTP the origin already spent.
+        match s.handle(Request::GetPrekeys(*id.id().as_bytes()), IP, 0) {
+            Response::Prekeys(Some(out)) => {
+                assert!(PreKeyBundle::decode(&out).unwrap().otps.is_empty());
             }
             other => panic!("{other:?}"),
         }

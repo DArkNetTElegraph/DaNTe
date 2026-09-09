@@ -138,6 +138,33 @@ achievable with no project-run infrastructure.
   inside `#app` and replaced with CSS menus — channel rows (rename / delete /
   leave / mute / copy id) and messages (reply / edit / delete / pin / forward /
   copy). The chat header's icon row collapses under a `⋯` button.
+- **Consent-based direct invites *(done)*:** inviting by fingerprint sends
+  `ChannelControl::Invite` (tag 11) and adds nobody; the recipient answers with
+  `accept_channel_invite` (`InviteAccept`, 12) / `decline_channel_invite`
+  (`InviteDecline`, 13). The host MLS-adds only on an accept matching a
+  `(channel, member)` it recorded in `invites_sent`. `GET /api/invites`,
+  `POST /api/invite/{accept,decline}`; the SPA lists pending invites as
+  actionable rows in the notifications tray; CLI `/acceptinvite` /
+  `/declineinvite`. Invite links (`Redeem`) were already accept-based.
+- **Server kick / ban *(done)*:** per-channel removal is gone as a moderation
+  tool — `request_kick` takes a `ban` flag and always acts server-wide.
+  `kick_from_server` removes the member from every channel; `ban` also adds
+  them to `HostedServer.banned` (persisted). `mls_add_member` refuses a banned
+  identity on every add path, so an invite DM still arrives but the host won't
+  complete the add. Only the owner may remove staff or the owner (enforced in
+  `request_kick` and the `KickRequest` handler, which gained a `ban` field).
+  `unban_from_server` / `server_bans`; `POST /api/server/{kick,ban,unban}`,
+  `GET /api/server/bans`; SPA member-list `×` opens a Kick / Ban menu, Bans…
+  in server settings; CLI `/kick` `/ban` `/unban`.
+- **PoW hardening *(done — closes PR #6's two open items)*:** `pow::verify`
+  now enforces an Argon2 **cost** floor (`min_m_cost_kib` / `min_t_cost`)
+  alongside the bit floor — meeting the bit target with a trivially cheap
+  Argon2 pass is a downgrade. `LedgerParams` carries the floors (default =
+  `REGISTRATION`); `dante-cli` opts down for the light dev solver and
+  `dante-relay --min-pow-bits` drops the Argon2 floor with it. And
+  `ServerRegister` now carries its own PoW (bound to `server_root`, solved
+  once, replayed on re-registration) since server roots aren't PoW'd
+  identities — closing an unbounded ledger-flood lever.
 - **Usernames *(done)*:** registration asks for a username; it rides the
   `IdentityAnnounce.display_hint` (already in the record, now surfaced) so it
   propagates over the ledger. `Ledger::{display_name, display_name_by_id,
@@ -170,10 +197,9 @@ achievable with no project-run infrastructure.
   list-decoder prealloc caps, relay connection cap + slow-read timeout, TURN
   secret from `DANTE_TURN_SECRET`, per-load `script-src 'nonce-…'` CSP on the
   SPA document, received files no longer written to disk as plaintext, keystore
-  plaintext zeroized + hostile file-KDF params clamped. **Left for a decision:**
-  `ServerRegister` still has no PoW and never evicts (protocol change); a PoW
-  cost-*downgrade* floor (F2) should be `LedgerParams`-driven when a real
-  network floor is chosen.
+  plaintext zeroized + hostile file-KDF params clamped. **Both follow-up items
+  since done** — see *PoW hardening* above: `ServerRegister` gained a PoW, and
+  the Argon2 cost floor (F2) is now `LedgerParams`-driven.
 - **Client**: `dante-core::Engine` + `dante` CLI (`gen` / `fp` / `chat` /
   `serve`). `dante serve` is a localhost browser UI.
 
@@ -243,7 +269,7 @@ a light palette under `prefers-color-scheme` and `[data-theme]`, and a
 | Foundation | **From scratch in Rust.** Reuse crates aggressively (`OpenMLS`, `rust-libp2p`, `webrtc-rs`, `rnnoise`). Element is a UX reference only. Not a Matrix fork — homeservers conflict with "no infra" and server-bound identity. |
 | Stack | **Rust core (Cargo workspace) + Tauri desktop shell.** Frontend: the vanilla-JS single-file SPA from `crates/dante-cli/web` (no build step), served by `dante_cli::serve` and loaded by the shell over localhost. |
 | Identity | Unique ID = public-key fingerprint, rendered as Crockford base32 **and** a BIP39-style word phrase. Display names = free text, **non-unique**. Petnames for locally-verified contacts (safety-number / QR). Global human-readable aliases deferred to an optional PoW-gated layer. |
-| Anti-flood | **PoW to mint an identity + PoW on each liveness proof.** Difficulty tunable by network parameter. Relay per-IP/per-identity rate-limiting on announces as an extra layer. No invite graph (preserves anonymity). |
+| Anti-flood | **PoW to mint an identity, register a server, and on each liveness proof** — over `bits` *and* Argon2 `m_cost`/`t_cost` (a cheap-Argon2 downgrade is rejected). Difficulty tunable by network parameter. Relay per-IP/per-identity rate-limiting on announces + read endpoints as an extra layer. No invite graph (preserves anonymity). |
 | Identity liveness (global) | Identity carries a signed + PoW'd **liveness proof** republished ≤ every 90 days (automatic on login). Nodes tombstone + GC the stale **ledger record** — NOT the account; the local keypair survives and re-announces (re-runs PoW) on next login. Bounds ledger growth; core to anti-flood. |
 | Per-server auto-kick (separate, optional) | Server-admin setting: remove members inactive *in that server* for X days. **Default off.** Local to the server's membership list; unrelated to the identity ledger. Typical for large public servers, off for private. |
 | Per-server password (optional) | Two layers: (1) server relay checks it before admitting a joiner — defeats brute-forced invite links; (2) Argon2id(password) injected into the server's **MLS key schedule as a PSK** — relay operator cannot read group history without it. |

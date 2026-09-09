@@ -107,12 +107,14 @@ async fn main() -> Result<()> {
         "fp" => cmd_fp(&flags),
         "chat" => cmd_chat(&flags).await,
         "serve" => cmd_serve(&flags).await,
+        "bot" => cmd_bot(&flags).await,
         "revoke" => cmd_revoke(&flags).await,
         _ => {
             eprintln!(
                 "usage:\n  dante gen    --out KEYSTORE\n  dante fp     --keystore KEYSTORE\n  \
                  dante chat   --keystore KEYSTORE --relay ADDR [--pow-bits N] [--hint NAME]\n  \
                  dante serve  --keystore KEYSTORE --relay ADDR [--http 127.0.0.1:8080] [--pow-bits N]\n  \
+                 dante bot    --keystore KEYSTORE --relay ADDR [--name NAME] [--auto-join] [--pow-bits N]\n  \
                  dante revoke --keystore KEYSTORE --relay ADDR [--reason compromised|superseded|retired] --yes"
             );
             std::process::exit(2);
@@ -576,6 +578,260 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
         eprintln!("warning: could not save state: {e}");
     }
     eprintln!("bye");
+    Ok(())
+}
+
+/// Headless bot bridge: a line-delimited JSON protocol on stdio. Each stdin
+/// line is one command object (`{"cmd":"send","channel":"…","text":"…"}`);
+/// each stdout line is one event object (`{"event":"message",…}`). The bot is
+/// an ordinary DaNTe identity — nothing here is bot-specific at the protocol
+/// level; this is just `dante-core` driven programmatically.
+///
+/// Commands: `whoami`, `announce {name}`, `channels`, `join {invite[,password]}`,
+/// `accept {channel}`, `send {channel,text}`, `reply {channel,seq,text}`,
+/// `react {channel,seq,emoji[,remove]}`, `dm {to,text}`.
+/// Events: `ready`, `channel`, `message`, `dm`, `invite`, `joining`,
+/// `accepted`, `sent`, `reacted`, `dm_sent`, `announced`, `whoami`,
+/// `channels`, `join_requested`, `error`.
+async fn cmd_bot(flags: &HashMap<String, String>) -> Result<()> {
+    let name = flags
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| "bot".to_string());
+    let auto_join = flags.contains_key("auto-join");
+    let mut engine = connect_engine(flags).await?;
+    let my_fp = engine.identity().id().to_base32();
+    let my_head = my_fp.split('-').next().unwrap_or(&my_fp).to_string();
+
+    engine.announce_if_stale(&name, now_ms()).await?;
+    engine.publish_prekeys().await?;
+    engine.sync(now_ms()).await?;
+
+    bot_emit(&serde_json::json!({
+        "event": "ready", "fingerprint": my_fp, "name": name, "auto_join": auto_join,
+    }));
+    for c in engine.channels() {
+        bot_emit(&serde_json::json!({
+            "event": "channel",
+            "channel": IdentityId::from_bytes(c.channel_id).to_base32(),
+            "channel_name": c.channel_name,
+            "server": c.server_name,
+        }));
+    }
+
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut tick = tokio::time::interval(Duration::from_millis(400));
+    let mut save_tick = tokio::time::interval(Duration::from_secs(10));
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let term = async {
+        match sigterm.as_mut() {
+            Some(s) => {
+                s.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(term);
+
+    loop {
+        tokio::select! {
+            _ = save_tick.tick() => { let _ = engine.persist(); }
+            _ = tokio::signal::ctrl_c() => break,
+            _ = &mut term => break,
+            _ = tick.tick() => {
+                let now = now_ms();
+                #[cfg(feature = "p2p")]
+                let _ = engine.poll_p2p(now).await;
+                let _ = engine.sync(now).await;
+
+                if let Ok(msgs) = engine.poll_channels(now).await {
+                    for m in msgs {
+                        let mention = m.text.contains(&format!("@{my_fp}"))
+                            || m.text.contains(&format!("@{my_head}"));
+                        bot_emit(&serde_json::json!({
+                            "event": "message",
+                            "channel": IdentityId::from_bytes(m.channel_id).to_base32(),
+                            "seq": m.seq,
+                            "from": IdentityId::from_bytes(m.sender).to_base32(),
+                            "text": m.text,
+                            "reply_to": m.reply_to,
+                            "mention": mention,
+                        }));
+                    }
+                }
+                if let Ok(items) = engine.receive_all(now).await {
+                    // A Welcome / backlog changes channel membership — checkpoint
+                    // it now rather than waiting for the periodic save.
+                    if !items.is_empty() {
+                        let _ = engine.persist();
+                    }
+                    for item in items {
+                        match item {
+                            dante_core::Inbound::Message(m) => bot_emit(&serde_json::json!({
+                                "event": "dm",
+                                "from": IdentityId::from_bytes(m.from_idk).to_base32(),
+                                "text": m.text,
+                            })),
+                            dante_core::Inbound::ChannelInvite {
+                                channel_id, channel_name, server_name, from_idk,
+                            } => {
+                                let cid = IdentityId::from_bytes(channel_id).to_base32();
+                                if auto_join {
+                                    match engine.accept_channel_invite(&channel_id, now).await {
+                                        Ok(()) => bot_emit(&serde_json::json!({
+                                            "event": "joining", "channel": cid,
+                                            "channel_name": channel_name, "server": server_name,
+                                        })),
+                                        Err(e) => bot_err(&e.to_string()),
+                                    }
+                                } else {
+                                    bot_emit(&serde_json::json!({
+                                        "event": "invite", "channel": cid,
+                                        "channel_name": channel_name, "server": server_name,
+                                        "from": IdentityId::from_bytes(from_idk).to_base32(),
+                                    }));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            line = lines.next_line() => {
+                match line {
+                    Ok(Some(l)) => {
+                        let l = l.trim();
+                        if !l.is_empty() {
+                            if let Err(e) = handle_bot_cmd(&mut engine, l).await {
+                                bot_err(&e);
+                            }
+                        }
+                    }
+                    _ => break,   // EOF or read error -> shut down
+                }
+            }
+        }
+    }
+
+    let _ = engine.persist();
+    Ok(())
+}
+
+/// Print one JSON event, newline-terminated, flushed.
+fn bot_emit(v: &serde_json::Value) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{v}");
+    let _ = out.flush();
+}
+
+fn bot_err(message: &str) {
+    bot_emit(&serde_json::json!({ "event": "error", "message": message }));
+}
+
+async fn handle_bot_cmd(engine: &mut Engine, line: &str) -> std::result::Result<(), String> {
+    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("bad json: {e}"))?;
+    let cmd = v
+        .get("cmd")
+        .and_then(|c| c.as_str())
+        .ok_or("missing \"cmd\"")?;
+    let now = now_ms();
+    let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let chan = |k: &str| -> std::result::Result<[u8; 32], String> {
+        parse_fingerprint(v.get(k).and_then(|x| x.as_str()).unwrap_or(""))
+            .map_err(|_| format!("bad {k}"))
+    };
+    let seq_of = || {
+        v.get("seq")
+            .and_then(|x| x.as_u64())
+            .ok_or("missing \"seq\"".to_string())
+    };
+
+    match cmd {
+        "whoami" => bot_emit(&serde_json::json!({
+            "event": "whoami", "fingerprint": engine.identity().id().to_base32(),
+        })),
+        "announce" => {
+            let name = get("name");
+            engine
+                .announce(&name, now)
+                .await
+                .map_err(|e| e.to_string())?;
+            bot_emit(&serde_json::json!({ "event": "announced", "name": name }));
+        }
+        "channels" => {
+            let list: Vec<_> = engine
+                .channels()
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "channel": IdentityId::from_bytes(c.channel_id).to_base32(),
+                        "channel_name": c.channel_name,
+                        "server": c.server_name,
+                    })
+                })
+                .collect();
+            bot_emit(&serde_json::json!({ "event": "channels", "channels": list }));
+        }
+        "join" => {
+            let link = get("invite");
+            let pw = v.get("password").and_then(|x| x.as_str());
+            engine
+                .redeem_invite(link.trim(), pw, now)
+                .await
+                .map_err(|e| e.to_string())?;
+            bot_emit(&serde_json::json!({ "event": "join_requested" }));
+        }
+        "accept" => {
+            let ch = chan("channel")?;
+            engine
+                .accept_channel_invite(&ch, now)
+                .await
+                .map_err(|e| e.to_string())?;
+            bot_emit(&serde_json::json!({ "event": "accepted", "channel": get("channel") }));
+        }
+        "send" => {
+            let ch = chan("channel")?;
+            let seq = engine
+                .send_channel(&ch, &get("text"), now)
+                .await
+                .map_err(|e| e.to_string())?;
+            bot_emit(
+                &serde_json::json!({ "event": "sent", "channel": get("channel"), "seq": seq }),
+            );
+        }
+        "reply" => {
+            let ch = chan("channel")?;
+            let target = seq_of()?;
+            let seq = engine
+                .send_channel_reply(&ch, target, &get("text"), now)
+                .await
+                .map_err(|e| e.to_string())?;
+            bot_emit(
+                &serde_json::json!({ "event": "sent", "channel": get("channel"), "seq": seq }),
+            );
+        }
+        "react" => {
+            let ch = chan("channel")?;
+            let target = seq_of()?;
+            let remove = v.get("remove").and_then(|x| x.as_bool()).unwrap_or(false);
+            engine
+                .send_react(&ch, target, &get("emoji"), remove, now)
+                .await
+                .map_err(|e| e.to_string())?;
+            bot_emit(&serde_json::json!({ "event": "reacted" }));
+        }
+        "dm" => {
+            let to = parse_fingerprint(&get("to")).map_err(|e| e.to_string())?;
+            engine
+                .send_dm(&to, &get("text"), now)
+                .await
+                .map_err(|e| e.to_string())?;
+            bot_emit(&serde_json::json!({ "event": "dm_sent", "to": get("to") }));
+        }
+        other => return Err(format!("unknown cmd: {other}")),
+    }
     Ok(())
 }
 

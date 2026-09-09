@@ -494,6 +494,106 @@ async fn a_group_call_shares_an_mls_key_that_rekeys_when_a_member_leaves() {
 }
 
 #[tokio::test]
+async fn a_group_call_survives_a_restart() {
+    use dante_identity::keystore;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-gc-persist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("alice.state");
+
+    let mut host = engine(&relay).await;
+
+    let alice_ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+    let alice_id = *keystore::open(&alice_ks, b"pw").unwrap().id().as_bytes();
+
+    let chan;
+    let key_before;
+    {
+        let alice_identity = keystore::open(&alice_ks, b"pw").unwrap();
+        let mut alice = Engine::connect(
+            alice_identity,
+            &relay,
+            test_params(),
+            D,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap();
+        for e in [&mut host, &mut alice] {
+            e.announce("", now).await.unwrap();
+            e.publish_prekeys().await.unwrap();
+        }
+        for e in [&mut host, &mut alice] {
+            e.sync(now).await.unwrap();
+        }
+
+        let server = host.create_server("lodge", now).await.unwrap();
+        chan = host.create_channel(&server, "general", true, None).unwrap();
+        invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+        for _ in 0..8 {
+            for e in [&mut host, &mut alice] {
+                e.sync(now).await.unwrap();
+                e.receive_all(now).await.unwrap();
+            }
+        }
+        for e in [&mut host, &mut alice] {
+            e.refresh_mls_key_package().await.unwrap();
+        }
+
+        host.start_group_call(&chan, now).await.unwrap();
+        let mut joined = false;
+        for _ in 0..40 {
+            for it in alice.receive_all(now).await.unwrap() {
+                if let crate::Inbound::GroupCallInvite { channel_id, .. } = it {
+                    if channel_id == chan && !alice.in_group_call(&chan) {
+                        alice.join_group_call(&chan, now).await.unwrap();
+                        joined = true;
+                    }
+                }
+            }
+            host.receive_all(now).await.unwrap();
+            if joined {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(joined, "alice joined the call before the restart");
+        key_before = alice.group_call_key(&chan).expect("alice has a call key");
+        assert_eq!(host.group_call_key(&chan), Some(key_before));
+        alice.persist().unwrap();
+    } // alice's process exits mid-call
+
+    let alice_identity = keystore::open(&alice_ks, b"pw").unwrap();
+    let alice = Engine::connect(
+        alice_identity,
+        &relay,
+        test_params(),
+        D,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        alice.in_group_call(&chan),
+        "the group call was restored from disk"
+    );
+    assert_eq!(
+        alice.group_call_key(&chan),
+        Some(key_before),
+        "same MLS epoch after the restart, so the same media key"
+    );
+    assert_eq!(
+        host.group_call_key(&chan),
+        Some(key_before),
+        "and it still matches the host"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_revoked_identity_can_no_longer_be_messaged() {
     use dante_identity::RevokeReason;
 

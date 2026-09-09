@@ -308,7 +308,9 @@ pub enum Inbound {
     },
 }
 
-/// One channel group call this client is in. Ephemeral — a restart drops it.
+/// One channel group call this client is in. The MLS member state is persisted
+/// (`store::StoredGroupCall`) so a restart resumes the call at the same epoch
+/// rather than leaving a ghost leaf and rejoining.
 pub(crate) struct GroupCall {
     /// This client's MLS view of the call group. Its exporter secret is the
     /// per-epoch media key ([`Engine::group_call_key`]); membership changes
@@ -714,6 +716,23 @@ impl Engine {
                     },
                 );
             }
+            for gc in s.group_calls {
+                if !engine.channels.contains_key(&gc.channel_id) {
+                    continue; // the channel itself didn't restore — drop the call
+                }
+                match mls::Member::import(&gc.mls) {
+                    Ok(m) => {
+                        engine
+                            .group_calls
+                            .insert(gc.channel_id, GroupCall { mls: m });
+                    }
+                    Err(e) => tracing::warn!(
+                        channel = %IdentityId::from_bytes(gc.channel_id).to_base32(),
+                        error = %e,
+                        "dropping a group call whose MLS state could not be restored"
+                    ),
+                }
+            }
             for blob in s.server_policies {
                 if let Ok(p) = ServerPolicy::decode(&blob) {
                     if p.verify().is_ok() {
@@ -1070,6 +1089,16 @@ impl Engine {
                     t_cost: h.register_pow.t_cost,
                     difficulty: h.register_pow.difficulty,
                     nonce: h.register_pow.nonce,
+                })
+                .collect(),
+            group_calls: self
+                .group_calls
+                .iter()
+                .filter_map(|(cid, gc)| {
+                    gc.mls.export().ok().map(|mls| store::StoredGroupCall {
+                        channel_id: *cid,
+                        mls,
+                    })
                 })
                 .collect(),
         };
@@ -4988,6 +5017,7 @@ impl Engine {
                         None => false,
                     };
                     if advanced {
+                        self.dirty = true;
                         self.reconcile_group_legs(&channel_id, now_ms).await;
                         out.push(Inbound::GroupCallMembersChanged { channel_id });
                     }

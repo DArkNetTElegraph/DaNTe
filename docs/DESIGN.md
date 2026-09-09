@@ -618,6 +618,13 @@ infrastructure. Reached. ---**
   → `addTrack` on every mesh leg, renegotiated through the existing
   perfect-negotiation path; remote video tracks render as tiles in the room.
   No display-audio capture yet.
+- **Group-call state persists *(done)*:** the call's MLS member state is
+  written to the encrypted local store (`store::StoredGroupCall`, keyed by the
+  voice channel id) and reloaded on connect. A `dante serve` restart while
+  you're in a call resumes it at the same MLS epoch — same `group_call_key` —
+  instead of your ghost leaf lingering while you rejoin fresh. The epoch
+  advance from a `GroupCallCommit` now also marks the store dirty. e2e
+  `a_group_call_survives_a_restart`.
 - **Still to build:** an SFrame layer that applies
   `group_call_key` to the media so an SFU can forward without decrypting; the
   channel-messaging MLS migration (group calls already use MLS).

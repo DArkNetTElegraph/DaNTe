@@ -248,8 +248,9 @@ achievable with no project-run infrastructure.
 `channel_id` + password wrapper. Gossipsub fan-out of the ledger + channel
 logs (the libp2p DHT is wired in as an opt-in key-directory fallback — feature
 `p2p`; see Phase 3); an SFrame layer over the group-call key (Phase 7 — screen
-share itself is done, browser WebRTC); rich features — bots, embeds (Phase 8
-— stickers + soundboards done); the Tauri desktop native layer.
+share itself is done, browser WebRTC); rich features — bots (Phase 8 —
+stickers, soundboards, opt-in URL embeds done); the Tauri desktop native
+layer.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -750,7 +751,24 @@ infrastructure. Reached. ---**
   owner management in server settings → "Emoji, stickers & sounds". `chat`:
   `/sound <root> <name> <path|remove>`.
 - Tenor/Giphy search — opt-in, off by default, warns it contacts a third party.
-- URL embeds — opt-in (leaks IP); optionally via a relay-side unfurler.
+- **URL embeds** *(done — opt-in, serve-side)*: **off by default**; a
+  Settings toggle flips it and the SPA re-asserts the choice to `dante serve`
+  on every load (`POST /api/embeds`), so a stale flag can't silently keep it
+  on across a restart. When on, the SPA pulls the first `http(s)` URL out of a
+  message and asks `dante serve` (never the browser) to unfurl it once, cached
+  per URL: `POST /api/unfurl {url}` → `crates/dante-cli/src/unfurl.rs`, a
+  hand-rolled minimal HTTPS GET (rustls, already in the graph via webrtc; plus
+  `tokio-rustls` + `rustls-native-certs`). One request, no cookies/JS, capped
+  body (512 KiB) + wall-clock (6 s) + redirects (3); Open Graph / `<title>` /
+  `<meta description>` scraped without an HTML-parser dep; `og:image` fetched
+  and inlined as a capped `data:` URI so viewing the card leaks nothing
+  further. **SSRF guard:** every connection target — initial host and each
+  redirect hop — is DNS-resolved and rejected unless it is a public unicast
+  address (blocks loopback, RFC1918, link-local incl. `169.254.169.254`,
+  CGNAT, ULA, `::1`, mapped v4, …); non-`http(s)` schemes refused. The
+  privacy cost (your IP reaches the linked site) is stated in the toggle
+  label. A relay-side unfurler that hides the client IP is still a possible
+  future enhancement.
 - Bots: a bot is a normal identity with a per-server capability grant, driven via `dante-core` as a library or a local RPC socket; WASM sandboxing later.
 - Custom profiles, per-server nicknames/avatars — stored in the relevant MLS group state.
 - **Typing indicators.** Ephemeral "is typing" signals, never persisted and

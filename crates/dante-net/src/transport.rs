@@ -311,25 +311,104 @@ mod p2p_client {
             &self.label
         }
 
+        /// One request against a specific candidate. `Response::Error` becomes
+        /// `NetError::Peer`.
+        async fn one(&self, peer: PeerId, bytes: Vec<u8>) -> Result<Response, NetError> {
+            let raw = self
+                .node
+                .request(peer, bytes)
+                .await
+                .map_err(|e| NetError::Peer(e.to_string()))?;
+            match Response::decode(&raw)? {
+                Response::Error(msg) => Err(NetError::Peer(msg)),
+                res => Ok(res),
+            }
+        }
+
         pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
             let bytes = req.encode();
-            let n = self.candidates.len();
-            let mut last = NetError::Closed;
-            for step in 0..n {
-                let idx = (self.current + step) % n;
-                match self.node.request(self.candidates[idx], bytes.clone()).await {
-                    Ok(raw) => {
-                        self.current = idx;
-                        let res = Response::decode(&raw)?;
-                        if let Response::Error(msg) = &res {
-                            return Err(NetError::Peer(msg.clone()));
+            match FanOut::of(req) {
+                // Write to every discovered relay so any of them can serve the
+                // recipient later — the DHT-discovered relay set acts as one
+                // redundant store with no server-side coordination.
+                FanOut::Write => {
+                    let mut ok = None;
+                    let mut last = NetError::Closed;
+                    for &peer in &self.candidates {
+                        match self.one(peer, bytes.clone()).await {
+                            Ok(r) => ok = Some(r),
+                            Err(e @ NetError::Peer(_)) if ok.is_none() => last = e,
+                            Err(e) => last = e,
                         }
-                        return Ok(res);
                     }
-                    Err(e) => last = NetError::Peer(e.to_string()),
+                    ok.ok_or(last)
+                }
+                // Merge mailbox envelopes across every relay; the engine already
+                // de-dups by envelope tag.
+                FanOut::MergeEnvelopes => {
+                    let mut all = Vec::new();
+                    let mut any = false;
+                    let mut last = NetError::Closed;
+                    for &peer in &self.candidates {
+                        match self.one(peer, bytes.clone()).await {
+                            Ok(Response::Envelopes(v)) => {
+                                any = true;
+                                all.extend(v);
+                            }
+                            Ok(_) => any = true,
+                            Err(e) => last = e,
+                        }
+                    }
+                    if any {
+                        Ok(Response::Envelopes(all))
+                    } else {
+                        Err(last)
+                    }
+                }
+                // Everything else: one relay, rotate to the next on a transport
+                // failure (a relay-level error is a real answer, no rotation).
+                FanOut::One => {
+                    let n = self.candidates.len();
+                    let mut last = NetError::Closed;
+                    for step in 0..n {
+                        let idx = (self.current + step) % n;
+                        match self.one(self.candidates[idx], bytes.clone()).await {
+                            Ok(res) => {
+                                self.current = idx;
+                                return Ok(res);
+                            }
+                            Err(e @ NetError::Peer(_)) => return Err(e),
+                            Err(e) => last = e,
+                        }
+                    }
+                    Err(last)
                 }
             }
-            Err(last)
+        }
+    }
+
+    pub(super) enum FanOut {
+        /// Send to every relay (idempotent / content-addressed writes).
+        Write,
+        /// Query every relay and concatenate the mailbox envelopes.
+        MergeEnvelopes,
+        /// One relay, with rotate-on-failure.
+        One,
+    }
+
+    impl FanOut {
+        pub(super) fn of(req: &Request) -> Self {
+            match req {
+                // Idempotent or content-addressed — safe to replicate.
+                Request::Deposit(_)
+                | Request::PutBlob(_)
+                | Request::PublishPrekeys(_)
+                | Request::SubmitRecord(_) => FanOut::Write,
+                Request::Fetch { .. } => FanOut::MergeEnvelopes,
+                // seq-bearing (channel log), single-use (key packages), or
+                // stateful/ephemeral — must stay pinned to one relay.
+                _ => FanOut::One,
+            }
         }
     }
 }
@@ -500,6 +579,51 @@ mod tests {
             Response::Pong
         );
         assert_eq!(client.endpoint(), live);
+    }
+
+    #[cfg(feature = "p2p")]
+    #[test]
+    fn fan_out_classification() {
+        use super::p2p_client::FanOut;
+        // Replicated to every relay.
+        for r in [
+            Request::Deposit(vec![1]),
+            Request::PutBlob(vec![1]),
+            Request::PublishPrekeys(vec![1]),
+            Request::SubmitRecord(vec![1]),
+        ] {
+            assert!(matches!(FanOut::of(&r), FanOut::Write), "{r:?}");
+        }
+        // Merged across relays.
+        assert!(matches!(
+            FanOut::of(&Request::Fetch {
+                hints: vec![],
+                since_ms: 0
+            }),
+            FanOut::MergeEnvelopes
+        ));
+        // Pinned to one relay: seq-bearing, single-use, ephemeral, stateful.
+        for r in [
+            Request::PostToChannel {
+                channel_id: [0; 32],
+                blob: vec![1],
+            },
+            Request::FetchChannel {
+                channel_id: [0; 32],
+                since_seq: 0,
+            },
+            Request::GetKeyPackage([0; 32]),
+            Request::GetTreeHead,
+            Request::GetRecords { from: 0, to: 1 },
+            Request::PostSignal {
+                topic: [0; 32],
+                blob: vec![1],
+            },
+            Request::GetBlob([0; 32]),
+            Request::GetPrekeys([0; 32]),
+        ] {
+            assert!(matches!(FanOut::of(&r), FanOut::One), "{r:?}");
+        }
     }
 
     #[cfg(feature = "p2p")]

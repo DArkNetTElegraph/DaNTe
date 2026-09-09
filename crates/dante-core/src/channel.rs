@@ -142,6 +142,29 @@ pub enum ChannelControl {
         /// `(sender member id, Unix ms, text)`, oldest first.
         entries: Vec<([u8; 32], u64, String)>,
     },
+    /// The host offers the recipient a channel. Nothing is added until the
+    /// recipient replies with [`InviteAccept`](ChannelControl::InviteAccept) —
+    /// a direct invite must not silently pull someone into a group.
+    Invite {
+        /// The channel being offered.
+        channel_id: [u8; 32],
+        /// Display name of the channel.
+        channel_name: String,
+        /// Display name of the server it belongs to.
+        server_name: String,
+    },
+    /// The recipient of an [`Invite`](ChannelControl::Invite) accepts. The host
+    /// verifies it invited this identity, then MLS-adds them.
+    InviteAccept {
+        /// The channel the sender is accepting into.
+        channel_id: [u8; 32],
+    },
+    /// The recipient of an [`Invite`](ChannelControl::Invite) declines; the host
+    /// drops its pending record.
+    InviteDecline {
+        /// The channel the sender is declining.
+        channel_id: [u8; 32],
+    },
 }
 
 impl ChannelControl {
@@ -185,6 +208,22 @@ impl ChannelControl {
                 for (sender, at_ms, text) in entries {
                     w.fixed(sender).u64(*at_ms).string(text);
                 }
+            }
+            ChannelControl::Invite {
+                channel_id,
+                channel_name,
+                server_name,
+            } => {
+                w.u8(11)
+                    .fixed(channel_id)
+                    .string(channel_name)
+                    .string(server_name);
+            }
+            ChannelControl::InviteAccept { channel_id } => {
+                w.u8(12).fixed(channel_id);
+            }
+            ChannelControl::InviteDecline { channel_id } => {
+                w.u8(13).fixed(channel_id);
             }
         }
         w.into_vec()
@@ -239,6 +278,17 @@ impl ChannelControl {
                     entries,
                 }
             }
+            11 => ChannelControl::Invite {
+                channel_id: r.fixed::<32>()?,
+                channel_name: r.string()?,
+                server_name: r.string()?,
+            },
+            12 => ChannelControl::InviteAccept {
+                channel_id: r.fixed::<32>()?,
+            },
+            13 => ChannelControl::InviteDecline {
+                channel_id: r.fixed::<32>()?,
+            },
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "ChannelControl",
@@ -416,10 +466,21 @@ mod tests {
                     ([2u8; 32], 222, "there".into()),
                 ],
             },
+            ChannelControl::Invite {
+                channel_id: [8u8; 32],
+                channel_name: "general".into(),
+                server_name: "the lodge".into(),
+            },
+            ChannelControl::InviteAccept {
+                channel_id: [8u8; 32],
+            },
+            ChannelControl::InviteDecline {
+                channel_id: [8u8; 32],
+            },
         ] {
             assert_eq!(ChannelControl::decode(&c.encode()).unwrap(), c);
         }
-        assert!(ChannelControl::decode(&[11]).is_err());
+        assert!(ChannelControl::decode(&[14]).is_err());
     }
 
     #[test]

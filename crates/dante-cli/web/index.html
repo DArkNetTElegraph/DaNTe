@@ -1111,6 +1111,7 @@ const store = {
   seen: 0,
   unread: new Map(),                  // target -> count of unseen messages
   mentions: new Set(),               // targets where I was @-mentioned
+  invites: [],                       // [{channel,channel_name,server_name}] pending
   notices: [],                       // [{tag,text,scope,at}] standalone notices
   muted: new Set(LS.get("muted", [])), // targets with notifications silenced
   view: LS.get("view", { server: "@dm", target: null }),
@@ -1205,6 +1206,7 @@ const api = {
   voiceJoin(channel)     { return this.post("/api/voice/join", { channel }); },
   voiceLeave(channel)    { return this.post("/api/voice/leave", { channel }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
+  inviteRespond(channel, accept) { return this.post("/api/invite/" + (accept ? "accept" : "decline"), { channel }); },
   policy(root)            { return this.get("/api/policy?server=" + encodeURIComponent(root)); },
   sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
 };
@@ -2568,7 +2570,7 @@ async function inviteFlow(channelTarget) {
   let peer;
   try { peer = await resolveFp(raw); }
   catch (e) { return ui.say("Not a valid fingerprint: " + e.message); }
-  try { await api.invite(channelTarget, peer); ui.sys("Invite sent to " + (username(peer) || short(peer))); }
+  try { await api.invite(channelTarget, peer); ui.sys("Invitation sent to " + (username(peer) || short(peer)) + " — they choose whether to join."); }
   catch (e) { ui.say("Invite failed: " + e.message); }
 }
 async function inviteLinkFlow(channelTarget) {
@@ -2677,6 +2679,25 @@ async function refreshUsernames() {
       store.me.username = u[store.me.fingerprint];
     }
   } catch (_) {}
+}
+
+async function refreshInvites() {
+  try {
+    const inv = await api.get("/api/invites");
+    if (JSON.stringify(inv) !== JSON.stringify(store.invites)) {
+      store.invites = inv;
+      renderNotifButton();
+    }
+  } catch (_) {}
+}
+async function respondInvite(channel, accept) {
+  try {
+    await api.inviteRespond(channel, accept);
+    store.invites = store.invites.filter(i => i.channel !== channel);
+    await refreshInvites();
+    if (accept) { ui.sys("Joining…"); setTimeout(refreshChannels, 2000); }
+    renderNotifButton();
+  } catch (e) { ui.say((accept ? "Accept" : "Decline") + " failed: " + e.message); }
 }
 
 async function refreshCalls() {
@@ -2964,9 +2985,16 @@ function ingest(items) {
       continue;
     }
     if (it.kind === "notice") {
+      notify("DaNTe", it.text);
+      if (it.tag === "invite") {
+        // Actionable — surface it in the tray list, don't stack it as a
+        // dismissable notice.
+        refreshInvites();
+        renderNotifButton();
+        continue;
+      }
       store.notices.unshift({ tag: it.tag, text: it.text, scope: it.scope || "", at: Date.now() });
       store.notices = store.notices.slice(0, 50);
-      notify("DaNTe", it.text);
       if (it.tag === "kicked" && it.scope) {
         // Drop the removed server's channels and their history right away.
         const gone = new Set(store.channels.filter(c => c.root === it.scope).map(c => "#" + c.id));
@@ -3239,6 +3267,14 @@ $("#btn-notif").onclick = () => {
   const seen = new Set();
   const label = t => t === store.me.fingerprint ? "Private Note"
     : t.startsWith("#") ? "#" + store.channelName(t.slice(1)) : ("@ " + dmLabel(t));
+  // Pending channel invites — actionable.
+  for (const inv of store.invites) {
+    items.push({ iconName: "user-plus", label: `Accept invite · #${inv.channel_name} in ${inv.server_name}`,
+      run: () => respondInvite(inv.channel, true) });
+    items.push({ iconName: "x", label: `Decline · #${inv.channel_name}`,
+      run: () => respondInvite(inv.channel, false) });
+  }
+  if (store.invites.length) items.push("sep");
   for (const n of store.notices.slice(0, 10)) {
     items.push({ iconName: "ban", label: n.text, run: () => {} });
   }
@@ -3264,7 +3300,7 @@ function jumpTo(t) {
   if (ch) selectTarget(ch.server, t);
 }
 function renderNotifButton() {
-  const n = store.totalUnread() + store.mentions.size + store.notices.length;
+  const n = store.totalUnread() + store.mentions.size + store.notices.length + store.invites.length;
   $("#btn-notif").classList.toggle("has-dot", n > 0);
 }
 
@@ -3691,6 +3727,7 @@ async function init() {
   refreshContacts();
   refreshBlocked();
   refreshUsernames();
+  refreshInvites();
   refreshCalls();
   refreshVoice();
   setInterval(poll, 3000);
@@ -3701,6 +3738,7 @@ async function init() {
   setInterval(refreshContacts, 8000);
   setInterval(refreshBlocked, 8000);
   setInterval(refreshUsernames, 10000);
+  setInterval(refreshInvites, 6000);
   setInterval(refreshCalls, 1200);
   setInterval(refreshVoice, 1500);
 }

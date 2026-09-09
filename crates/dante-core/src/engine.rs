@@ -294,6 +294,18 @@ pub enum Inbound {
         /// The opaque payload (SDP or ICE candidate line).
         data: String,
     },
+    /// A host has offered us a channel. Nothing happens until we call
+    /// [`Engine::accept_channel_invite`] or [`Engine::decline_channel_invite`].
+    ChannelInvite {
+        /// The channel we're being invited to.
+        channel_id: [u8; 32],
+        /// The inviter's Ed25519 identity key.
+        from_idk: [u8; 32],
+        /// Display name of the channel.
+        channel_name: String,
+        /// Display name of the server.
+        server_name: String,
+    },
 }
 
 /// One channel group call this client is in. Ephemeral — a restart drops it.
@@ -478,6 +490,13 @@ pub struct Engine {
     /// Channels the host removed us from since the last `take_evicted_channels`
     /// — `(channel_id, server_root, server_name)`. Not persisted.
     evicted_channels: Vec<([u8; 32], [u8; 32], String)>,
+    /// `(channel_id, member IdentityId)` pairs the host has offered a direct
+    /// invite to and is waiting on an accept for. Not persisted — a restart
+    /// just means the invitee must be re-invited.
+    invites_sent: HashSet<([u8; 32], [u8; 32])>,
+    /// Channel invites we've received and not yet answered:
+    /// `channel_id -> (inviter idk, channel_name, server_name)`. Not persisted.
+    invites_received: HashMap<[u8; 32], ([u8; 32], String, String)>,
     /// Redemption counts for invite tokens we minted, keyed by token nonce.
     invite_uses: HashMap<[u8; 8], u32>,
     /// Role configuration per server_root: the one we sign for servers we host,
@@ -607,6 +626,8 @@ impl Engine {
             history: Vec::new(),
             channel_history: Vec::new(),
             evicted_channels: Vec::new(),
+            invites_sent: HashSet::new(),
+            invites_received: HashMap::new(),
             invite_uses: HashMap::new(),
             server_policies: HashMap::new(),
             new_reactions: Vec::new(),
@@ -2089,18 +2110,77 @@ impl Engine {
         peer_id: &[u8; 32],
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let ch = self
-            .channels
+        let (channel_name, server_name) = {
+            let ch = self
+                .channels
+                .get(channel_id)
+                .ok_or(CoreError::UnknownChannel)?;
+            if !self.hosted.contains_key(&ch.info.server_root) {
+                return Err(CoreError::NotServerHost);
+            }
+            (ch.info.channel_name.clone(), ch.info.server_name.clone())
+        };
+        // Offer only — the recipient must accept before anything is added. A
+        // direct invite silently pulling someone into a group leaks that they
+        // hold this identity to whoever knows their fingerprint.
+        self.invites_sent.insert((*channel_id, *peer_id));
+        let inv = ChannelControl::Invite {
+            channel_id: *channel_id,
+            channel_name,
+            server_name,
+        };
+        self.send_content(peer_id, Content::Channel(inv.encode()), now_ms)
+            .await
+    }
+
+    /// Accept a channel invite surfaced by [`Inbound::ChannelInvite`]. Sends the
+    /// host our acceptance; the MLS Welcome then follows over the same DM.
+    pub async fn accept_channel_invite(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let inviter = self
+            .invites_received
             .get(channel_id)
-            .ok_or(CoreError::UnknownChannel)?;
-        if !self.hosted.contains_key(&ch.info.server_root) {
-            return Err(CoreError::NotServerHost);
-        }
-        self.mls_add_member(channel_id, peer_id, now_ms).await?;
-        if let Some(ch) = self.channels.get_mut(channel_id) {
-            ch.removed.remove(peer_id); // re-admit clears the old tombstone
-        }
+            .map(|(idk, _, _)| *idk)
+            .ok_or(CoreError::Channel("no pending invite for that channel"))?;
+        let host_id = idk_to_id(&inviter);
+        let acc = ChannelControl::InviteAccept {
+            channel_id: *channel_id,
+        };
+        self.send_content(&host_id, Content::Channel(acc.encode()), now_ms)
+            .await
+        // Leave the pending entry until the Welcome lands so the UI keeps its
+        // display info; the MlsWelcome handler clears it.
+    }
+
+    /// Decline a pending channel invite; tells the host so it drops its record.
+    pub async fn decline_channel_invite(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let Some((inviter, _, _)) = self.invites_received.remove(channel_id) else {
+            return Ok(());
+        };
+        self.dirty = true;
+        let dec = ChannelControl::InviteDecline {
+            channel_id: *channel_id,
+        };
+        let _ = self
+            .send_content(&idk_to_id(&inviter), Content::Channel(dec.encode()), now_ms)
+            .await;
         Ok(())
+    }
+
+    /// Channel invites we've received and not yet answered —
+    /// `(channel_id, channel_name, server_name)`.
+    pub fn pending_channel_invites(&self) -> Vec<([u8; 32], String, String)> {
+        self.invites_received
+            .iter()
+            .map(|(cid, (_, cn, sn))| (*cid, cn.clone(), sn.clone()))
+            .collect()
     }
 
     /// Host side of adding one member: fetch their KeyPackage, commit the MLS
@@ -3630,6 +3710,7 @@ impl Engine {
                 log_key,
             } => {
                 let channel_id = info.channel_id;
+                self.invites_received.remove(&channel_id);
                 if self.channels.contains_key(&channel_id) {
                     return Ok(());
                 }
@@ -3748,6 +3829,45 @@ impl Engine {
                         entries,
                     });
                 }
+            }
+            ChannelControl::Invite {
+                channel_id,
+                channel_name,
+                server_name,
+            } => {
+                // Already a member, or already have this invite pending — no-op.
+                if self.channels.contains_key(&channel_id) {
+                    return Ok(());
+                }
+                self.invites_received.insert(
+                    channel_id,
+                    (*from, channel_name.clone(), server_name.clone()),
+                );
+                self.dirty = true;
+                out.push(Inbound::ChannelInvite {
+                    channel_id,
+                    from_idk: *from,
+                    channel_name,
+                    server_name,
+                });
+            }
+            ChannelControl::InviteAccept { channel_id } => {
+                let member = idk_to_id(from);
+                // Only add someone we actually invited — an unsolicited accept
+                // must not join anyone.
+                if self.invites_sent.remove(&(channel_id, member)) {
+                    match self.mls_add_member(&channel_id, &member, now_ms).await {
+                        Ok(()) => {
+                            if let Some(ch) = self.channels.get_mut(&channel_id) {
+                                ch.removed.remove(&member);
+                            }
+                        }
+                        Err(e) => tracing::debug!(error = %e, "invite accept: MLS add failed"),
+                    }
+                }
+            }
+            ChannelControl::InviteDecline { channel_id } => {
+                self.invites_sent.remove(&(channel_id, idk_to_id(from)));
             }
             ChannelControl::Policy { policy } => {
                 let Ok(p) = ServerPolicy::decode(&policy) else {

@@ -134,6 +134,12 @@ enum Cmd {
         peer: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Accept (`accept: true`) or decline a channel invite we received.
+    InviteRespond {
+        channel: String,
+        accept: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     InviteLink {
         channel: String,
         ttl_secs: u64,
@@ -208,6 +214,8 @@ enum Cmd {
     /// `{ "<fingerprint>": "<username>", ... }` for every identity we know a
     /// self-asserted username for.
     Usernames { reply: oneshot::Sender<String> },
+    /// Channel invites we've received and not answered, as a ready JSON array.
+    PendingInvites { reply: oneshot::Sender<String> },
     React {
         channel: String,
         target_seq: u64,
@@ -1186,6 +1194,19 @@ async fn engine_task(
                                     data,
                                 }
                             }
+                            Inbound::ChannelInvite {
+                                channel_id, from_idk, channel_name, server_name,
+                            } => {
+                                let who = short_fp(&from_idk);
+                                Item::Notice {
+                                    seq,
+                                    tag: "invite".into(),
+                                    text: format!(
+                                        "{who} invited you to #{channel_name} in {server_name}"
+                                    ),
+                                    scope: id_b32(&channel_id),
+                                }
+                            }
                             Inbound::ChannelBacklog { .. } => unreachable!("handled above"),
                         };
                         inbox.push_back(entry);
@@ -1653,6 +1674,25 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::InviteRespond {
+            channel,
+            accept,
+            reply,
+        } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let r = match parse_fingerprint(channel) {
+                Ok(cid) => {
+                    let res = if accept {
+                        engine.accept_channel_invite(&cid, now_ms()).await
+                    } else {
+                        engine.decline_channel_invite(&cid, now_ms()).await
+                    };
+                    res.map(|_| "ok".into()).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::InviteLink {
             channel,
             ttl_secs,
@@ -1829,6 +1869,20 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 .map(|(id, name)| (id_b32(&id), serde_json::Value::String(name)))
                 .collect();
             let _ = reply.send(serde_json::Value::Object(map).to_string());
+        }
+        Cmd::PendingInvites { reply } => {
+            let list: Vec<_> = engine
+                .pending_channel_invites()
+                .into_iter()
+                .map(|(cid, cn, sn)| {
+                    serde_json::json!({
+                        "channel": id_b32(&cid),
+                        "channel_name": cn,
+                        "server_name": sn,
+                    })
+                })
+                .collect();
+            let _ = reply.send(serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()));
         }
         Cmd::React {
             channel,
@@ -2742,6 +2796,39 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::Invite {
                 channel: r.channel,
                 peer: r.peer,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/invites") => {
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::PendingInvites { reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 503, "text/plain", b"engine down").await;
+            }
+            match rx.await {
+                Ok(body) => respond(&mut stream, 200, "application/json", body.as_bytes()).await,
+                Err(_) => respond(&mut stream, 503, "text/plain", b"engine down").await,
+            }
+        }
+
+        ("POST", "/api/invite/accept") | ("POST", "/api/invite/decline") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let accept = path.ends_with("accept");
+            dispatch(&mut stream, &shared, |reply| Cmd::InviteRespond {
+                channel: r.channel,
+                accept,
                 reply,
             })
             .await

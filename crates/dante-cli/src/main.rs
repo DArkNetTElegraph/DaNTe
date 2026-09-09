@@ -398,7 +398,8 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
          /discover  /publish <root> <on|off> [summary]  /joindisc <root> [pw]  \
          /react #<chan> <seq> <emoji> [-]  /pin|/unpin #<chan> <seq>  /pins #<chan>  \
          /editdm <fp> <msg-id> <text>  /deldm <fp> <msg-id>  /forward <#chan|fp> <origin> <text>  \
-         /invite #<chan> <fp>  /channels  /file <path>  /whoami  /quit"
+         /invite #<chan> <fp>  /acceptinvite #<chan>  /declineinvite #<chan>  \
+         /channels  /file <path>  /whoami  /quit"
     );
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -506,6 +507,16 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                     for (_who, _at, text) in entries {
                                         println!("  · {text}");
                                     }
+                                }
+                                dante_core::Inbound::ChannelInvite {
+                                    channel_id, channel_name, server_name, ..
+                                } => {
+                                    println!(
+                                        "\u{1f4e8} invited to #{channel_name} in {server_name} — \
+                                         /acceptinvite #{} or /declineinvite #{}",
+                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""),
+                                        IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""),
+                                    );
                                 }
                             }
                         }
@@ -813,7 +824,7 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     match (parse_fingerprint(chan), parse_fingerprint(fp)) {
                         (Ok(cid), Ok(pid)) => {
                             match engine.invite_to_channel(&cid, &pid, now_ms()).await {
-                                Ok(()) => println!("invited"),
+                                Ok(()) => println!("invitation sent — they must accept"),
                                 Err(e) => println!("invite failed: {e}"),
                             }
                         }
@@ -821,6 +832,26 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                     }
                 }
                 _ => println!("usage: /invite #<channel-id> <fingerprint>"),
+            },
+            "acceptinvite" | "declineinvite" => match a {
+                Some(chan) => {
+                    let chan = chan.strip_prefix('#').unwrap_or(chan);
+                    match parse_fingerprint(chan) {
+                        Ok(cid) => {
+                            let res = if cmd == "acceptinvite" {
+                                engine.accept_channel_invite(&cid, now_ms()).await
+                            } else {
+                                engine.decline_channel_invite(&cid, now_ms()).await
+                            };
+                            match res {
+                                Ok(()) => println!("done"),
+                                Err(e) => println!("failed: {e}"),
+                            }
+                        }
+                        Err(e) => println!("bad channel id: {e}"),
+                    }
+                }
+                None => println!("usage: /{cmd} #<channel-id>"),
             },
             "invitelink" => match a {
                 Some(chan) => {

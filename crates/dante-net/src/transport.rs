@@ -375,6 +375,47 @@ mod p2p_client {
             }
         }
 
+        /// Fire the same request at every candidate in `indices` concurrently,
+        /// returning `(candidate index, result)` per relay. Used by the fan-out
+        /// ops (`Write`, `MergeEnvelopes`) so their latency is one round trip,
+        /// not the sum across the relay set; health updates are applied by the
+        /// caller once all have completed.
+        async fn gather(
+            &self,
+            indices: Vec<usize>,
+            bytes: &[u8],
+        ) -> Vec<(usize, Result<Response, NetError>)> {
+            let mut set = tokio::task::JoinSet::new();
+            for i in indices {
+                let node = self.node.clone();
+                let peer = self.candidates[i].peer;
+                let bytes = bytes.to_vec();
+                set.spawn(async move {
+                    let r = async {
+                        let raw = node
+                            .request(peer, bytes)
+                            .await
+                            .map_err(|e| NetError::Peer(e.to_string()))?;
+                        match Response::decode(&raw)? {
+                            Response::Error(msg) => Err(NetError::Peer(msg)),
+                            res => Ok(res),
+                        }
+                    }
+                    .await;
+                    (i, r)
+                });
+            }
+            let mut out = Vec::new();
+            while let Some(joined) = set.join_next().await {
+                // A panicked task (JoinError) is simply omitted — that candidate
+                // contributed no response, same as a transport failure.
+                if let Ok(pair) = joined {
+                    out.push(pair);
+                }
+            }
+            out
+        }
+
         pub async fn request(&mut self, req: &Request) -> Result<Response, NetError> {
             let bytes = req.encode();
             let order = self.order();
@@ -385,8 +426,8 @@ mod p2p_client {
                 FanOut::Write => {
                     let mut ok = None;
                     let mut last = NetError::Closed;
-                    for i in order {
-                        match self.one(self.candidates[i].peer, bytes.clone()).await {
+                    for (i, r) in self.gather(order, &bytes).await {
+                        match r {
                             Ok(r) => {
                                 self.heal(i);
                                 ok = Some(r);
@@ -406,8 +447,8 @@ mod p2p_client {
                     let mut all = Vec::new();
                     let mut any = false;
                     let mut last = NetError::Closed;
-                    for i in order {
-                        match self.one(self.candidates[i].peer, bytes.clone()).await {
+                    for (i, r) in self.gather(order, &bytes).await {
+                        match r {
                             Ok(Response::Envelopes(v)) => {
                                 self.heal(i);
                                 any = true;

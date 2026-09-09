@@ -32,6 +32,10 @@ pub const PERM_MANAGE_CHANNELS: u32 = 1 << 2;
 pub const PERM_MANAGE_ROLES: u32 = 1 << 3;
 /// Create invite links (advisory — only the host can sign one).
 pub const PERM_INVITE: u32 = 1 << 4;
+/// Permanently ban a member from the whole server (`KickRequest { ban: true }`).
+/// Strictly stronger than [`PERM_KICK`]: a kick is reversible (the member can
+/// be re-invited), a ban blocks every future add path.
+pub const PERM_BAN: u32 = 1 << 5;
 /// Everything.
 pub const PERM_ALL: u32 = u32::MAX;
 /// What a member with no explicit role can do (`@everyone`).
@@ -393,6 +397,15 @@ mod tests {
         p.verify().unwrap();
         assert_eq!(p.effective_perms(&owner), PERM_ALL);
         assert_eq!(p.effective_perms(&[9u8; 32]), PERM_DEFAULT);
+    }
+
+    #[test]
+    fn ban_is_a_distinct_permission_from_kick() {
+        // A ban must not ride PERM_KICK: the two are separate bits, the owner
+        // (PERM_ALL) has both, and a kick-only role does not imply ban.
+        assert_ne!(PERM_BAN, PERM_KICK);
+        assert_eq!(PERM_ALL & PERM_BAN, PERM_BAN);
+        assert_eq!(PERM_KICK & PERM_BAN, 0);
     }
 
     #[test]

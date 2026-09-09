@@ -94,6 +94,15 @@ achievable with no project-run infrastructure.
   mesh knows who to dial. Room view has a mic-mute toggle and a per-peer live
   dot. STUN comes from `/api/ice`; TURN isn't wired (creds aren't exposed), so
   it's localhost / same-LAN until a browser TURN path lands.
+- **Screen share *(done — browser WebRTC)*:** a "🖥 Share screen" button in the
+  voice room calls `getDisplayMedia` and `addTrack`s the video onto every peer
+  `RTCPeerConnection`; adding / removing the track fires `onnegotiationneeded`
+  and the existing perfect-negotiation path (polite/impolite + rollback)
+  renegotiates each leg with no new signalling kinds. Peers that join mid-share
+  get the track on connect. `ontrack` routes `kind === "video"` to a `<video>`
+  tile in the room (own preview + one per remote sharer); ending the browser's
+  own "Stop sharing" control, or leaving, tears it down. No audio capture from
+  the display yet; SFrame still doesn't cover it (mesh DTLS-SRTP does).
 - **Voice bitrate *(done — ≥64 kbps)*:** all voice comms (1:1 calls + group /
   voice channels) target ≥64 kbps Opus. `dante-voice` munges the outbound SDP
   fmtp for the Opus payload (`maxaveragebitrate=64000`, `useinbandfec=1`,
@@ -238,9 +247,9 @@ achievable with no project-run infrastructure.
 **Not built yet:** private-channel access control beyond the secret
 `channel_id` + password wrapper. Gossipsub fan-out of the ledger + channel
 logs (the libp2p DHT is wired in as an opt-in key-directory fallback — feature
-`p2p`; see Phase 3); screen share + an SFrame layer over the group-call key
-(Phase 7); rich features — stickers/soundboards, bots, embeds (Phase 8);
-the Tauri desktop native layer.
+`p2p`; see Phase 3); an SFrame layer over the group-call key (Phase 7 — screen
+share itself is done, browser WebRTC); rich features — stickers/soundboards,
+bots, embeds (Phase 8); the Tauri desktop native layer.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -605,7 +614,11 @@ infrastructure. Reached. ---**
   whole mesh for a group call — encoding the mic once and playing a summed mix
   of the per-leg decoders. `dante-audio` is a dependency of the (detached)
   desktop crate, never of `dante-cli`, so the CI gate never links libopus/cpal.
-- **Still to build:** screen share; an SFrame layer that applies
+- **Screen share *(done — browser WebRTC, SPA voice room)*:** `getDisplayMedia`
+  → `addTrack` on every mesh leg, renegotiated through the existing
+  perfect-negotiation path; remote video tracks render as tiles in the room.
+  No display-audio capture yet.
+- **Still to build:** an SFrame layer that applies
   `group_call_key` to the media so an SFU can forward without decrypting; the
   channel-messaging MLS migration (group calls already use MLS).
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).

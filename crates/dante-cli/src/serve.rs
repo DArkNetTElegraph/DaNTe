@@ -19,7 +19,7 @@
 //! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
 //! `GET /api/p2p`,
 //! `POST /api/dm/edit {peer,msg_id,text}` (empty text deletes),
-//! `GET /api/voice`, `POST /api/voice/join|leave {channel}`,
+//! `GET /api/voice`, `GET /api/voice/key?channel=`, `POST /api/voice/join|leave {channel}`,
 //! `POST /api/forward {to,origin,text}`,
 //! `POST /api/file?to=<fp>&name=<file>` (raw body = bytes, DMs only),
 //! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
@@ -368,6 +368,13 @@ enum Cmd {
         channel: String,
         action: String,
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The current per-epoch media key for a voice channel we're connected to,
+    /// so the SPA can run an SFrame layer over the mesh. Reply is a ready JSON
+    /// object: `{"key":"<hex32>","epoch":N}` or `{}` if not in the call.
+    VoiceKey {
+        channel: String,
+        reply: oneshot::Sender<String>,
     },
 }
 
@@ -2322,6 +2329,19 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let rows: Vec<_> = shared.group_calls.lock().await.values().cloned().collect();
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
         }
+        Cmd::VoiceKey { channel, reply } => {
+            let channel = channel.strip_prefix('#').unwrap_or(&channel);
+            let json = match parse_fingerprint(channel) {
+                Ok(cid) => match (engine.group_call_key(&cid), engine.group_call_epoch(&cid)) {
+                    (Some(key), Some(epoch)) => {
+                        serde_json::json!({ "key": to_hex(&key), "epoch": epoch }).to_string()
+                    }
+                    _ => "{}".to_string(),
+                },
+                Err(_) => "{}".to_string(),
+            };
+            let _ = reply.send(json);
+        }
         Cmd::Revoke { reason, reply } => {
             use dante_core::RevokeReason;
             let reason = match reason.as_str() {
@@ -2878,6 +2898,28 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         ("GET", "/api/voice") => {
             let rooms = shared.voice.lock().await;
             let body = serde_json::to_string(&*rooms).unwrap_or_else(|_| "{}".into());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("GET", "/api/voice/key") => {
+            if !shared.ready.load(Ordering::Relaxed) {
+                return respond(&mut stream, 200, "application/json", b"{}").await;
+            }
+            let channel = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("channel="))
+                .unwrap_or("")
+                .to_string();
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::VoiceKey { channel, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "{}".into());
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 

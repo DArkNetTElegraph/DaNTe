@@ -63,8 +63,9 @@ achievable with no project-run infrastructure.
   📞👥 header button, a group-call bar, and an invite toast. CLI:
   `/groupcall start|join|leave #<channel>`. e2e-tested (three members share one
   key off one Welcome; it rotates when one leaves) and smoke-tested across two
-  `dante serve` instances (mesh legs reach `connected`). Media key is not yet
-  applied as an SFrame layer — the mesh legs' own DTLS-SRTP protects the audio.
+  `dante serve` instances (mesh legs reach `connected`). An SFrame layer over
+  the mesh audio now exists (see below); the mesh legs' DTLS-SRTP protects it
+  regardless.
   **The SPA no longer surfaces group calls** — persistent voice channels (with
   real browser audio) replaced the ad-hoc "group call in a text channel" model;
   the engine/serve endpoints stay for the CLI and a future SFU path.
@@ -625,9 +626,23 @@ infrastructure. Reached. ---**
   instead of your ghost leaf lingering while you rejoin fresh. The epoch
   advance from a `GroupCallCommit` now also marks the store dirty. e2e
   `a_group_call_survives_a_restart`.
-- **Still to build:** an SFrame layer that applies
-  `group_call_key` to the media so an SFU can forward without decrypting; the
-  channel-messaging MLS migration (group calls already use MLS).
+- **SFrame media layer *(done — browser-unverified, Chromium path)*:** an
+  extra AES-GCM pass over each **Opus** frame in the SPA voice mesh, keyed off
+  the channel's MLS `group_call_key`. `Engine::group_call_epoch` +
+  `GET /api/voice/key?channel=` hand the browser the current 32-byte key and
+  epoch (localhost only, CSRF-guarded); the SPA HKDF-derives an AES-GCM key
+  (`info = "dante/sframe/v1"`), re-derives on an epoch bump, and keeps the
+  previous key for a 12 s grace window. Frames are wrapped `"DSF1" ‖ 12-byte
+  IV ‖ ciphertext+tag` via a WebRTC encoded transform on each audio
+  sender/receiver (`createEncodedStreams`). A frame without the `DSF1` magic
+  passes through untouched, so a peer with no SFrame still works; a frame we
+  can't decrypt is dropped (Opus PLC covers the gap) rather than fed to the
+  decoder. **No-op** where the browser lacks encoded transforms (non-Chromium)
+  — DTLS-SRTP still applies. Its point is a future SFU that forwards media
+  without decoding; there is no SFU yet. Video (screen share) is not wrapped.
+  No browser in the dev env, so this is written but not runtime-verified.
+- **Still to build:** the channel-messaging MLS migration (group calls already
+  use MLS); the group-call SFU itself.
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).
 - SFU role in the server relay above ~5 participants; full mesh below (mesh done).
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

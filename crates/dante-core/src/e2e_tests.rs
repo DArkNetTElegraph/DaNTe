@@ -1269,6 +1269,129 @@ async fn a_peer_learns_an_identity_from_ledger_gossip() {
     assert!(bob.knows(&alice_idk));
 }
 
+#[cfg(feature = "p2p")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_channel_message_arrives_over_gossip_and_is_not_double_delivered() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    let host_addrs = host.enable_p2p("/ip4/127.0.0.1/tcp/0", &[]).await.unwrap();
+    alice
+        .enable_p2p("/ip4/127.0.0.1/tcp/0", &host_addrs)
+        .await
+        .unwrap();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+    for _ in 0..6 {
+        for e in [&mut host, &mut alice] {
+            e.sync(now).await.unwrap();
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
+            let _ = e.poll_p2p(now).await; // alice subscribes to the channel topic
+        }
+    }
+    // Let the gossipsub mesh settle on the channel topic.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let _ = alice.poll_p2p(now).await;
+
+    host.send_channel(&chan, "over gossip", now).await.unwrap();
+
+    let mut got = Vec::new();
+    for _ in 0..40 {
+        let _ = alice.poll_p2p(now).await;
+        got.extend(alice.poll_channels(now).await.unwrap());
+        if got.iter().any(|m| m.text == "over gossip") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    let hits = got.iter().filter(|m| m.text == "over gossip").count();
+    assert_eq!(
+        hits, 1,
+        "delivered exactly once (gossip + relay copy deduped)"
+    );
+
+    // The authoritative relay copy must not re-emit it.
+    let again = alice.poll_channels(now).await.unwrap();
+    assert!(
+        !again.iter().any(|m| m.text == "over gossip"),
+        "the relay copy of an already-shown gossip message is not re-delivered"
+    );
+}
+
+#[cfg(feature = "p2p")]
+#[tokio::test]
+async fn a_hostile_gossip_frame_cannot_suppress_the_real_message() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+    for _ in 0..6 {
+        for e in [&mut host, &mut alice] {
+            e.sync(now).await.unwrap();
+            e.receive_all(now).await.unwrap();
+            let _ = e.poll_channels(now).await;
+        }
+    }
+
+    // A channel member gossips garbage claiming to be the next log entry.
+    let last = alice.channel_last_seq(&chan);
+    alice.inject_channel_gossip(chan, last + 1, vec![0xffu8; 48]);
+
+    let junk = alice.poll_channels(now).await.unwrap();
+    assert!(junk.is_empty(), "the junk gossip frame yields no message");
+    assert_eq!(
+        alice.channel_last_seq(&chan),
+        last,
+        "a gossip frame must not advance the log cursor"
+    );
+
+    // The real message the relay assigned `last + 1` still gets through.
+    host.send_channel(&chan, "the real one", now).await.unwrap();
+    let mut delivered = false;
+    for _ in 0..10 {
+        if alice
+            .poll_channels(now)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "the real one")
+        {
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        delivered,
+        "the real message was not suppressed by the junk frame"
+    );
+}
+
 #[tokio::test]
 async fn a_direct_message_can_be_edited_and_deleted_by_its_sender() {
     let now = now_ms();

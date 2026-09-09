@@ -288,6 +288,55 @@ async fn a_one_to_one_call_connects_over_dm_signalling() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_signal_relays_browser_webrtc_between_the_two_peers() {
+    // The browser-audio path for 1:1 calls: the engine relays opaque WebRTC
+    // signalling (SDP/ICE) between the two browsers, independent of its own
+    // server-side Call. Assert an offer sent by Alice reaches Bob verbatim.
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    alice
+        .send_call_signal(&bob_id, 0, "v=0\r\nOFFER", now)
+        .await
+        .unwrap();
+
+    let mut relayed = None;
+    for _ in 0..20 {
+        for inb in bob.receive_all(now).await.unwrap() {
+            if let crate::Inbound::CallSignal {
+                from_idk,
+                kind,
+                data,
+            } = inb
+            {
+                relayed = Some((from_idk, kind, data));
+            }
+        }
+        if relayed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let alice_idk = alice.identity().sign_public().to_bytes();
+    assert_eq!(
+        relayed,
+        Some((alice_idk, 0u8, "v=0\r\nOFFER".to_string())),
+        "Bob received Alice's relayed 1:1 call offer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_voice_channel_connects_members_and_tracks_presence() {
     let now = now_ms();
     let relay = spawn_relay().await;

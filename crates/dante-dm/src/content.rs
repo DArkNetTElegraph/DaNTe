@@ -140,6 +140,19 @@ pub enum Content {
         /// The opaque signalling payload (SDP or an ICE candidate line).
         data: String,
     },
+    /// Browser-to-browser signalling for a **1:1 DM call** (like [`VoiceSignal`]
+    /// but for a direct call rather than a voice channel). The relay/engine just
+    /// forwards it between the two browsers, which own the peer connection; this
+    /// is what gives `dante serve` audible 1:1 calls (the `CallOffer`/`CallIce`
+    /// path drives the engine's own server-side `Call`, whose audio only reaches
+    /// the native desktop bridge). `kind`: 0 = SDP offer, 1 = SDP answer,
+    /// 2 = ICE candidate (empty `data` = end-of-candidates), 3 = teardown.
+    CallSignal {
+        /// 0 offer, 1 answer, 2 ICE, 3 bye.
+        kind: u8,
+        /// The opaque signalling payload (SDP or an ICE candidate line).
+        data: String,
+    },
     /// A message forwarded into a channel from elsewhere. Otherwise an ordinary
     /// channel message (editable / deletable / pinnable), but it also carries a
     /// label of where it came from so the UI can mark it.
@@ -231,6 +244,9 @@ impl Content {
             } => {
                 w.u8(22).fixed(channel_id).u8(*kind).string(data);
             }
+            Content::CallSignal { kind, data } => {
+                w.u8(23).u8(*kind).string(data);
+            }
         }
         w.into_vec()
     }
@@ -298,6 +314,10 @@ impl Content {
             },
             22 => Content::VoiceSignal {
                 channel_id: r.fixed::<32>()?,
+                kind: r.u8()?,
+                data: r.string()?,
+            },
+            23 => Content::CallSignal {
                 kind: r.u8()?,
                 data: r.string()?,
             },
@@ -383,6 +403,10 @@ mod tests {
                 kind: 2,
                 data: "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host".into(),
             },
+            Content::CallSignal {
+                kind: 0,
+                data: "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n".into(),
+            },
         ] {
             assert_eq!(Content::decode(&c.encode()).unwrap(), c);
         }
@@ -436,6 +460,6 @@ mod tests {
 
     #[test]
     fn bad_tag_rejected() {
-        assert!(Content::decode(&[23]).is_err());
+        assert!(Content::decode(&[24]).is_err());
     }
 }

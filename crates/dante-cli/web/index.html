@@ -2999,7 +2999,127 @@ async function refreshCalls() {
       renderCallbar();
       renderCallToast();
     }
+    callRtcSync();
   } catch (_) {}
+}
+
+/* ---------- 1:1 DM calls: real browser WebRTC audio --------------------
+   Mirrors the voice-channel mesh but for a single peer. The engine's own
+   Call (CallOffer/CallIce) still runs and feeds the native desktop bridge;
+   this parallel browser peer connection is what makes 1:1 calls audible in
+   `dante serve`. Signalling rides CallSignal DMs via /api/call/signal,
+   delivered back as `callsignal` stream items. To avoid glare the lower
+   fingerprint offers, and only once the engine says the call is connected
+   (so the mic prompt only appears after the user starts/accepts). */
+const callRtc = {
+  peer: null, pc: null, localStream: null, audio: null,
+  polite: false, pending: [], offered: false, makingOffer: false, iceServers: [],
+};
+
+async function callRtcStart(fp) {
+  if (callRtc.peer === fp && callRtc.pc) return;
+  if (callRtc.peer) callRtcStop();               // one 1:1 call at a time
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("this browser has no microphone API (needs a secure context)");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  callRtc.peer = fp;
+  callRtc.localStream = stream;
+  callRtc.offered = false;
+  callRtc.pending = [];
+  callRtc.polite = store.me.fingerprint > fp;    // higher fp is the polite peer
+  try {
+    const ice = await api.get("/api/ice");
+    callRtc.iceServers = (ice || [])
+      .filter(s => s.kind === "stun" && s.urls && s.urls.length)
+      .map(s => ({ urls: s.urls }));
+  } catch (_) { callRtc.iceServers = []; }
+  const pc = new RTCPeerConnection({ iceServers: callRtc.iceServers });
+  callRtc.pc = pc;
+  for (const t of stream.getTracks()) pc.addTrack(t, stream);
+  pc.onicecandidate = e => { if (e.candidate) callSignalSend(2, JSON.stringify(e.candidate)); };
+  pc.ontrack = e => {
+    let a = callRtc.audio;
+    if (!a) { a = new Audio(); a.autoplay = true; callRtc.audio = a; }
+    a.srcObject = e.streams[0];
+    a.play().catch(() => {});
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "failed") callRtcStop();
+  };
+}
+
+function callRtcStop() {
+  if (callRtc.peer) callSignalSend(3, "");        // best-effort teardown
+  if (callRtc.pc) { try { callRtc.pc.close(); } catch (_) {} }
+  if (callRtc.audio) { try { callRtc.audio.srcObject = null; } catch (_) {} }
+  if (callRtc.localStream) { for (const t of callRtc.localStream.getTracks()) t.stop(); }
+  callRtc.peer = null; callRtc.pc = null; callRtc.localStream = null;
+  callRtc.audio = null; callRtc.pending = []; callRtc.offered = false; callRtc.makingOffer = false;
+}
+
+function callRtcMicOn() { return !callRtc.localStream || callRtc.localStream.getAudioTracks().some(t => t.enabled); }
+function callRtcToggleMic() {
+  if (!callRtc.localStream) return;
+  const on = !callRtcMicOn();
+  for (const t of callRtc.localStream.getAudioTracks()) t.enabled = on;
+  renderCallbar();
+}
+
+// Called each poll: once the call is connected, the lower fp sends the offer;
+// when the call is gone or dead, tear the media leg down.
+function callRtcSync() {
+  const fp = callRtc.peer;
+  if (!fp) return;
+  const c = callFor(fp);
+  if (!c || c.state === "failed" || c.state === "disconnected") {
+    if (!c || c.state === "failed") callRtcStop();
+    return;
+  }
+  const ready = c.state === "connected" || c.state === "connecting";
+  if (ready && !callRtc.offered && !callRtc.makingOffer
+      && store.me.fingerprint < fp && callRtc.pc) {
+    callRtc.offered = true;
+    (async () => {
+      try {
+        callRtc.makingOffer = true;
+        await callRtc.pc.setLocalDescription(await callRtc.pc.createOffer());
+        callSignalSend(0, callRtc.pc.localDescription.sdp);
+      } catch (_) { callRtc.offered = false; } finally { callRtc.makingOffer = false; }
+    })();
+  }
+}
+
+function callSignalSend(kind, data) {
+  if (!callRtc.peer) return;
+  api.post("/api/call/signal", { to: callRtc.peer, kind, data }).catch(() => {});
+}
+
+async function callRtcOnSignal(fp, kind, data) {
+  if (callRtc.peer !== fp || !callRtc.pc) return;   // not our current call leg
+  const pc = callRtc.pc;
+  try {
+    if (kind === 3) { callRtcStop(); return; }       // bye
+    if (kind === 0) {                                 // offer
+      const collision = callRtc.makingOffer || pc.signalingState !== "stable";
+      if (collision && !callRtc.polite) return;       // impolite peer ignores
+      if (collision) await pc.setLocalDescription({ type: "rollback" });
+      await pc.setRemoteDescription({ type: "offer", sdp: data });
+      for (const c of callRtc.pending.splice(0)) { try { await pc.addIceCandidate(c); } catch (_) {} }
+      await pc.setLocalDescription(await pc.createAnswer());
+      callSignalSend(1, pc.localDescription.sdp);
+    } else if (kind === 1) {                           // answer
+      await pc.setRemoteDescription({ type: "answer", sdp: data });
+      for (const c of callRtc.pending.splice(0)) { try { await pc.addIceCandidate(c); } catch (_) {} }
+    } else if (kind === 2) {                           // ICE
+      const cand = JSON.parse(data);
+      if (pc.remoteDescription && pc.remoteDescription.type) {
+        try { await pc.addIceCandidate(cand); } catch (_) {}
+      } else { callRtc.pending.push(cand); }
+    }
+  } catch (_) { /* negotiation races recover on the next poll */ }
 }
 
 function callFor(fp) { return store.calls.find(c => c.peer === fp) || null; }
@@ -3007,8 +3127,25 @@ function callFor(fp) { return store.calls.find(c => c.peer === fp) || null; }
 async function callAction(fp, action) {
   const path = action === "start" ? "/api/call"
     : action === "accept" ? "/api/call/accept" : "/api/call/hangup";
+  if (action === "hangup") {
+    callRtcStop();
+    try { await api.post(path, { peer: fp }); await refreshCalls(); }
+    catch (e) { ui.sys("call: " + e.message); }
+    return;
+  }
+  // start / accept: open the mic first (this pops the permission prompt), then
+  // tell the engine. The browser peer connection is what carries the audio.
+  try {
+    await callRtcStart(fp);
+  } catch (e) {
+    const msg = (e && e.name === "NotAllowedError")
+      ? "Microphone permission denied — allow it in the browser to talk."
+      : "call: " + (e && e.message ? e.message : e);
+    ui.say(msg);
+    return;
+  }
   try { await api.post(path, { peer: fp }); await refreshCalls(); }
-  catch (e) { ui.sys("call: " + e.message); }
+  catch (e) { callRtcStop(); ui.sys("call: " + e.message); }
 }
 
 function renderCallbar() {
@@ -3028,6 +3165,11 @@ function renderCallbar() {
     const acc = el("button", "accept", "Accept");
     acc.onclick = () => callAction(t, "accept");
     bar.appendChild(acc);
+  }
+  if (c.state === "connected" && callRtc.peer === t && callRtc.localStream) {
+    const mic = el("button", null, callRtcMicOn() ? "🎙 Mute" : "🔇 Unmute");
+    mic.onclick = callRtcToggleMic;
+    bar.appendChild(mic);
   }
   const hang = el("button", "hangup", c.incoming && c.state === "ringing" ? "Decline" : "Hang up");
   hang.onclick = () => callAction(t, "hangup");
@@ -3463,6 +3605,10 @@ function ingest(items) {
     }
     if (it.kind === "voicesignal") {
       if (it.channel === voiceRtc.channelId) voiceOnSignal(it.from, it.sig_kind, it.data);
+      continue;
+    }
+    if (it.kind === "callsignal") {
+      callRtcOnSignal(it.from, it.sig_kind, it.data);
       continue;
     }
     if (it.kind === "notice") {

@@ -299,6 +299,16 @@ pub enum Inbound {
         /// The opaque payload (SDP or ICE candidate line).
         data: String,
     },
+    /// A browser WebRTC signalling blob for a 1:1 DM call, relayed from the
+    /// peer's browser. The engine does not interpret it.
+    CallSignal {
+        /// The peer's Ed25519 identity key.
+        from_idk: [u8; 32],
+        /// 0 offer, 1 answer, 2 ICE, 3 bye.
+        kind: u8,
+        /// The opaque payload (SDP or ICE candidate line).
+        data: String,
+    },
     /// A host has offered us a channel. Nothing happens until we call
     /// [`Engine::accept_channel_invite`] or [`Engine::decline_channel_invite`].
     ChannelInvite {
@@ -1998,6 +2008,28 @@ impl Engine {
             to,
             Content::VoiceSignal {
                 channel_id: *channel_id,
+                kind,
+                data: data.to_owned(),
+            },
+            now_ms,
+        )
+        .await
+    }
+
+    /// Relay a browser WebRTC signal for a 1:1 DM call to `to` (the engine does
+    /// not interpret it — the two browsers own the peer connection). This is the
+    /// browser-audio path for `dante serve`, parallel to and independent of the
+    /// engine's own `start_call`/`Call` machinery.
+    pub async fn send_call_signal(
+        &mut self,
+        to: &[u8; 32],
+        kind: u8,
+        data: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.send_content(
+            to,
+            Content::CallSignal {
                 kind,
                 data: data.to_owned(),
             },
@@ -4981,7 +5013,8 @@ impl Engine {
             | Content::DmDelete { .. }
             | Content::Forward { .. }
             | Content::GroupCallJoinRequest { .. }
-            | Content::VoiceSignal { .. } => (None, [0u8; 16]),
+            | Content::VoiceSignal { .. }
+            | Content::CallSignal { .. } => (None, [0u8; 16]),
         };
         let plaintext = content.encode();
 
@@ -5337,6 +5370,13 @@ impl Engine {
                 }) => {
                     out.push(Inbound::VoiceSignal {
                         channel_id,
+                        from_idk: from,
+                        kind,
+                        data,
+                    });
+                }
+                Ok(Content::CallSignal { kind, data }) => {
+                    out.push(Inbound::CallSignal {
                         from_idk: from,
                         kind,
                         data,

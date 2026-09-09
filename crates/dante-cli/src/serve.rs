@@ -171,6 +171,13 @@ enum Cmd {
         data: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Relay a WebRTC signalling blob to the peer of a 1:1 DM call.
+    CallSignal {
+        to: String,
+        kind: u8,
+        data: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Remove a member from the whole server `channel` belongs to; `ban` also
     /// blocks their return.
     RemoveMember {
@@ -504,6 +511,17 @@ enum Item {
         /// The opaque payload (SDP or ICE candidate line).
         data: String,
     },
+    /// A relayed WebRTC signalling blob for a 1:1 DM call. Same as
+    /// [`Item::VoiceSignal`] but peer-scoped rather than channel-scoped.
+    CallSignal {
+        seq: u64,
+        /// The peer's fingerprint.
+        from: String,
+        /// 0 offer, 1 answer, 2 ICE, 3 bye.
+        sig_kind: u8,
+        /// The opaque payload (SDP or ICE candidate line).
+        data: String,
+    },
 }
 
 impl Item {
@@ -516,7 +534,8 @@ impl Item {
             | Item::ChannelPin { seq, .. }
             | Item::DmEdit { seq, .. }
             | Item::Notice { seq, .. }
-            | Item::VoiceSignal { seq, .. } => *seq,
+            | Item::VoiceSignal { seq, .. }
+            | Item::CallSignal { seq, .. } => *seq,
         }
     }
 }
@@ -1257,6 +1276,14 @@ async fn engine_task(
                                     data,
                                 }
                             }
+                            Inbound::CallSignal { from_idk, kind, data } => {
+                                Item::CallSignal {
+                                    seq,
+                                    from: short_fp(&from_idk),
+                                    sig_kind: kind,
+                                    data,
+                                }
+                            }
                             Inbound::ChannelInvite {
                                 channel_id, from_idk, channel_name, server_name,
                             } => {
@@ -1818,6 +1845,22 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                     .map(|_| "ok".into())
                     .map_err(|e| e.to_string()),
                 _ => Err("bad channel id or fingerprint".into()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::CallSignal {
+            to,
+            kind,
+            data,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&to) {
+                Ok(pid) => engine
+                    .send_call_signal(&pid, kind, &data, now_ms())
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(r);
         }
@@ -2954,6 +2997,26 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             };
             dispatch(&mut stream, &shared, |reply| Cmd::VoiceSignal {
                 channel: r.channel,
+                to: r.to,
+                kind: r.kind,
+                data: r.data,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/call/signal") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                to: String,
+                kind: u8,
+                #[serde(default)]
+                data: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::CallSignal {
                 to: r.to,
                 kind: r.kind,
                 data: r.data,

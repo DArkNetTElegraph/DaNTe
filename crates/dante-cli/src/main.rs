@@ -570,9 +570,11 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                     println!("\u{1f4de} group call #{} membership changed",
                                         IdentityId::from_bytes(channel_id).to_base32().split('-').next().unwrap_or(""));
                                 }
-                                // Voice-channel WebRTC signalling is browser-only;
-                                // the terminal client has no media path.
+                                // WebRTC signalling (voice channels and 1:1 calls)
+                                // is browser-only; the terminal client has no
+                                // media path.
                                 dante_core::Inbound::VoiceSignal { .. } => {}
+                                dante_core::Inbound::CallSignal { .. } => {}
                                 dante_core::Inbound::ChannelBacklog { entries, .. } => {
                                     for (_who, _at, text) in entries {
                                         println!("  · {text}");

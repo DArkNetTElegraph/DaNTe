@@ -42,17 +42,21 @@ fn arg_value(args: &HashMap<String, String>, key: &str) -> Result<String> {
         .with_context(|| format!("missing --{key}"))
 }
 
-/// The `--relay` value, translating the discovery aliases `dht` / `p2p` into
-/// `p2p-discover:<bootstrap-multiaddr,...>` (from `--bootstrap`) that
-/// `Engine::connect` understands.
+/// The `--relay` value, translating the discovery aliases `dht` / `p2p` (and a
+/// bare `--bootstrap` with no `--relay`) into
+/// `p2p-discover:<bootstrap-multiaddr,...>` that `Engine::connect` understands.
 fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
-    let relay = arg_value(flags, "relay")?;
+    let boot = flags
+        .get("bootstrap")
+        .map(String::as_str)
+        .unwrap_or("")
+        .trim();
+    let relay = match flags.get("relay") {
+        Some(r) => r.clone(),
+        None if !boot.is_empty() => "dht".to_string(),
+        None => anyhow::bail!("missing --relay (or --bootstrap for DHT relay discovery)"),
+    };
     if relay == "dht" || relay == "p2p" {
-        let boot = flags
-            .get("bootstrap")
-            .map(String::as_str)
-            .unwrap_or("")
-            .trim();
         if boot.is_empty() {
             anyhow::bail!(
                 "--relay {relay} needs --bootstrap <multiaddr,...> to find relays on the DHT"

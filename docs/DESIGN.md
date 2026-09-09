@@ -246,11 +246,14 @@ achievable with no project-run infrastructure.
   and the coalescing rule (>3 concurrent → "several people are typing…").
 
 **Not built yet:** private-channel access control beyond the secret
-`channel_id` + password wrapper. Gossipsub fan-out of the ledger + channel
-logs (the libp2p DHT is wired in as an opt-in key-directory fallback — feature
-`p2p`; see Phase 3); an SFrame layer over the group-call key (Phase 7 — screen
-share itself is done, browser WebRTC); the Tauri desktop native layer. Phase 8
-(stickers, soundboards, opt-in URL embeds, headless bot bridge) is done.
+`channel_id` + password wrapper. Gossipsub fan-out of channel MLS logs, and a
+DHT / storage-supernode mailbox so a client needs no relay at all (the libp2p
+`p2p` feature already gives a DHT key-directory fallback, ledger gossip, and
+the whole relay wire over a `/dante/relay/1` libp2p stream — see Phase 3 —
+but the relay is still the store-and-forward node and the `p2p` feature is
+off by default); the group-call SFU that the Phase 7 SFrame layer is for; the
+Tauri desktop native layer. Phase 8 (stickers, soundboards, opt-in URL
+embeds, headless bot bridge) is done.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -394,9 +397,32 @@ DaNTe/
   `sync::pull_records` returns the relay-log position to resume from — gossip
   appends no longer make `sync` skip relay records. e2e
   `a_peer_learns_an_identity_from_ledger_gossip`.
+- **Relay wire over libp2p** *(done, opt-in — feature `p2p`)*: the whole
+  `dante-net` `Request`/`Response` protocol can ride a libp2p
+  `/dante/relay/1` request-response stream instead of raw TCP.
+  `dante-p2p`'s `Node` gained `request(peer, bytes)` and an inbound-request
+  channel with a `respond()` handle (length-prefixed opaque-bytes codec, 16
+  MiB frame cap). `dante-net`'s `Client` is now an enum over a TCP backend
+  (unchanged) and a `P2pBackend` (`Client::connect_p2p(node, multiaddr)`).
+  `dante-relay --p2p-listen <multiaddr>` [`--p2p-seed HEX32`] serves inbound
+  requests through the *same* `RelayHandler` as TCP, with a stable synthetic
+  ULA-v6 pseudo-IP per peer so per-IP rate limiting still buckets by sender.
+  `Engine::connect` treats a `relay_addr` starting with `/` as a multiaddr:
+  it spawns an identity-seeded node and connects the `Client` over it; a
+  multiaddr on a non-`p2p` build is a clear error. `dante serve|chat|bot
+  --relay /ip4/…/tcp/N/p2p/<id>` then works with no further change.
+  **Live-verified:** two `dante serve` instances reaching a relay only by
+  multiaddr — onboard (PoW announce), then a full E2E DM (prekey fetch +
+  sealed-sender deposit + mailbox fetch) — no TCP relay connection. Tests
+  `a_relay_request_round_trips_over_libp2p` (dante-p2p),
+  `client_talks_to_a_relay_over_libp2p` (dante-net). The relay is still a
+  storage node; this makes the *transport* libp2p, which is the layer
+  DHT-discovered / multi-relay / NAT-traversed relaying builds on.
 - **Still deferred:** gossipsub fan-out of channel MLS logs (channel delivery
-  leans on the relay's ordered per-channel log); learning relay endpoints from
-  `entry_relays`; health-based relay reordering.
+  leans on the relay's ordered per-channel log); a DHT / storage-supernode
+  design for the sealed-sender mailbox so a client needs *no* relay; learning
+  relay endpoints from `entry_relays`; health-based relay reordering; flipping
+  the `p2p` feature (and a libp2p `--relay`) on by default.
 
 ### Phase 4 — E2E 1:1 DMs  (`dante-dm`, `dante-core`, `dante-cli`)  — **MVP**
 - **Done:** signed prekey bundles published to the relay; X3DH session init;

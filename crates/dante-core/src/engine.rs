@@ -442,6 +442,9 @@ pub(crate) struct HostedServer {
     /// Identities banned from this server: refused re-entry by every add path
     /// ([`Engine::mls_add_member`] rejects them). Persisted.
     pub banned: HashSet<[u8; 32]>,
+    /// PoW over `server_root` (from [`ServerRegister::challenge`]), solved once
+    /// at creation and replayed on every re-registration. Persisted.
+    pub register_pow: dante_crypto::pow::PowProof,
 }
 
 /// Size classes channel-log plaintexts are padded to, so the relay learns only
@@ -779,13 +782,34 @@ impl Engine {
                 .into_iter()
                 .map(|(root, ids)| (root, ids.into_iter().collect()))
                 .collect();
+            let mut reg_pow: HashMap<[u8; 32], dante_crypto::pow::PowProof> = s
+                .server_register_pow
+                .into_iter()
+                .map(|p| {
+                    (
+                        p.root,
+                        dante_crypto::pow::PowProof {
+                            m_cost_kib: p.m_cost_kib,
+                            t_cost: p.t_cost,
+                            difficulty: p.difficulty,
+                            nonce: p.nonce,
+                        },
+                    )
+                })
+                .collect();
             for h in s.hosted {
+                // A blob from before this field re-solves the (server_root-bound)
+                // proof once, lazily.
+                let register_pow = reg_pow.remove(&h.root_pub).unwrap_or_else(|| {
+                    dante_crypto::pow::solve(&ServerRegister::challenge(&h.root_pub), engine.pow)
+                });
                 engine.hosted.insert(
                     h.root_pub,
                     HostedServer {
                         auto_kick_ms: autokick.get(&h.root_pub).copied(),
                         join_pw_hash: joinpw.get(&h.root_pub).copied(),
                         banned: bans.remove(&h.root_pub).unwrap_or_default(),
+                        register_pow,
                         name: h.name,
                         root: SignSecret::from_bytes(&h.root_secret),
                         channels: h.channels,
@@ -1036,6 +1060,17 @@ impl Engine {
                 .iter()
                 .filter(|(_, h)| !h.banned.is_empty())
                 .map(|(root, h)| (*root, h.banned.iter().copied().collect()))
+                .collect(),
+            server_register_pow: self
+                .hosted
+                .iter()
+                .map(|(root, h)| store::StoredServerPow {
+                    root: *root,
+                    m_cost_kib: h.register_pow.m_cost_kib,
+                    t_cost: h.register_pow.t_cost,
+                    difficulty: h.register_pow.difficulty,
+                    nonce: h.register_pow.nonce,
+                })
                 .collect(),
         };
         store::save(&path, &self.identity, &state)?;
@@ -1998,6 +2033,11 @@ impl Engine {
     pub async fn create_server(&mut self, name: &str, now_ms: u64) -> Result<[u8; 32], CoreError> {
         let root = SignSecret::generate();
         let server_root = root.public().to_bytes();
+        // Server roots aren't PoW'd identities, so the directory record carries
+        // its own proof of work. Bound to `server_root` only — solved once here,
+        // replayed on every later re-registration.
+        let register_pow =
+            dante_crypto::pow::solve(&ServerRegister::challenge(&server_root), self.pow);
         let reg = ServerRegister {
             server_root,
             name: name.chars().take(64).collect(),
@@ -2006,6 +2046,7 @@ impl Engine {
             entry_relays: vec![],
             discoverable: false,
             invite: String::new(),
+            pow: register_pow,
         };
         let rec = reg.to_record(now_ms, |m| root.sign(m));
         sync::submit_record(&mut self.client, &rec).await?;
@@ -2022,6 +2063,7 @@ impl Engine {
                 auto_kick_ms: None,
                 join_pw_hash: None,
                 banned: HashSet::new(),
+                register_pow,
             },
         );
         self.dirty = true;
@@ -2428,6 +2470,8 @@ impl Engine {
             entry_relays: self.relay_addrs.iter().take(8).cloned().collect(),
             discoverable,
             invite,
+            // Replay the create-time proof — it's bound to `server_root` only.
+            pow: self.hosted[server_root].register_pow,
         };
         let rec = reg.to_record(now_ms, |m| root.sign(m));
         sync::submit_record(&mut self.client, &rec).await?;

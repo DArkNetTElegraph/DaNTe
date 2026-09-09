@@ -5,13 +5,21 @@
 //! (`record.author == server_root`). Name / summary / tags are non-unique,
 //! untrusted display text.
 
-use dante_crypto::hash::sha256;
+use dante_crypto::{
+    hash::{sha256, sha256_parts},
+    pow::PowProof,
+};
 use dante_proto::{
     enc::{Reader, WireError, Writer},
+    pow as pow_wire,
     record::{Record, RecordKind},
 };
 
 use crate::error::LedgerError;
+
+/// PoW challenge domain for a `ServerRegister` (bound to `server_root` only, so
+/// one solve covers every later re-registration of the same server).
+const SERVER_POW_DOMAIN: &[u8] = b"dante/pow/server-register/v1";
 
 /// A server's stable id: `SHA-256(server_root_pubkey)`.
 pub type ServerId = [u8; 32];
@@ -53,12 +61,21 @@ pub struct ServerRegister {
     /// A `dante-invite:` link a discovering client can redeem to join. Empty
     /// for a server that only admits people by direct invite.
     pub invite: String,
+    /// Proof of work over [`ServerRegister::challenge`]. Makes mass server
+    /// creation as costly as identity registration; bound to `server_root`
+    /// alone, so it is solved once and reused on every later re-registration.
+    pub pow: PowProof,
 }
 
 impl ServerRegister {
     /// This server's [`ServerId`].
     pub fn id(&self) -> ServerId {
         server_id(&self.server_root)
+    }
+
+    /// The PoW challenge for a server root: `SHA-256(domain || server_root)`.
+    pub fn challenge(server_root: &[u8; 32]) -> [u8; 32] {
+        sha256_parts(&[SERVER_POW_DOMAIN, server_root])
     }
 
     /// Enforce the field-length limits.
@@ -92,6 +109,7 @@ impl ServerRegister {
             w.string(r);
         }
         w.bool(self.discoverable);
+        pow_wire::write(&mut w, &self.pow);
         // Trailing optional: absent in records written before invite links.
         if !self.invite.is_empty() {
             w.string(&self.invite);
@@ -108,6 +126,7 @@ impl ServerRegister {
         let tags = read_string_list(&mut r)?;
         let entry_relays = read_string_list(&mut r)?;
         let discoverable = r.bool()?;
+        let pow = pow_wire::read(&mut r)?;
         let invite = if r.remaining() > 0 {
             r.string()?
         } else {
@@ -122,6 +141,7 @@ impl ServerRegister {
             entry_relays,
             discoverable,
             invite,
+            pow,
         })
     }
 
@@ -204,6 +224,12 @@ mod tests {
             entry_relays: vec!["/dns4/relay.example/tcp/4001".into()],
             discoverable: true,
             invite: String::new(),
+            pow: PowProof {
+                m_cost_kib: 32,
+                t_cost: 1,
+                difficulty: 8,
+                nonce: [0u8; dante_crypto::pow::NONCE_LEN],
+            },
         }
     }
 

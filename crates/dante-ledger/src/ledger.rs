@@ -483,6 +483,17 @@ impl<S: RecordStore> Ledger<S> {
             return Err(LedgerError::AuthorMismatch);
         }
         body.validate()?;
+        // Server roots are throwaway keys, not PoW'd identities, so the record
+        // carries its own proof of work — bound to `server_root` alone, so one
+        // solve covers every later re-registration.
+        dante_crypto::pow::verify(
+            &ServerRegister::challenge(&body.server_root),
+            &body.pow,
+            self.params.min_announce_pow_bits,
+            self.params.min_pow_m_cost_kib,
+            self.params.min_pow_t_cost,
+        )
+        .map_err(|_| LedgerError::BadPow)?;
 
         if let Some(state) = self.servers.get(&body.server_root) {
             if record.created_ms <= state.last_ms {
@@ -600,14 +611,16 @@ mod tests {
     }
 
     fn server_reg(root: &Identity, discoverable: bool, t: u64) -> Record {
+        let server_root = root.sign_public().to_bytes();
         ServerRegister {
-            server_root: root.sign_public().to_bytes(),
+            server_root,
             name: "S".into(),
             summary: String::new(),
             tags: vec![],
             entry_relays: vec![],
             discoverable,
             invite: String::new(),
+            pow: dante_crypto::pow::solve(&ServerRegister::challenge(&server_root), D),
         }
         .to_record(t, |m| root.sign(m))
     }
@@ -932,20 +945,64 @@ mod tests {
     fn server_register_rejects_overlong_name() {
         let mut l = ledger();
         let root = Identity::generate(0);
+        let server_root = root.sign_public().to_bytes();
         let rec = ServerRegister {
-            server_root: root.sign_public().to_bytes(),
+            server_root,
             name: "x".repeat(NAME_MAX + 1),
             summary: String::new(),
             tags: vec![],
             entry_relays: vec![],
             discoverable: true,
             invite: String::new(),
+            pow: dante_crypto::pow::solve(&ServerRegister::challenge(&server_root), D),
         }
         .to_record(1_000, |m| root.sign(m));
         assert!(matches!(
             l.append(rec, 1_000),
             Err(LedgerError::FieldTooLong)
         ));
+    }
+
+    #[test]
+    fn server_register_needs_a_matching_proof_of_work() {
+        // Below the bit floor.
+        let mut strict = Ledger::new(
+            MemoryStore::default(),
+            LedgerParams {
+                min_announce_pow_bits: 20,
+                ..params()
+            },
+        );
+        let root = Identity::generate(0);
+        assert!(matches!(
+            strict.append(server_reg(&root, true, 1_000), 1_000),
+            Err(LedgerError::BadPow)
+        ));
+
+        // Right difficulty, but the proof was solved for a different server
+        // root — the digest check fails.
+        let mut l = ledger();
+        let root = Identity::generate(0);
+        let server_root = root.sign_public().to_bytes();
+        let rec = ServerRegister {
+            server_root,
+            name: "S".into(),
+            summary: String::new(),
+            tags: vec![],
+            entry_relays: vec![],
+            discoverable: true,
+            invite: String::new(),
+            pow: dante_crypto::pow::solve(
+                &ServerRegister::challenge(&[9u8; 32]),
+                Difficulty { bits: 16, ..D },
+            ),
+        }
+        .to_record(1_000, |m| root.sign(m));
+        assert!(matches!(l.append(rec, 1_000), Err(LedgerError::BadPow)));
+
+        // A correct proof is accepted.
+        l.append(server_reg(&Identity::generate(1), true, 2_000), 2_000)
+            .unwrap();
     }
 
     #[test]

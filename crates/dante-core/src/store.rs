@@ -123,6 +123,21 @@ pub struct StoredChannel {
     pub log_key: Option<[u8; 32]>,
 }
 
+/// A persisted `ServerRegister` proof of work, keyed by `server_root`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredServerPow {
+    /// The server root the proof is bound to.
+    pub root: [u8; 32],
+    /// Argon2 memory cost the solve used.
+    pub m_cost_kib: u32,
+    /// Argon2 time cost the solve used.
+    pub t_cost: u32,
+    /// Difficulty (leading zero bits) claimed.
+    pub difficulty: u8,
+    /// The solver-chosen nonce.
+    pub nonce: [u8; 16],
+}
+
 /// A persisted hosted-server record (holds the root secret).
 pub struct StoredHostedServer {
     /// `server_root` public key.
@@ -185,6 +200,9 @@ pub struct PersistedState {
     pub last_fetch_since_ms: u64,
     /// Per-hosted-server ban list: `(server_root, banned IdentityIds)`.
     pub server_bans: Vec<([u8; 32], Vec<[u8; 32]>)>,
+    /// Per-hosted-server `ServerRegister` proof of work. Solved once at
+    /// creation, replayed on every later re-registration.
+    pub server_register_pow: Vec<StoredServerPow>,
 }
 
 /// Why a store file could not be read.
@@ -399,6 +417,15 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
         for id in ids {
             w.fixed(id);
         }
+    }
+
+    w.u32(s.server_register_pow.len() as u32);
+    for p in &s.server_register_pow {
+        w.fixed(&p.root)
+            .u32(p.m_cost_kib)
+            .u32(p.t_cost)
+            .u8(p.difficulty)
+            .fixed(&p.nonce);
     }
     w.into_vec()
 }
@@ -659,6 +686,21 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    let mut server_register_pow = Vec::new();
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        server_register_pow.reserve(n);
+        for _ in 0..n {
+            server_register_pow.push(StoredServerPow {
+                root: r.fixed::<32>()?,
+                m_cost_kib: r.u32()?,
+                t_cost: r.u32()?,
+                difficulty: r.u8()?,
+                nonce: r.fixed::<16>()?,
+            });
+        }
+    }
+
     // Restore message ids onto the aligned history entries.
     for (e, id) in history.iter_mut().zip(dm_msg_ids.iter()) {
         e.msg_id = *id;
@@ -689,6 +731,7 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         last_announce_ms,
         last_fetch_since_ms,
         server_bans,
+        server_register_pow,
     })
 }
 
@@ -786,6 +829,13 @@ mod tests {
             last_announce_ms: 100,
             last_fetch_since_ms: 200,
             server_bans: vec![([7u8; 32], vec![[1u8; 32], [2u8; 32]])],
+            server_register_pow: vec![StoredServerPow {
+                root: [7u8; 32],
+                m_cost_kib: 4096,
+                t_cost: 1,
+                difficulty: 8,
+                nonce: [5u8; 16],
+            }],
         };
         save(&path, &id, &state).unwrap();
 
@@ -846,6 +896,7 @@ mod tests {
             last_announce_ms: 0,
             last_fetch_since_ms: 0,
             server_bans: vec![],
+            server_register_pow: vec![],
         };
         save(&path, &id, &state).unwrap();
         assert!(matches!(

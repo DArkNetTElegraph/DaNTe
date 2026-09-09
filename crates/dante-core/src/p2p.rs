@@ -52,7 +52,9 @@ impl P2p {
         listen: &str,
         bootstrap: &[String],
     ) -> Result<Self, CoreError> {
-        let (node, mut events) = Node::spawn(seed).map_err(p2p_err)?;
+        // The engine's node is a DHT/gossip client only; it never serves
+        // inbound `/dante/relay/1` requests, so the inbound channel is dropped.
+        let (node, mut events, _inbound) = Node::spawn(seed).map_err(p2p_err)?;
         node.listen_str(listen).await.map_err(p2p_err)?;
         node.subscribe(LEDGER_TOPIC).await.map_err(p2p_err)?;
 

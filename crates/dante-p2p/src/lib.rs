@@ -24,12 +24,15 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use futures::StreamExt;
+use async_trait::async_trait;
+use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{
     gossipsub, identify,
     kad::{self, store::MemoryStore},
-    noise, ping, tcp, yamux, Swarm, SwarmBuilder,
+    noise, ping,
+    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
+    tcp, yamux, StreamProtocol, Swarm, SwarmBuilder,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -40,6 +43,13 @@ const IDENTIFY_PROTO: &str = "/dante/p2p/1.0.0";
 /// Kademlia protocol name. Distinct from the public IPFS DHT so DaNTe nodes only
 /// ever store and answer for DaNTe records.
 const KAD_PROTO: &str = "/dante/kad/1.0.0";
+/// Request/response protocol carrying the opaque `dante-net` relay wire
+/// (`Request`/`Response` bytes) directly over a libp2p stream, so a client can
+/// reach a relay peer-to-peer instead of over a raw TCP relay connection.
+const RELAY_PROTO: &str = "/dante/relay/1";
+/// Hard cap on a single relay request or response frame (16 MiB — a file chunk
+/// plus overhead).
+const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum P2pError {
@@ -57,8 +67,108 @@ pub enum P2pError {
     Publish(String),
     #[error("kademlia store: {0}")]
     Store(String),
+    #[error("relay request: {0}")]
+    Request(String),
     #[error("the node event loop has stopped")]
     Gone,
+}
+
+/// A length-prefixed opaque-bytes codec for the `/dante/relay/1` protocol.
+#[derive(Clone, Default)]
+struct BytesCodec;
+
+async fn read_frame<T>(io: &mut T) -> std::io::Result<Vec<u8>>
+where
+    T: futures::io::AsyncRead + Unpin + Send,
+{
+    let mut len = [0u8; 4];
+    io.read_exact(&mut len).await?;
+    let n = u32::from_be_bytes(len) as usize;
+    if n > MAX_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "relay frame exceeds the size cap",
+        ));
+    }
+    let mut buf = vec![0u8; n];
+    io.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+async fn write_frame<T>(io: &mut T, data: &[u8]) -> std::io::Result<()>
+where
+    T: futures::io::AsyncWrite + Unpin + Send,
+{
+    if data.len() > MAX_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "relay frame exceeds the size cap",
+        ));
+    }
+    io.write_all(&(data.len() as u32).to_be_bytes()).await?;
+    io.write_all(data).await?;
+    io.flush().await
+}
+
+#[async_trait]
+impl request_response::Codec for BytesCodec {
+    type Protocol = StreamProtocol;
+    type Request = Vec<u8>;
+    type Response = Vec<u8>;
+
+    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Vec<u8>>
+    where
+        T: futures::io::AsyncRead + Unpin + Send,
+    {
+        read_frame(io).await
+    }
+    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Vec<u8>>
+    where
+        T: futures::io::AsyncRead + Unpin + Send,
+    {
+        read_frame(io).await
+    }
+    async fn write_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        req: Vec<u8>,
+    ) -> std::io::Result<()>
+    where
+        T: futures::io::AsyncWrite + Unpin + Send,
+    {
+        write_frame(io, &req).await
+    }
+    async fn write_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        res: Vec<u8>,
+    ) -> std::io::Result<()>
+    where
+        T: futures::io::AsyncWrite + Unpin + Send,
+    {
+        write_frame(io, &res).await
+    }
+}
+
+/// An inbound `/dante/relay/1` request handed to the node's owner (the relay).
+/// Call [`respond`](InboundRequest::respond) exactly once.
+pub struct InboundRequest {
+    /// The peer that sent it.
+    pub peer: PeerId,
+    /// The opaque request bytes (a `dante-net` `Request` encoding).
+    pub body: Vec<u8>,
+    id: u64,
+    cmd: mpsc::Sender<Command>,
+}
+
+impl InboundRequest {
+    /// Send the reply. Dropping an `InboundRequest` without calling this lets
+    /// the requester's call fail with a timeout.
+    pub async fn respond(self, body: Vec<u8>) {
+        let _ = self.cmd.send(Command::Respond(self.id, body)).await;
+    }
 }
 
 /// Events the driver task pushes up to the owner of the [`Node`].
@@ -90,6 +200,8 @@ enum Command {
     GetRecord(Vec<u8>, oneshot::Sender<Result<Option<Vec<u8>>, P2pError>>),
     Subscribe(String, oneshot::Sender<Result<(), P2pError>>),
     Publish(String, Vec<u8>, oneshot::Sender<Result<(), P2pError>>),
+    Request(PeerId, Vec<u8>, oneshot::Sender<Result<Vec<u8>, P2pError>>),
+    Respond(u64, Vec<u8>),
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -98,6 +210,7 @@ struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
+    reqres: request_response::Behaviour<BytesCodec>,
 }
 
 /// A handle to a running libp2p node. Cloneable; the node lives until every
@@ -112,7 +225,9 @@ impl Node {
     /// Build a node whose libp2p identity is derived from a DaNTe Ed25519 secret
     /// (32 raw bytes), spawn its driver task on the current Tokio runtime, and
     /// return the handle plus the [`Event`] stream.
-    pub fn spawn(ed25519_secret: &[u8; 32]) -> Result<(Self, mpsc::Receiver<Event>), P2pError> {
+    pub fn spawn(
+        ed25519_secret: &[u8; 32],
+    ) -> Result<(Self, mpsc::Receiver<Event>, mpsc::Receiver<InboundRequest>), P2pError> {
         let mut secret = *ed25519_secret;
         let keypair = libp2p::identity::Keypair::ed25519_from_bytes(&mut secret)
             .map_err(|e| P2pError::Build(e.to_string()))?;
@@ -150,11 +265,18 @@ impl Node {
                     key.public(),
                 ));
 
+                let reqres = request_response::Behaviour::with_codec(
+                    BytesCodec,
+                    [(StreamProtocol::new(RELAY_PROTO), ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                );
+
                 Ok(Behaviour {
                     kad,
                     gossipsub,
                     identify,
                     ping: ping::Behaviour::default(),
+                    reqres,
                 })
             })
             .map_err(|e| P2pError::Build(e.to_string()))?
@@ -170,8 +292,9 @@ impl Node {
         // Generous: the owner drains this on a timer, and `emit` drops rather
         // than block when it is full, so the swarm driver never stalls.
         let (evt_tx, evt_rx) = mpsc::channel(1024);
+        let (inbound_tx, inbound_rx) = mpsc::channel(256);
 
-        tokio::spawn(Driver::new(swarm, cmd_rx, evt_tx).run());
+        tokio::spawn(Driver::new(swarm, cmd_rx, evt_tx, inbound_tx, cmd_tx.clone()).run());
 
         Ok((
             Node {
@@ -179,6 +302,7 @@ impl Node {
                 cmd: cmd_tx,
             },
             evt_rx,
+            inbound_rx,
         ))
     }
 
@@ -250,15 +374,28 @@ impl Node {
         let topic = topic.to_owned();
         self.call(|tx| Command::Publish(topic, data, tx)).await?
     }
+
+    /// Send one `/dante/relay/1` request to `peer` and await its response.
+    /// The peer must be dialable (dial it or add its address first).
+    pub async fn request(&self, peer: PeerId, body: Vec<u8>) -> Result<Vec<u8>, P2pError> {
+        self.call(|tx| Command::Request(peer, body, tx)).await?
+    }
 }
 
 struct Driver {
     swarm: Swarm<Behaviour>,
     cmd_rx: mpsc::Receiver<Command>,
     evt_tx: mpsc::Sender<Event>,
+    inbound_tx: mpsc::Sender<InboundRequest>,
+    /// A clone of the `Node`'s command sender, handed to each `InboundRequest`
+    /// so `respond` routes back here.
+    cmd_self: mpsc::Sender<Command>,
     pending_put: HashMap<kad::QueryId, AckReply>,
     pending_get: HashMap<kad::QueryId, GetReply>,
     pending_bootstrap: HashMap<kad::QueryId, AckReply>,
+    pending_request: HashMap<OutboundRequestId, oneshot::Sender<Result<Vec<u8>, P2pError>>>,
+    pending_inbound: HashMap<u64, ResponseChannel<Vec<u8>>>,
+    next_inbound_id: u64,
 }
 
 impl Driver {
@@ -266,14 +403,21 @@ impl Driver {
         swarm: Swarm<Behaviour>,
         cmd_rx: mpsc::Receiver<Command>,
         evt_tx: mpsc::Sender<Event>,
+        inbound_tx: mpsc::Sender<InboundRequest>,
+        cmd_self: mpsc::Sender<Command>,
     ) -> Self {
         Driver {
             swarm,
             cmd_rx,
             evt_tx,
+            inbound_tx,
+            cmd_self,
             pending_put: HashMap::new(),
             pending_get: HashMap::new(),
             pending_bootstrap: HashMap::new(),
+            pending_request: HashMap::new(),
+            pending_inbound: HashMap::new(),
+            next_inbound_id: 0,
         }
     }
 
@@ -360,6 +504,15 @@ impl Driver {
                     .map_err(|e| P2pError::Publish(e.to_string()));
                 let _ = reply.send(r);
             }
+            Command::Request(peer, body, reply) => {
+                let id = self.swarm.behaviour_mut().reqres.send_request(&peer, body);
+                self.pending_request.insert(id, reply);
+            }
+            Command::Respond(id, body) => {
+                if let Some(ch) = self.pending_inbound.remove(&id) {
+                    let _ = self.swarm.behaviour_mut().reqres.send_response(ch, body);
+                }
+            }
         }
     }
 
@@ -405,6 +558,47 @@ impl Driver {
                 step,
                 ..
             })) => self.on_kad_result(id, result, step.last),
+            SwarmEvent::Behaviour(BehaviourEvent::Reqres(request_response::Event::Message {
+                peer,
+                message,
+                ..
+            })) => match message {
+                request_response::Message::Request {
+                    request, channel, ..
+                } => {
+                    let id = self.next_inbound_id;
+                    self.next_inbound_id = self.next_inbound_id.wrapping_add(1);
+                    self.pending_inbound.insert(id, channel);
+                    let req = InboundRequest {
+                        peer,
+                        body: request,
+                        id,
+                        cmd: self.cmd_self.clone(),
+                    };
+                    if self.inbound_tx.try_send(req).is_err() {
+                        // Nobody is serving inbound requests (or they're behind).
+                        self.pending_inbound.remove(&id);
+                        tracing::debug!("p2p: dropped an inbound relay request (no receiver)");
+                    }
+                }
+                request_response::Message::Response {
+                    request_id,
+                    response,
+                } => {
+                    if let Some(reply) = self.pending_request.remove(&request_id) {
+                        let _ = reply.send(Ok(response));
+                    }
+                }
+            },
+            SwarmEvent::Behaviour(BehaviourEvent::Reqres(
+                request_response::Event::OutboundFailure {
+                    request_id, error, ..
+                },
+            )) => {
+                if let Some(reply) = self.pending_request.remove(&request_id) {
+                    let _ = reply.send(Err(P2pError::Request(error.to_string())));
+                }
+            }
             _ => {}
         }
     }
@@ -468,8 +662,8 @@ mod tests {
 
     #[tokio::test]
     async fn two_nodes_dial_and_gossip() {
-        let (a, mut a_rx) = Node::spawn(&secret(1)).expect("spawn a");
-        let (b, mut b_rx) = Node::spawn(&secret(2)).expect("spawn b");
+        let (a, mut a_rx, _a_in) = Node::spawn(&secret(1)).expect("spawn a");
+        let (b, mut b_rx, _b_in) = Node::spawn(&secret(2)).expect("spawn b");
 
         a.listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
             .await
@@ -508,8 +702,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_record_put_on_one_node_is_found_by_a_peer() {
-        let (a, mut a_rx) = Node::spawn(&secret(3)).expect("spawn a");
-        let (b, mut b_rx) = Node::spawn(&secret(4)).expect("spawn b");
+        let (a, mut a_rx, _a_in) = Node::spawn(&secret(3)).expect("spawn a");
+        let (b, mut b_rx, _b_in) = Node::spawn(&secret(4)).expect("spawn b");
 
         a.listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
             .await
@@ -552,5 +746,53 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         assert_eq!(found.as_deref(), Some(&val[..]), "record resolved via DHT");
+    }
+
+    #[tokio::test]
+    async fn a_relay_request_round_trips_over_libp2p() {
+        // `srv` plays the relay: it serves `/dante/relay/1` by echoing the
+        // request back, upper-cased. `cli` dials it and does one request.
+        let (srv, mut srv_rx, mut srv_in) = Node::spawn(&secret(7)).expect("spawn srv");
+        let (cli, mut cli_rx, _cli_in) = Node::spawn(&secret(8)).expect("spawn cli");
+
+        srv.listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .expect("srv listen");
+        let srv_addr = first_listen_addr(&mut srv_rx).await;
+        cli.listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .expect("cli listen");
+        let _ = first_listen_addr(&mut cli_rx).await;
+
+        // The server answers inbound requests in the background.
+        tokio::spawn(async move {
+            while let Some(req) = srv_in.recv().await {
+                let mut body = req.body.clone();
+                body.make_ascii_uppercase();
+                req.respond(body).await;
+            }
+        });
+
+        cli.add_address(srv.peer_id(), srv_addr.clone())
+            .await
+            .unwrap();
+        cli.dial(srv_addr).await.expect("cli dial srv");
+
+        // request-response dials on demand once the peer address is known.
+        let mut got = None;
+        for _ in 0..20 {
+            match cli.request(srv.peer_id(), b"ping relay".to_vec()).await {
+                Ok(resp) => {
+                    got = Some(resp);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(150)).await,
+            }
+        }
+        assert_eq!(
+            got.as_deref(),
+            Some(&b"PING RELAY"[..]),
+            "the relay request/response completed over libp2p"
+        );
     }
 }

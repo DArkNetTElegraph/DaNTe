@@ -81,8 +81,8 @@ pub enum CoreError {
     #[error("voice: {0}")]
     Voice(String),
 
-    /// A libp2p / DHT operation failed (only with the `p2p` feature).
-    #[cfg(feature = "p2p")]
+    /// A libp2p / DHT / p2p-transport operation failed, or a libp2p relay
+    /// endpoint was given to a build without the `p2p` feature.
     #[error("p2p: {0}")]
     P2p(String),
 }

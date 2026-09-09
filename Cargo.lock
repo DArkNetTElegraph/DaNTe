@@ -1084,6 +1084,7 @@ dependencies = [
  "dante-identity",
  "dante-ledger",
  "dante-net",
+ "dante-p2p",
  "dante-proto",
  "tokio",
  "tracing",

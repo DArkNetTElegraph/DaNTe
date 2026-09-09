@@ -12,6 +12,10 @@ description = "A DaNTe relay node: sealed-sender mailbox store-and-forward, ledg
 name = "dante-relay"
 path = "src/main.rs"
 
+[features]
+# Also accept clients over a libp2p `/dante/relay/1` stream (`--p2p-listen`).
+p2p = ["dep:dante-p2p", "dante-net/p2p"]
+
 [dependencies]
 dante-crypto.workspace = true
 dante-proto.workspace = true
@@ -19,6 +23,7 @@ dante-identity.workspace = true
 dante-ledger.workspace = true
 dante-net.workspace = true
 dante-dm.workspace = true
+dante-p2p = { workspace = true, optional = true }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

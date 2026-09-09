@@ -129,6 +129,8 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     relay_state.set_ice_policy(args.ice);
+    #[cfg(feature = "p2p")]
+    let p2p_bootstrap = args.p2p_bootstrap.clone();
     if !args.p2p_bootstrap.is_empty() {
         tracing::info!(
             count = args.p2p_bootstrap.len(),
@@ -162,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "p2p")]
     let p2p_task = {
         let handler = Arc::clone(&handler);
+        let boot = p2p_bootstrap;
         async move {
             let Some(addr) = args.p2p_listen.clone() else {
                 return std::future::pending::<anyhow::Result<()>>().await;
@@ -170,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(hex) => parse_seed(hex).context("--p2p-seed must be 64 hex chars")?,
                 None => dante_crypto::random_array::<32>(),
             };
-            serve_p2p(handler, &addr, seed).await
+            serve_p2p(handler, &addr, seed, &boot).await
         }
     };
     #[cfg(not(feature = "p2p"))]
@@ -187,7 +190,12 @@ async fn main() -> anyhow::Result<()> {
 /// Serve inbound `/dante/relay/1` requests over libp2p through the same
 /// [`RelayHandler`] the TCP listener uses.
 #[cfg(feature = "p2p")]
-async fn serve_p2p(handler: Arc<RelayHandler>, listen: &str, seed: [u8; 32]) -> anyhow::Result<()> {
+async fn serve_p2p(
+    handler: Arc<RelayHandler>,
+    listen: &str,
+    seed: [u8; 32],
+    bootstrap: &[String],
+) -> anyhow::Result<()> {
     use dante_net::transport::RequestHandler;
     use dante_net::wire::{Request, Response};
 
@@ -196,6 +204,14 @@ async fn serve_p2p(handler: Arc<RelayHandler>, listen: &str, seed: [u8; 32]) -> 
     node.listen_str(listen)
         .await
         .map_err(|e| anyhow::anyhow!("p2p listen {listen}: {e}"))?;
+    // Peer with sibling relays so the DHT (and provider records) span the whole
+    // relay set, not just this node.
+    for b in bootstrap {
+        if let Err(e) = node.dial_str(b).await {
+            tracing::warn!(addr = %b, error = %e, "p2p: sibling relay dial failed");
+        }
+    }
+    let _ = node.bootstrap().await;
     // Announce on the DHT that we serve `/dante/relay/1` so `--relay dht`
     // clients can discover us. libp2p republishes it automatically.
     node.start_providing(dante_p2p::RELAY_CAPABILITY.to_vec())

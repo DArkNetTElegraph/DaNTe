@@ -1979,7 +1979,9 @@ function renderChat() {
       line.innerHTML = richText(bodyText);
       if (m._edited) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
     } else {
-      line.textContent = bodyText;
+      // DMs get the same markdown / emoji / mention rendering as channels
+      // (richText is XSS-safe: it escapes before introducing any markup).
+      line.innerHTML = richText(bodyText);
       if (dmEd) line.appendChild(Object.assign(el("span", "edited-tag"), { textContent: " (edited)" }));
     }
     g.body.appendChild(line);

@@ -665,6 +665,11 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .msg-actions button { border: 1px solid var(--divider); background: var(--bg-pane); color: var(--text-muted);
   border-radius: 5px; padding: 1px 5px; font-size: 11px; cursor: pointer; }
 .msg-actions button:hover { color: var(--text); border-color: var(--cornflower-blue); }
+.msg-actions button { display: inline-grid; place-items: center; min-width: 24px; height: 22px; padding: 0 4px; }
+.msg-actions button .ic { width: 15px; height: 15px; }
+/* icon-with-text: align an inline svg next to label text */
+#callbar .ic, #call-toast .ic, .voice-mic-btn .ic, .voice-room-sub .ic, h3 .ic {
+  display: inline-block; vertical-align: -3px; margin-right: 5px; width: 15px; height: 15px; }
 .sys { color: var(--text-faint); font-style: italic; padding: 4px 0; font-size: 13px; }
 .pin-tag { color: var(--orange); font-size: 11px; font-weight: 600; margin-bottom: 1px; }
 .fwd-tag { color: var(--text-faint); font-size: 11px; font-style: italic; margin-bottom: 1px; }
@@ -1093,10 +1098,20 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   headphones: '<path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="2.5" y="13.5" width="4.5" height="7" rx="1.6"/><rect x="17" y="13.5" width="4.5" height="7" rx="1.6"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  monitor: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
 };
 function svgIcon(name) {
   return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || "") + '</svg>';
+}
+// A small icon button with an instant CSS tooltip (used for message/voice
+// affordances) — replaces the old emoji-glyph buttons.
+function actBtn(iconName, tip, cls) {
+  const b = el("button", cls || null);
+  b.innerHTML = svgIcon(iconName);
+  if (tip) b.dataset.tip = tip;
+  return b;
 }
 function setIcon(elm, name) { if (elm) elm.innerHTML = svgIcon(name); }
 function paintIcons(root = document) {
@@ -2117,9 +2132,11 @@ function renderVoiceRoom(c, target) {
     people.length ? (people.length === 1 ? "1 person connected" : people.length + " people connected")
                   : "No one's here yet — jump in."));
   if (connected) {
-    wrap.appendChild(el("div", "voice-room-sub",
-      sframeActive() ? "🔒 SFrame — audio also encrypted under the channel key"
-                     : "🔒 transport-encrypted (DTLS-SRTP)"));
+    const sec = el("div", "voice-room-sub");
+    sec.innerHTML = svgIcon("lock") + " " + (sframeActive()
+      ? "SFrame — audio also encrypted under the channel key"
+      : "transport-encrypted (DTLS-SRTP)");
+    wrap.appendChild(sec);
   }
 
   if (people.length) {
@@ -2185,12 +2202,12 @@ function renderVoiceRoom(c, target) {
   btn.onclick = () => voiceAction(c.id, !connected);
   row.appendChild(btn);
   if (connected) {
-    const mic = el("button", "voice-mic-btn" + (voiceRtc.micOn ? "" : " off"),
-      voiceRtc.micOn ? "🎙 Mute" : "🔇 Unmute");
+    const mic = el("button", "voice-mic-btn" + (voiceRtc.micOn ? "" : " off"));
+    mic.innerHTML = svgIcon(voiceRtc.micOn ? "mic" : "mic-off") + (voiceRtc.micOn ? " Mute" : " Unmute");
     mic.onclick = voiceToggleMic;
     row.appendChild(mic);
-    const scr = el("button", "voice-mic-btn" + (voiceRtc.screenStream ? " off" : ""),
-      voiceRtc.screenStream ? "🖥 Stop sharing" : "🖥 Share screen");
+    const scr = el("button", "voice-mic-btn" + (voiceRtc.screenStream ? " off" : ""));
+    scr.innerHTML = svgIcon("monitor") + (voiceRtc.screenStream ? " Stop sharing" : " Share screen");
     scr.onclick = voiceToggleScreen;
     row.appendChild(scr);
   }
@@ -2205,33 +2222,32 @@ const FWD_PREFIX = "↪ Forwarded from ";
 function addMsgActions(body, channelTarget, m) {
   if (!m.ref_seq) return;
   const bar = el("div", "msg-actions");
-  const reply = el("button", null, "↩"); reply.title = "Reply";
+  const reply = actBtn("reply", "Reply");
   reply.onclick = () => {
     store._replyTo = { target: channelTarget, seq: m.ref_seq, from: m.from, text: m.text };
     renderReplyBar();
     $("#text").focus();
   };
   bar.appendChild(reply);
-  const fwd = el("button", null, "↪"); fwd.title = "Forward";
+  const fwd = actBtn("forward", "Forward");
   fwd.onclick = () => openForwardPicker(m, channelTarget);
   bar.appendChild(fwd);
   const isPinned = store.pins[channelTarget] && store.pins[channelTarget][m.ref_seq];
-  const pin = el("button", isPinned ? "on" : null, "📌");
-  pin.title = isPinned ? "Unpin" : "Pin";
+  const pin = actBtn("pin", isPinned ? "Unpin" : "Pin", isPinned ? "on" : null);
   pin.onclick = async () => {
     try { await api.post("/api/pin", { channel: channelTarget, seq: m.ref_seq, pinned: !isPinned }); }
     catch (e) { ui.say("Pin failed: " + e.message); }
   };
   bar.appendChild(pin);
   if (m.from === "you") {
-    const edit = el("button", null, "✎"); edit.title = "Edit";
+    const edit = actBtn("edit", "Edit");
     edit.onclick = async () => {
       const t = await ui.ask("Edit message", m.text);
       if (t == null || t === m.text) return;
       try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: t }); }
       catch (e) { ui.say("Edit failed: " + e.message); }
     };
-    const del = el("button", null, "🗑"); del.title = "Delete";
+    const del = actBtn("trash", "Delete");
     del.onclick = async () => {
       if (!await ui.confirm("Delete this message for everyone?")) return;
       try { await api.post("/api/edit", { channel: channelTarget, seq: m.ref_seq, text: "" }); }
@@ -2287,19 +2303,19 @@ function msgCtxItems(m, target, bodyText) {
 // Forward / edit / delete affordances on direct messages.
 function addDmActions(body, peer, m, bodyText) {
   const bar = el("div", "msg-actions");
-  const fwd = el("button", null, "↪"); fwd.title = "Forward";
+  const fwd = actBtn("forward", "Forward");
   fwd.onclick = () => openForwardPicker({ ...m, text: bodyText }, peer);
   bar.appendChild(fwd);
   if (m.from === "you" && m.msg_id) {
     const cur = () => (store.dmEdits[m.msg_id] && store.dmEdits[m.msg_id].text) || m.text;
-    const edit = el("button", null, "✎"); edit.title = "Edit";
+    const edit = actBtn("edit", "Edit");
     edit.onclick = async () => {
       const t = await ui.ask("Edit message", cur());
       if (t == null || t === cur()) return;
       try { await api.editDm(peer, m.msg_id, t); store.dmEdits[m.msg_id] = { text: t, deleted: false }; renderChat(); }
       catch (e) { ui.say("Edit failed: " + e.message); }
     };
-    const del = el("button", null, "🗑"); del.title = "Delete";
+    const del = actBtn("trash", "Delete");
     del.onclick = async () => {
       if (!await ui.confirm("Delete this message for everyone?")) return;
       try { await api.editDm(peer, m.msg_id, ""); store.dmEdits[m.msg_id] = { text: "", deleted: true }; renderChat(); }
@@ -2367,7 +2383,7 @@ function renderReplyBar() {
   bar.innerHTML = "";
   const who = r.from === "you" ? "yourself" : (dmLabel(r.from) || short(r.from) || "someone");
   bar.appendChild(el("span", "reply-quote", "↩ " + who + ": " + (r.text || "").slice(0, 80)));
-  const x = el("button", null, "✕"); x.title = "Cancel reply";
+  const x = actBtn("x", "Cancel reply");
   x.onclick = () => { store._replyTo = null; renderReplyBar(); };
   bar.appendChild(x);
 }
@@ -2642,8 +2658,7 @@ function renderMembers() {
       if (username(fp) || isMe) nm.appendChild(Object.assign(el("span", "member-id"), { textContent: short(fp) }));
       row.appendChild(nm);
       if (inChannel && !isMe && canRoles) {
-        const rb = el("button", "kick", "🛡");
-        rb.title = "Assign / remove a role";
+        const rb = actBtn("shield", "Assign / remove a role", "kick");
         rb.onclick = () => assignRoleFlow(store.view.server, fp);
         row.appendChild(rb);
       }
@@ -2698,7 +2713,7 @@ async function rolesFlow(server) {
 async function assignRoleFlow(server, memberFp) {
   const root = store.rootOf(server);
   const p = store.policies[root];
-  if (!p || !p.roles.length) return ui.say("No roles defined yet — use the 🛡 in the server header.");
+  if (!p || !p.roles.length) return ui.say("No roles defined yet — use the shield button on a member.");
   const idStr = await ui.ask("Toggle which role id on " + short(memberFp) + "?\n" +
     p.roles.map(r => `  [${r.id}] ${r.name}`).join("\n"));
   const role_id = parseInt(idStr, 10);
@@ -3471,7 +3486,9 @@ function renderCallbar() {
   bar.appendChild(el("span", "dot"));
   const label = { calling: "Calling…", ringing: "Incoming call", connecting: "Connecting…",
     connected: "On a call", disconnected: "Reconnecting…", failed: "Call failed" }[c.state] || c.state;
-  bar.appendChild(el("span", null, "📞 " + label));
+  const labEl = el("span");
+  labEl.innerHTML = svgIcon("phone") + " " + esc(label);
+  bar.appendChild(labEl);
   bar.appendChild(el("span", "spacer"));
   if (c.incoming && c.state === "ringing") {
     const acc = el("button", "accept", "Accept");
@@ -3479,7 +3496,8 @@ function renderCallbar() {
     bar.appendChild(acc);
   }
   if (c.state === "connected" && callRtc.peer === t && callRtc.localStream) {
-    const mic = el("button", null, callRtcMicOn() ? "🎙 Mute" : "🔇 Unmute");
+    const mic = el("button");
+    mic.innerHTML = svgIcon(callRtcMicOn() ? "mic" : "mic-off") + (callRtcMicOn() ? " Mute" : " Unmute");
     mic.onclick = callRtcToggleMic;
     bar.appendChild(mic);
   }
@@ -3495,7 +3513,9 @@ function renderCallToast() {
   if (!ring) { toast.hidden = true; return; }
   toast.hidden = false;
   toast.innerHTML = "";
-  toast.appendChild(el("span", null, "📞 " + dmLabel(ring.peer)));
+  const ringLbl = el("span");
+  ringLbl.innerHTML = svgIcon("phone") + " " + esc(dmLabel(ring.peer));
+  toast.appendChild(ringLbl);
   const acc = el("button", "accept", "Accept");
   acc.onclick = () => { selectTarget("@dm", ring.peer); callAction(ring.peer, "accept"); };
   const dec = el("button", "decline", "Decline");
@@ -4411,7 +4431,7 @@ function openServerSettings(server) {
     if (e.key === "Escape" && $("#server-settings-overlay")) { close(); document.removeEventListener("keydown", esc); }
   });
 
-  box.appendChild(Object.assign(el("h3"), { textContent: "⚙  " + server }));
+  box.appendChild(Object.assign(el("h3"), { innerHTML: svgIcon("gear") + " " + esc(server) }));
   box.appendChild(Object.assign(el("div", "set-mono"), {
     textContent: isOwner ? "You host this server." : "Hosted by someone else — role, password, discovery and delete are host-only.",
   }));
@@ -4547,7 +4567,7 @@ function openPins(target) {
   if ($("#pins-overlay")) return;
   const ov = el("div"); ov.id = "pins-overlay";
   const box = el("div", "pins-box");
-  box.appendChild(el("h3", null, "📌 Pinned in #" + store.channelName(target.slice(1))));
+  box.appendChild(Object.assign(el("h3"), { innerHTML: svgIcon("pin") + " Pinned in #" + esc(store.channelName(target.slice(1))) }));
   const list = el("div", "pins-list");
   box.appendChild(list);
   ov.appendChild(box);

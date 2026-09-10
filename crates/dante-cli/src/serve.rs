@@ -1466,6 +1466,31 @@ async fn refresh_voice(engine: &Engine, shared: &Shared) {
     }
 }
 
+/// Re-mint a TURN credential once it is within this of expiring.
+const ICE_REFRESH_MARGIN_SECS: u64 = 300;
+
+/// Whether the ICE config is worth re-fetching from the relay.
+///
+/// A TURN credential is a coturn `use-auth-secret` token whose username is its
+/// Unix-seconds expiry, so we can tell locally whether the one we hold still
+/// has life in it. Only that case is worth a round trip:
+///
+/// - STUN never expires, so a STUN-only config is never re-fetched.
+/// - An *empty* config is never re-fetched either. `Engine::connect` already
+///   asked, and a relay with no ICE policy would answer empty every time —
+///   which would put a relay round trip on every single call start, and with
+///   it the risk of stalling the serialized engine loop behind an
+///   unresponsive relay. A relay that gains a TURN config is picked up on the
+///   next connect.
+fn ice_needs_refresh(servers: &[dante_core::IceServer], now_secs: u64) -> bool {
+    servers.iter().any(|s| {
+        !s.username.is_empty()
+            && s.username
+                .parse::<u64>()
+                .map_or(true, |expiry| expiry <= now_secs + ICE_REFRESH_MARGIN_SECS)
+    })
+}
+
 /// The `GET /api/ice` body: the ICE servers the page hands `RTCPeerConnection`.
 ///
 /// TURN rows carry their credentials. Without them a browser can only gather
@@ -2300,10 +2325,16 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
         }
         Cmd::Ice { reply } => {
-            // TURN credentials expire, so re-mint them from the relay rather
-            // than serving whatever was learned at connect. Best-effort: on a
-            // relay hiccup the last known list still gets the page STUN.
-            let _ = engine.refresh_ice_servers().await;
+            // Only pay a relay round trip when the credential we hold is about
+            // to lapse. This loop is serialized: a relay that accepts TCP but
+            // never answers blocks every other command behind it for the
+            // transport's 120s read timeout, and `/api/ice` sits on the call
+            // start / voice join path. A timeout is not the fix — dropping a
+            // `request` future mid-flight leaves the unread response in the
+            // socket and desyncs the next one.
+            if ice_needs_refresh(engine.ice_servers(), now_ms() / 1_000) {
+                let _ = engine.refresh_ice_servers().await;
+            }
             let _ = reply.send(ice_json(engine.ice_servers()));
         }
         Cmd::CallAudioSend {
@@ -4253,7 +4284,10 @@ async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{ice_json, loopback_authorities, request_is_local, typing_text, TYPING_FRESH_MS};
+    use super::{
+        ice_json, ice_needs_refresh, loopback_authorities, request_is_local, typing_text,
+        TYPING_FRESH_MS,
+    };
 
     const NOW: u64 = 1_000_000;
 
@@ -4266,6 +4300,42 @@ mod tests {
         }
         s.push_str("\r\n");
         s
+    }
+
+    #[test]
+    fn ice_is_refreshed_only_when_the_credential_is_near_expiry() {
+        let now = 1_789_000_000u64;
+        let turn = |expiry: u64| dante_core::IceServer {
+            urls: vec!["turn:turn.example.org:3478".into()],
+            username: expiry.to_string(),
+            credential: "c2VjcmV0".into(),
+        };
+        let stun = dante_core::IceServer {
+            urls: vec!["stun:stun.example.org:3478".into()],
+            ..Default::default()
+        };
+
+        // Plenty of life left: serve the cached list, no relay round trip. The
+        // engine loop is serialized, so this is what keeps a hung relay off
+        // the call-start path.
+        assert!(!ice_needs_refresh(&[turn(now + 3600)], now));
+        // Inside the margin, and already lapsed.
+        assert!(ice_needs_refresh(&[turn(now + 60)], now));
+        assert!(ice_needs_refresh(&[turn(now - 1)], now));
+        // STUN has no expiry, so a STUN-only config never triggers a fetch.
+        assert!(!ice_needs_refresh(std::slice::from_ref(&stun), now));
+        // Nothing learned: connect already asked, and re-asking would put a
+        // relay round trip on every call start for a no-TURN deployment.
+        assert!(!ice_needs_refresh(&[], now));
+        // A username we cannot parse is treated as unknown, so refresh.
+        assert!(ice_needs_refresh(
+            &[dante_core::IceServer {
+                urls: vec!["turn:turn.example.org:3478".into()],
+                username: "not-a-timestamp".into(),
+                credential: "x".into(),
+            }],
+            now
+        ));
     }
 
     #[test]

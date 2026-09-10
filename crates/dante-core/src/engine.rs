@@ -2274,9 +2274,15 @@ impl Engine {
         // replayed on every later re-registration.
         let register_pow =
             dante_crypto::pow::solve(&ServerRegister::challenge(&server_root), self.pow);
+        // A private server publishes NO human-readable name to the ledger — the
+        // ledger is replicated to every relay and gossiped, so a cleartext name
+        // would leak network-wide. Members learn the real name from the E2E
+        // MlsWelcome instead; the ledger record only reserves `server_root` and
+        // carries the anti-Sybil PoW. The name is published only if/when the
+        // owner makes the server discoverable.
         let reg = ServerRegister {
             server_root,
-            name: name.chars().take(64).collect(),
+            name: String::new(),
             summary: String::new(),
             tags: vec![],
             entry_relays: vec![],
@@ -2694,15 +2700,28 @@ impl Engine {
 
         let root_bytes = self.hosted[server_root].root.to_bytes();
         let root = SignSecret::from_bytes(&root_bytes);
+        // Publish the human-readable name/summary/tags ONLY while discoverable;
+        // a private server keeps them out of the (network-replicated) ledger.
         let reg = ServerRegister {
             server_root: *server_root,
-            name: name.chars().take(64).collect(),
-            summary: summary.chars().take(280).collect(),
-            tags: tags
-                .into_iter()
-                .map(|t| t.chars().take(32).collect())
-                .take(8)
-                .collect(),
+            name: if discoverable {
+                name.chars().take(64).collect()
+            } else {
+                String::new()
+            },
+            summary: if discoverable {
+                summary.chars().take(280).collect()
+            } else {
+                String::new()
+            },
+            tags: if discoverable {
+                tags.into_iter()
+                    .map(|t| t.chars().take(32).collect())
+                    .take(8)
+                    .collect()
+            } else {
+                vec![]
+            },
             entry_relays: self.relay_addrs.iter().take(8).cloned().collect(),
             discoverable,
             invite,

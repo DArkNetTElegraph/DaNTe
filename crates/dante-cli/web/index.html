@@ -2908,13 +2908,16 @@ function mdRender(src) {
   // 2. Escape everything that remains.
   s = esc(s);
   // 3. Inline emphasis (escaped text; single-level nesting covers the common cases).
+  // Emphasis. The inner run must be flanked by non-space (\S…\S, or a single
+  // \S), so stray delimiters around spaces — "2 * 3", "a ~~ b" — are left
+  // alone; the [^delim] class stops a run from crossing into the next pair.
   s = s.replace(/\|\|([\s\S]+?)\|\|/g, '<span class="md-spoiler">$1</span>');
-  s = s.replace(/\*\*\*([^*\n]+)\*\*\*/g, "<strong><em>$1</em></strong>");
-  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/__([^_\n]+)__/g, "<u>$1</u>");
-  s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-  s = s.replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, "$1<em>$2</em>");
-  s = s.replace(/~~([^~\n]+)~~/g, "<s>$1</s>");
+  s = s.replace(/\*\*\*(\S[^*\n]*\S|\S)\*\*\*/g, "<strong><em>$1</em></strong>");
+  s = s.replace(/\*\*(\S[^*\n]*\S|\S)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__(\S[^_\n]*\S|\S)__/g, "<u>$1</u>");
+  s = s.replace(/(^|[^*])\*(\S[^*\n]*\S|\S)\*(?!\*)/g, "$1<em>$2</em>");
+  s = s.replace(/(^|[^_\w])_(\S[^_\n]*\S|\S)_(?![_\w])/g, "$1<em>$2</em>");
+  s = s.replace(/~~(\S[^~\n]*\S|\S)~~/g, "<s>$1</s>");
   // 4. Custom emoji.
   const m = emojiMap();
   s = s.replace(/:([a-z0-9_]{1,32}):/g, (whole, name) =>

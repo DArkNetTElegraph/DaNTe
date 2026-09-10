@@ -93,8 +93,10 @@ achievable with no project-run infrastructure.
   `Engine::send_voice_signal`, `Inbound::VoiceSignal`, `POST /api/voice/signal`,
   and a `voicesignal` stream item. Presence still rides the engine beacon so the
   mesh knows who to dial. Room view has a mic-mute toggle and a per-peer live
-  dot. STUN comes from `/api/ice`; TURN isn't wired (creds aren't exposed), so
-  it's localhost / same-LAN until a browser TURN path lands.
+  dot. `/api/ice` serves the network's full ICE config — STUN plus the relay's
+  short-lived coturn TURN credentials — re-minted from the relay on each
+  request (`Engine::refresh_ice_servers`) so a long-lived `dante serve` never
+  hands the page an expired token.
 - **Screen share *(done — browser WebRTC)*:** a "🖥 Share screen" button in the
   voice room calls `getDisplayMedia` and `addTrack`s the video onto every peer
   `RTCPeerConnection`; adding / removing the track fires `onnegotiationneeded`

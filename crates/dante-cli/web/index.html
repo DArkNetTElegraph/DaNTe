@@ -346,7 +346,12 @@ img.sticker { display: block; max-width: 180px; max-height: 180px; object-fit: c
   border: 1px solid var(--divider); min-width: 96px; }
 .voice-tile.me { border-color: var(--accent); }
 .voice-tile.live { border-color: var(--ok, #3ba55d); box-shadow: 0 0 0 1px var(--ok, #3ba55d) inset; }
-.voice-tile .avatar.big { width: 56px; height: 56px; font-size: 18px; }
+.voice-tile .avatar.big { width: 56px; height: 56px; font-size: 18px; transition: box-shadow .1s ease; }
+/* speaking aura (Discord-style green ring while talking) */
+.voice-tile.speaking .avatar.big { box-shadow: 0 0 0 3px var(--ok, #3ba55d),
+  0 0 12px 2px color-mix(in srgb, var(--ok, #3ba55d) 55%, transparent); }
+.voice-member .avatar { transition: box-shadow .1s ease; }
+.voice-member.speaking .avatar { box-shadow: 0 0 0 2px var(--ok, #3ba55d); }
 .voice-tile-name { font-size: 12px; color: var(--text-muted); max-width: 140px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .voice-room-controls { display: flex; gap: 10px; margin-top: 10px; }
@@ -624,10 +629,26 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .date-divider span { font-size: 11px; font-weight: 700; letter-spacing: .02em; color: var(--text-faint);
   text-transform: uppercase; }
 /* ---- mute / deafen in the user panel ---- */
-.vc-btn { font-size: 15px; line-height: 1; }
-.vc-btn.on { color: #e0555c; position: relative; }
-.vc-btn.on::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 2px;
+.vc-btn.on { color: #e0555c; }
+#me-deafen.on { position: relative; }
+#me-deafen.on::after { content: ""; position: absolute; left: 5px; right: 5px; top: 50%; height: 2px;
   background: #e0555c; transform: rotate(-20deg); border-radius: 2px; }
+/* ---- category "+" add buttons ---- */
+.cat-add { border: 0; background: transparent; color: var(--text-faint); cursor: pointer;
+  width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; margin-left: auto; }
+.cat-add:hover { color: var(--text); background: var(--bg-hover); }
+.cat-add .ic { width: 14px; height: 14px; }
+/* ---- instant CSS tooltips (replace slow native title=) ---- */
+[data-tip] { position: relative; }
+[data-tip]:hover::after {
+  content: attr(data-tip); position: absolute; z-index: 60; pointer-events: none;
+  bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  background: var(--bg-raised); color: var(--text); border: 1px solid var(--border-strong, var(--divider));
+  padding: 4px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap;
+  box-shadow: var(--shadow-md, 0 6px 20px -6px rgba(0,0,0,.5)); }
+/* rail sits at the far left — show its tooltips to the right instead of above */
+.rail-btn[data-tip]:hover::after {
+  bottom: auto; left: calc(100% + 8px); top: 50%; transform: translateY(-50%); }
 #mention-popup { position: fixed; z-index: 95; background: var(--bg-pane); border: 1px solid var(--divider);
   border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.4); overflow: hidden; max-height: 220px; overflow-y: auto; }
 #mention-popup .mrow { padding: 6px 12px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
@@ -936,18 +957,18 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
     <header class="pane-head">
       <span id="pane-title">DaNTe</span>
       <span class="head-actions" id="pane-actions"></span>
-      <button class="icon-btn" id="btn-notif" data-icon="bell" title="Notifications"></button>
+      <button class="icon-btn" id="btn-notif" data-icon="bell" data-tip="Notifications"></button>
     </header>
     <div class="pane-scroll" id="pane-list"></div>
     <div id="user-panel">
       <div class="avatar" id="me-avatar">·</div>
       <div class="who">
-        <div class="fp" id="me-fp" title="click to copy">…</div>
+        <div class="fp" id="me-fp" data-tip="click to copy">…</div>
         <div class="sub" id="me-sub">connecting…</div>
       </div>
-      <button class="icon-btn vc-btn" id="me-mute" title="Mute">🎙</button>
-      <button class="icon-btn vc-btn" id="me-deafen" title="Deafen">🎧</button>
-      <button class="icon-btn" id="me-gear" title="Settings" data-icon="gear"></button>
+      <button class="icon-btn vc-btn" id="me-mute" data-tip="Mute"></button>
+      <button class="icon-btn vc-btn" id="me-deafen" data-tip="Deafen"></button>
+      <button class="icon-btn" id="me-gear" data-tip="Settings" data-icon="gear"></button>
     </div>
   </section>
 
@@ -957,20 +978,20 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
       <span class="title" id="chat-title"><span class="hash">#</span> …</span>
       <span class="topic" id="chat-topic"></span>
       <span class="spacer"></span>
-      <button class="icon-btn" id="btn-mute" title="Mute notifications" data-icon="bell" hidden></button>
-      <button class="icon-btn" id="btn-call" title="Start a voice call" data-icon="phone" hidden></button>
-      <button class="icon-btn" id="btn-contact" title="Save as contact" data-icon="star" hidden></button>
-      <button class="icon-btn" id="btn-leave" title="Leave channel" data-icon="log-out" hidden></button>
-      <button class="icon-btn" id="btn-delchan" title="Delete channel" data-icon="trash" hidden></button>
-      <button class="icon-btn" id="btn-block" title="Block" data-icon="ban" hidden></button>
-      <button class="icon-btn" id="btn-verify" title="Safety number" data-icon="shield" hidden></button>
-      <button class="icon-btn" id="btn-emoji" title="Custom emoji" data-icon="smile" hidden></button>
-      <button class="icon-btn" id="btn-invite" title="Invite by fingerprint" data-icon="user-plus" hidden></button>
-      <button class="icon-btn" id="btn-link" title="Create invite link" data-icon="link" hidden></button>
-      <button class="icon-btn" id="btn-pins" title="Pinned messages" data-icon="pin" hidden></button>
-      <button class="icon-btn" id="btn-more" title="More actions" data-icon="more" hidden></button>
-      <button class="icon-btn" id="btn-search" title="Search messages (Ctrl+K)" data-icon="search"></button>
-      <button class="icon-btn" id="btn-members" title="Toggle member list" data-icon="users"></button>
+      <button class="icon-btn" id="btn-mute" data-tip="Mute notifications" data-icon="bell" hidden></button>
+      <button class="icon-btn" id="btn-call" data-tip="Start a voice call" data-icon="phone" hidden></button>
+      <button class="icon-btn" id="btn-contact" data-tip="Save as contact" data-icon="star" hidden></button>
+      <button class="icon-btn" id="btn-leave" data-tip="Leave channel" data-icon="log-out" hidden></button>
+      <button class="icon-btn" id="btn-delchan" data-tip="Delete channel" data-icon="trash" hidden></button>
+      <button class="icon-btn" id="btn-block" data-tip="Block" data-icon="ban" hidden></button>
+      <button class="icon-btn" id="btn-verify" data-tip="Safety number" data-icon="shield" hidden></button>
+      <button class="icon-btn" id="btn-emoji" data-tip="Custom emoji" data-icon="smile" hidden></button>
+      <button class="icon-btn" id="btn-invite" data-tip="Invite by fingerprint" data-icon="user-plus" hidden></button>
+      <button class="icon-btn" id="btn-link" data-tip="Create invite link" data-icon="link" hidden></button>
+      <button class="icon-btn" id="btn-pins" data-tip="Pinned messages" data-icon="pin" hidden></button>
+      <button class="icon-btn" id="btn-more" data-tip="More actions" data-icon="more" hidden></button>
+      <button class="icon-btn" id="btn-search" data-tip="Search messages (Ctrl+K)" data-icon="search"></button>
+      <button class="icon-btn" id="btn-members" data-tip="Toggle member list" data-icon="users"></button>
       <input type="file" id="emoji-file" accept="image/png,image/jpeg" hidden>
     </header>
     <div id="callbar" hidden></div>
@@ -979,10 +1000,10 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
     <div id="replybar" hidden></div>
     <div class="composer">
       <form id="composer">
-        <button type="button" id="attach" class="ghost-icon" title="Attach a file (DMs only)" data-icon="paperclip" disabled></button>
+        <button type="button" id="attach" class="ghost-icon" data-tip="Attach a file (DMs only)" data-icon="paperclip" disabled></button>
         <input id="text" autocomplete="off" placeholder="Message" disabled />
-        <button type="button" id="emoji-pick" class="ghost-icon" title="Emoji" data-icon="smile" disabled></button>
-        <button type="button" id="sticker-pick" class="ghost-icon" title="Stickers" data-icon="image" disabled hidden></button>
+        <button type="button" id="emoji-pick" class="ghost-icon" data-tip="Emoji" data-icon="smile" disabled></button>
+        <button type="button" id="sticker-pick" class="ghost-icon" data-tip="Stickers" data-icon="image" disabled hidden></button>
         <button id="send" disabled>Send</button>
       </form>
       <input type="file" id="chat-file" hidden>
@@ -1071,6 +1092,7 @@ const ICONS = {
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  headphones: '<path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="2.5" y="13.5" width="4.5" height="7" rx="1.6"/><rect x="17" y="13.5" width="4.5" height="7" rx="1.6"/>',
 };
 function svgIcon(name) {
   return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
@@ -1192,6 +1214,10 @@ const dmLabel = fp => isSelf(fp)
   : (petname(fp) || username(fp) || short(fp));
 // Like dmLabel but "you" stays "you" for message authors.
 const authorLabel = fp => fp === "you" ? "you" : (petname(fp) || username(fp) || short(fp));
+// Voice contexts want your real name, not the "Private Note" DM label.
+const voiceName = fp => isSelf(fp)
+  ? (store.me.username || short(fp))
+  : (petname(fp) || username(fp) || short(fp));
 
 const LS = {
   get(k, d) { try { const v = localStorage.getItem("dante." + k); return v == null ? d : JSON.parse(v); } catch (_) { return d; } },
@@ -1472,32 +1498,32 @@ function renderRail() {
   rail.innerHTML = "";
 
   const dm = el("button", "rail-btn" + (isDM() ? " active" : ""), "DM");
-  dm.title = "Direct Messages";
+  dm.dataset.tip = "Direct Messages";
   dm.onclick = () => selectTarget("@dm", store.dms[0] ? store.dms[0].fp : null);
   rail.appendChild(dm);
   rail.appendChild(el("div", "rail-sep"));
 
   for (const name of store.servers()) {
     const b = el("button", "rail-btn" + (store.view.server === name ? " active" : ""), initials(name));
-    b.title = name;
+    b.dataset.tip = name;
     b.onclick = () => { const ch = store.channelsOf(name)[0]; selectTarget(name, ch ? "#" + ch.id : null); };
     rail.appendChild(b);
   }
 
   const add = el("button", "rail-btn add", "+");
-  add.title = "Create a server";
+  add.dataset.tip = "Create a server";
   add.onclick = createServerFlow;
   rail.appendChild(add);
 
   const join = el("button", "rail-btn add");
   join.innerHTML = svgIcon("link");
-  join.title = "Join with an invite link";
+  join.dataset.tip = "Join with an invite link";
   join.onclick = redeemFlow;
   rail.appendChild(join);
 
   const disc = el("button", "rail-btn add");
   disc.innerHTML = svgIcon("compass");
-  disc.title = "Browse public servers";
+  disc.dataset.tip = "Browse public servers";
   disc.onclick = discoverFlow;
   rail.appendChild(disc);
 }
@@ -1623,7 +1649,7 @@ function renderPane() {
   // Server settings overlay, not crammed next to the name.
   const gear = el("button", "icon-btn");
   setIcon(gear, "gear");
-  gear.title = "Server settings";
+  gear.dataset.tip = "Server settings";
   gear.onclick = () => openServerSettings(server);
   actions.appendChild(gear);
 
@@ -1633,7 +1659,8 @@ function renderPane() {
 
   const lbl = el("div", "group-label");
   lbl.appendChild(el("span", null, "Text Channels"));
-  const plus = el("button", null, "+"); plus.title = "Create channel"; plus.onclick = () => createChannelFlow(server);
+  const plus = el("button", "cat-add"); plus.dataset.tip = "Create text channel"; plus.innerHTML = svgIcon("plus");
+  plus.onclick = () => createChannelFlow(server, false);
   lbl.appendChild(plus);
   list.appendChild(lbl);
 
@@ -1649,9 +1676,13 @@ function renderPane() {
     list.appendChild(row);
   }
 
-  if (voiceChans.length) {
+  {
     const vl = el("div", "group-label");
     vl.appendChild(el("span", null, "Voice Channels"));
+    const vplus = el("button", "cat-add"); vplus.dataset.tip = "Create voice channel";
+    vplus.innerHTML = svgIcon("plus");
+    vplus.onclick = () => createChannelFlow(server, true);
+    vl.appendChild(vplus);
     list.appendChild(vl);
     for (const c of voiceChans) {
       const t = "#" + c.id;
@@ -1666,9 +1697,10 @@ function renderPane() {
       if (room.participants.length) {
         const pl = el("div", "voice-members");
         for (const fp of room.participants) {
-          const m = el("div", "voice-member");
-          m.appendChild(avatar(dmLabel(fp) || short(fp), fp));
-          m.appendChild(el("span", null, dmLabel(fp) || short(fp)));
+          const m = el("div", "voice-member" + (speakingSet.has(fp) ? " speaking" : ""));
+          m.dataset.fp = fp;
+          m.appendChild(avatar(voiceName(fp), fp));
+          m.appendChild(el("span", null, voiceName(fp)));
           pl.appendChild(m);
         }
         list.appendChild(pl);
@@ -2097,10 +2129,11 @@ function renderVoiceRoom(c, target) {
       const link = !mine && voiceRtc.peers.get(fp);
       const live = mine ? connected : !!(link && link.pc.connectionState === "connected");
       const tile = el("div", "voice-tile" + (mine ? " me" : "") + (live ? " live" : ""));
-      tile.appendChild(Object.assign(el("div", "avatar big"),
-        { textContent: initials(dmLabel(fp) || short(fp)) }));
-      const nm = el("span", "voice-tile-name", mine ? "You" : (dmLabel(fp) || short(fp)));
-      if (mine && connected && !voiceRtc.micOn) nm.textContent += " · muted";
+      tile.dataset.fp = fp;                    // for the speaking-indicator monitor
+      if (speakingSet.has(fp)) tile.classList.add("speaking");
+      tile.appendChild(avatar(voiceName(fp), fp, "avatar big"));
+      const nm = el("span", "voice-tile-name", mine ? "You" : voiceName(fp));
+      if (mine && connected && !micEnabled()) nm.textContent += " · muted";
       tile.appendChild(nm);
       stage.appendChild(tile);
     }
@@ -3033,23 +3066,24 @@ async function createServerFlow() {
   ], { ok: "Create" });
   if (!f || !f.name) return;
   try {
-    // The server always starts with a #general text channel (server-side).
+    // The server always starts with a #general text channel (server-side);
+    // add a matching "general" voice channel so it feels like Discord.
     const { ok: root } = await api.post("/api/server", { name: f.name, password: f.pw || "" });
+    try { await api.createChannel(root, "general", true); } catch (_) {}
     await refreshChannels();
     const c = store.channelsOf(f.name)[0];
     selectTarget(f.name, c ? "#" + c.id : null);
   } catch (e) { ui.say("Could not create server: " + e.message); }
 }
-async function createChannelFlow(server) {
+async function createChannelFlow(server, voice) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root — open a channel in this server first.");
-  const f = await ui.form("New channel", [
+  const f = await ui.form(voice ? "New voice channel" : "New text channel", [
     { name: "name", label: "Channel name", placeholder: "general" },
-    { name: "voice", label: "Voice channel (members join a call, no text)", type: "check", value: false },
   ], { ok: "Create" });
   if (!f || !f.name) return;
   try {
-    await api.createChannel(root, f.name, f.voice);
+    await api.createChannel(root, f.name, !!voice);
     await refreshChannels();
   } catch (e) { ui.say("Could not create channel (are you the host?): " + e.message); }
 }
@@ -3226,6 +3260,7 @@ async function callRtcStart(fp) {
   callRtc.peer = fp;
   callRtc.localStream = stream;
   applyVoiceCtl();                 // honour an existing mute/deafen
+  monitorStream(store.me.fingerprint, stream);
   callRtc.offered = false;
   callRtc.pending = [];
   callRtc.polite = store.me.fingerprint > fp;    // higher fp is the polite peer
@@ -3245,6 +3280,7 @@ async function callRtcStart(fp) {
     a.muted = voiceCtl.deafened;
     a.srcObject = e.streams[0];
     a.play().catch(() => {});
+    if (callRtc.peer) monitorStream(callRtc.peer, e.streams[0]);
   };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === "failed") callRtcStop();
@@ -3252,7 +3288,8 @@ async function callRtcStart(fp) {
 }
 
 function callRtcStop() {
-  if (callRtc.peer) callSignalSend(3, "");        // best-effort teardown
+  if (callRtc.peer) { callSignalSend(3, ""); stopMonitor(callRtc.peer); }  // best-effort teardown
+  stopMonitor(store.me.fingerprint);
   if (callRtc.pc) { try { callRtc.pc.close(); } catch (_) {} }
   if (callRtc.audio) { try { callRtc.audio.srcObject = null; } catch (_) {} }
   if (callRtc.localStream) { for (const t of callRtc.localStream.getTracks()) t.stop(); }
@@ -3280,12 +3317,68 @@ function toggleMute() { voiceCtl.muted = !voiceCtl.muted; applyVoiceCtl(); paint
 function toggleDeafen() { voiceCtl.deafened = !voiceCtl.deafened; applyVoiceCtl(); paintVoiceCtl(); renderCallbar(); }
 function paintVoiceCtl() {
   const mb = $("#me-mute"), db = $("#me-deafen");
-  if (mb) { mb.classList.toggle("on", voiceCtl.muted); mb.title = voiceCtl.muted ? "Unmute" : "Mute"; }
-  if (db) { db.classList.toggle("on", voiceCtl.deafened); db.title = voiceCtl.deafened ? "Undeafen" : "Deafen"; }
+  if (mb) {
+    mb.classList.toggle("on", voiceCtl.muted);
+    mb.dataset.tip = voiceCtl.muted ? "Unmute" : "Mute";
+    mb.innerHTML = svgIcon(voiceCtl.muted ? "mic-off" : "mic");
+  }
+  if (db) {
+    db.classList.toggle("on", voiceCtl.deafened);
+    db.dataset.tip = voiceCtl.deafened ? "Undeafen" : "Deafen";
+    db.innerHTML = svgIcon("headphones");
+  }
 }
 
 function callRtcMicOn() { return micEnabled(); }
 function callRtcToggleMic() { toggleMute(); }
+
+/* ---------- speaking indicator (Web Audio level meter) --------------
+   Each mic/remote stream gets an AnalyserNode; when its RMS crosses a
+   threshold that fingerprint is "speaking" and every [data-fp] element for
+   them (voice tiles, sidebar members) gets a `.speaking` class → a green
+   aura in CSS. Runs on a single rAF loop; benign no-op if Web Audio is
+   unavailable. Muted mic produces silence, so you don't light up when muted. */
+const speakingSet = new Set();
+const speakMon = new Map();   // fp -> { ctx, src, analyser, buf }
+let speakRaf = 0;
+function monitorStream(fp, stream) {
+  if (!fp || !stream || speakMon.has(fp)) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  let ctx, src, analyser;
+  try {
+    ctx = new AC();
+    ctx.resume && ctx.resume().catch(() => {});
+    src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    src.connect(analyser);
+  } catch (_) { return; }
+  speakMon.set(fp, { ctx, src, analyser, buf: new Uint8Array(analyser.fftSize) });
+  if (!speakRaf) speakRaf = requestAnimationFrame(speakTick);
+}
+function stopMonitor(fp) {
+  const m = speakMon.get(fp);
+  if (m) { try { m.src.disconnect(); m.ctx.close(); } catch (_) {} speakMon.delete(fp); }
+  if (speakingSet.delete(fp)) setSpeakingClass(fp, false);
+  if (!speakMon.size && speakRaf) { cancelAnimationFrame(speakRaf); speakRaf = 0; }
+}
+function setSpeakingClass(fp, on) {
+  for (const e of document.querySelectorAll("[data-fp]"))
+    if (e.dataset.fp === fp) e.classList.toggle("speaking", on);
+}
+function speakTick() {
+  speakRaf = speakMon.size ? requestAnimationFrame(speakTick) : 0;
+  for (const [fp, m] of speakMon) {
+    m.analyser.getByteTimeDomainData(m.buf);
+    let sum = 0;
+    for (let i = 0; i < m.buf.length; i++) { const v = (m.buf[i] - 128) / 128; sum += v * v; }
+    const speaking = Math.sqrt(sum / m.buf.length) > 0.045;
+    const was = speakingSet.has(fp);
+    if (speaking && !was) { speakingSet.add(fp); setSpeakingClass(fp, true); }
+    else if (!speaking && was) { speakingSet.delete(fp); setSpeakingClass(fp, false); }
+  }
+}
 
 // Called each poll: once the call is connected, the lower fp sends the offer;
 // when the call is gone or dead, tear the media leg down.
@@ -3579,6 +3672,7 @@ async function voiceRtcStart(channelId) {
   voiceRtc.localStream = stream;
   voiceRtc.micOn = true;
   applyVoiceCtl();                 // honour an existing mute/deafen
+  monitorStream(store.me.fingerprint, stream);
   voiceRtc.channelId = channelId;
   try {
     const ice = await api.get("/api/ice");
@@ -3594,6 +3688,7 @@ async function voiceRtcStart(channelId) {
 
 function voiceRtcStop() {
   sframeStop();
+  stopMonitor(store.me.fingerprint);
   for (const fp of [...voiceRtc.peers.keys()]) {
     voiceSignalSend(fp, 3, "");
     voicePeerClose(fp);
@@ -3674,6 +3769,7 @@ function voicePeerClose(fp) {
   try { p.pc.close(); } catch (_) {}
   if (p.audio) { try { p.audio.srcObject = null; } catch (_) {} }
   voiceRtc.peers.delete(fp);
+  stopMonitor(fp);
   voiceRerender();
 }
 
@@ -3711,6 +3807,7 @@ async function voicePeerConnect(fp, initiator) {
     if (!a) { a = new Audio(); a.autoplay = true; entry.audio = a; }
     a.muted = voiceCtl.deafened;
     a.srcObject = e.streams[0];
+    monitorStream(fp, e.streams[0]);
     a.play().catch(() => {});
     voiceRerender();
   };

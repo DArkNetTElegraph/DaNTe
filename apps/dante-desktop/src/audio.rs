@@ -19,9 +19,9 @@
 //! it needs no access to the `Engine` that moved into the serve task.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
+
+use crate::localapi::http;
 
 use dante_audio::{Capture, OpusCodec, Playback, FRAME_MS};
 use serde_json::Value;
@@ -185,24 +185,6 @@ fn frames_from_json(body: &str) -> Vec<Vec<u8>> {
 }
 
 // --- tiny localhost HTTP, so the bridge needs no HTTP client dependency ---
-
-fn http(port: u16, method: &str, path: &str, body: &str) -> std::io::Result<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_millis(1500)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(1500)))?;
-    let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(req.as_bytes())?;
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw)?;
-    Ok(raw
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_string())
-        .unwrap_or(raw))
-}
 
 fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write;

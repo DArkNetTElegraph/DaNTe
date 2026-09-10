@@ -611,6 +611,11 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .md-sub { font-size: .8em; color: var(--text-muted); }
 .md-list { margin: 2px 0; padding-left: 22px; }
 .md-list li { margin: 1px 0; }
+/* ---- date separator in the chat ---- */
+.date-divider { display: flex; align-items: center; gap: 10px; margin: 16px 6px 8px; }
+.date-divider::before, .date-divider::after { content: ""; flex: 1; height: 1px; background: var(--divider); }
+.date-divider span { font-size: 11px; font-weight: 700; letter-spacing: .02em; color: var(--text-faint);
+  text-transform: uppercase; }
 #mention-popup { position: fixed; z-index: 95; background: var(--bg-pane); border: 1px solid var(--divider);
   border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.4); overflow: hidden; max-height: 220px; overflow-y: auto; }
 #mention-popup .mrow { padding: 6px 12px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
@@ -1761,6 +1766,16 @@ function unreadBadge(row, t) {
   row.appendChild(b);
 }
 
+// Calendar-day key + a friendly label (Today / Yesterday / full date) for the
+// chat's date separators.
+function dayKey(ts) { const d = new Date(ts); return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate(); }
+function dayLabel(ts) {
+  const now = Date.now();
+  if (dayKey(ts) === dayKey(now)) return "Today";
+  if (dayKey(ts) === dayKey(now - 86400000)) return "Yesterday";
+  return new Date(ts).toLocaleDateString([], { year: "numeric", month: "long", day: "numeric" });
+}
+
 let msgPaintTs = 0;
 function renderChat() {
   const target = curTarget();
@@ -1903,8 +1918,20 @@ function renderChat() {
   }
 
   let lastAuthor = null;
+  let lastDay = null;
   const freshCut = msgPaintTs;   // groups newer than the last paint slide in
   for (const m of msgs) {
+    // Discord-style day separator when the calendar day changes.
+    if (m._at) {
+      const dk = dayKey(m._at);
+      if (dk !== lastDay) {
+        const div = el("div", "date-divider");
+        div.appendChild(el("span", null, dayLabel(m._at)));
+        log.appendChild(div);
+        lastDay = dk;
+        lastAuthor = null;   // re-show the author line after a divider
+      }
+    }
     if (m.kind === "file") {
       const g = groupShell(m, m.from === lastAuthor);
       if (m._at && m._at > freshCut - 80) g.node.classList.add("msg-fresh");

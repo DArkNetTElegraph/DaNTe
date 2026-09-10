@@ -668,6 +668,106 @@ async fn a_group_call_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn startup_reports_each_step_as_it_begins() {
+    use crate::BootStep;
+    use std::sync::{Arc, Mutex};
+
+    let relay = spawn_relay().await;
+    let seen: Arc<Mutex<Vec<BootStep>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let sink = {
+        let seen = Arc::clone(&seen);
+        Arc::new(move |s: BootStep| seen.lock().unwrap().push(s)) as crate::BootProgress
+    };
+
+    let _e = Engine::connect_with_progress(
+        Identity::generate(1_000),
+        &relay,
+        test_params(),
+        D,
+        None,
+        Some(&sink),
+    )
+    .await
+    .unwrap();
+
+    let steps = seen.lock().unwrap().clone();
+
+    // Reported in the order the work happens, and only for work that happened:
+    // there is no local store here, so nothing is restored.
+    assert_eq!(
+        steps,
+        vec![
+            BootStep::ConnectingRelay { endpoints: 1 },
+            BootStep::RelayConnected,
+            BootStep::OpeningStore,
+            BootStep::FetchingIce,
+            BootStep::PublishingKeyPackage,
+        ],
+        "startup steps, in order"
+    );
+
+    // The remaining steps (Announcing / PublishingPrekeys / Syncing / Ready)
+    // belong to `serve::run_on`, not to `connect`.
+    assert!(!steps.contains(&BootStep::Ready));
+}
+
+#[tokio::test]
+async fn startup_reports_restoring_state_when_there_is_a_store() {
+    use crate::BootStep;
+    use dante_identity::keystore;
+    use std::sync::{Arc, Mutex};
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-boot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("alice.state");
+    let ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+
+    {
+        let mut alice = Engine::connect(
+            keystore::open(&ks, b"pw").unwrap(),
+            &relay,
+            test_params(),
+            D,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap();
+        alice.announce("", now).await.unwrap();
+        alice.persist().unwrap();
+    }
+
+    let seen: Arc<Mutex<Vec<BootStep>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = {
+        let seen = Arc::clone(&seen);
+        Arc::new(move |s: BootStep| seen.lock().unwrap().push(s)) as crate::BootProgress
+    };
+
+    let _alice = Engine::connect_with_progress(
+        keystore::open(&ks, b"pw").unwrap(),
+        &relay,
+        test_params(),
+        D,
+        Some(store.clone()),
+        Some(&sink),
+    )
+    .await
+    .unwrap();
+
+    let steps = seen.lock().unwrap().clone();
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, BootStep::RestoringState { .. })),
+        "a second start rebuilds from the store and says so: {steps:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn channel_message_ids_survive_a_restart() {
     use dante_identity::keystore;
 

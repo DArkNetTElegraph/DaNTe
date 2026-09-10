@@ -2,12 +2,135 @@
 <meta charset="utf-8">
 <title>DaNTe</title>
 <style>
-  html, body { height: 100%; margin: 0; background: #29244a; color: #e2e2e2;
-    font: 14px system-ui, sans-serif; display: grid; place-items: center; }
+  :root {
+    --bg: #0f1117;
+    --panel: #161925;
+    --text: #e6e8f0;
+    --muted: #878da3;
+    --accent: #5865f2;
+    --ok: #3ba55d;
+    --bad: #d83c3e;
+  }
+  html, body {
+    height: 100%; margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; place-items: center; user-select: none; cursor: default;
+  }
+  main { width: 380px; padding: 0 24px; }
+  .mark { display: grid; place-items: center; margin-bottom: 22px; }
+  .mark svg { width: 54px; height: 54px; }
+  .mark .edge { stroke: var(--accent); stroke-width: 7; stroke-linecap: round; }
+  .mark .node { fill: var(--text); }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; text-align: center; }
+  .sub { font-size: 12.5px; color: var(--muted); text-align: center; margin: 0 0 20px; }
+
+  /* The bar is indeterminate until a step reports a known position: startup
+     length depends on the relay, the store size and the PoW difficulty, so a
+     fake percentage would be a lie. */
+  .track { height: 4px; border-radius: 3px; background: var(--panel); overflow: hidden; }
+  .fill {
+    height: 100%; width: 30%; border-radius: 3px; background: var(--accent);
+    transition: width .35s ease, background-color .2s ease;
+  }
+  .track.busy .fill { width: 35%; animation: sweep 1.15s ease-in-out infinite; }
+  @keyframes sweep {
+    0%   { transform: translateX(-115%); }
+    100% { transform: translateX(320%); }
+  }
+
+  .now { margin-top: 14px; font-size: 13px; text-align: center; min-height: 19px; }
+  .detail { margin-top: 3px; font-size: 11.5px; color: var(--muted); text-align: center; min-height: 17px; }
+
+  /* Completed steps, oldest first — so you can see what it already did, not
+     just what it is doing. */
+  ol { list-style: none; margin: 18px 0 0; padding: 0; font-size: 11.5px; color: var(--muted); }
+  ol li { display: flex; gap: 7px; align-items: baseline; padding: 1px 0; }
+  ol li .tick { color: var(--ok); }
+  ol li .ms { margin-left: auto; font-variant-numeric: tabular-nums; opacity: .75; }
+
+  .failed .fill { background: var(--bad); width: 100% !important; animation: none; }
+  .failed .now { color: var(--bad); }
+  button {
+    display: none; margin: 18px auto 0; padding: 7px 16px; font: inherit; font-size: 13px;
+    color: var(--text); background: var(--panel); border: 1px solid #2a2f42;
+    border-radius: 6px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  .failed button { display: block; }
 </style>
-<p>Starting the DaNTe engine…</p>
+
+<main>
+  <div class="mark">
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <line class="edge" x1="50" y1="26" x2="26" y2="70" />
+      <line class="edge" x1="50" y1="26" x2="74" y2="70" />
+      <line class="edge" x1="26" y1="70" x2="74" y2="70" />
+      <circle class="node" cx="50" cy="26" r="11" />
+      <circle class="node" cx="26" cy="70" r="11" />
+      <circle class="node" cx="74" cy="70" r="11" />
+    </svg>
+  </div>
+
+  <h1>DaNTe</h1>
+  <p class="sub">starting up</p>
+
+  <div class="track busy" id="track"><div class="fill"></div></div>
+  <div class="now" id="now">Waking the engine…</div>
+  <div class="detail" id="detail"></div>
+  <ol id="done"></ol>
+  <button id="anyway">Continue anyway</button>
+</main>
+
 <script>
-  // The desktop shell opens the real UI (served by dante_cli::serve on an
-  // ephemeral localhost port) in this window directly; this file only exists
-  // to satisfy Tauri's frontendDist requirement and as a first-paint splash.
+  // Every line here is driven by a real `BootStep` emitted from the Rust side
+  // as that step *begins* — there is no scripted sequence and no fake timer.
+  const $now = document.getElementById("now");
+  const $detail = document.getElementById("detail");
+  const $done = document.getElementById("done");
+  const $track = document.getElementById("track");
+  const $anyway = document.getElementById("anyway");
+
+  let started = performance.now();
+  let current = null;
+
+  function land(label) {
+    if (!current) return;
+    const li = document.createElement("li");
+    const ms = Math.max(0, Math.round(performance.now() - current.at));
+    li.innerHTML = '<span class="tick">✓</span><span></span><span class="ms"></span>';
+    li.children[1].textContent = current.label;
+    li.children[2].textContent = ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+    $done.appendChild(li);
+    current = null;
+  }
+
+  function onStep(p) {
+    if (p.step === "failed") {
+      land();
+      document.body.classList.add("failed");
+      $track.classList.remove("busy");
+      $now.textContent = "Startup failed";
+      $detail.textContent = p.detail || "";
+      return;
+    }
+    if (p.step === "ready") {
+      land();
+      $track.classList.remove("busy");
+      $now.textContent = "Ready";
+      $detail.textContent = "";
+      return;
+    }
+    land();
+    current = { label: p.label, at: performance.now() };
+    $now.textContent = p.label;
+    $detail.textContent = p.detail || "";
+  }
+
+  const tauri = window.__TAURI__;
+  if (tauri && tauri.event) {
+    tauri.event.listen("boot", (e) => onStep(e.payload));
+  }
+  $anyway.addEventListener("click", () => {
+    if (tauri && tauri.core) tauri.core.invoke("open_app_anyway");
+  });
 </script>

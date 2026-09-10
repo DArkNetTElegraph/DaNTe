@@ -574,6 +574,14 @@ pub struct Bootstrap {
     pub store_path: Option<PathBuf>,
     pub params: LedgerParams,
     pub pow: Difficulty,
+    /// Where to report startup steps, if anyone is showing them.
+    ///
+    /// `Engine::connect` reports its own half; the rest of startup — the
+    /// registration proof-of-work, prekeys, the first sync — happens here, so
+    /// a client that wants a complete picture has to be told from both places.
+    /// `dante serve` leaves this `None` and prints to stderr instead; the
+    /// desktop shell uses it to drive its boot screen.
+    pub progress: Option<dante_core::BootProgress>,
 }
 
 /// Insertion order + `id -> (mime, bytes)` for received files kept this session.
@@ -990,17 +998,35 @@ async fn engine_task(
 
     eprintln!("announcing to the relay ...");
     let onboard_name = engine_shared.onboard_name.lock().await.clone();
+    let progress = engine_shared.boot.progress.clone();
+    let step = |s: dante_core::BootStep| {
+        if let Some(p) = &progress {
+            p(s);
+        }
+    };
     if let Err(e) = async {
+        step(dante_core::BootStep::Announcing {
+            pow_bits: engine_shared.boot.pow.bits,
+        });
         engine.announce_if_stale(&onboard_name, now_ms()).await?;
+        step(dante_core::BootStep::PublishingPrekeys);
         engine.publish_prekeys().await?;
+        step(dante_core::BootStep::Syncing);
         engine.sync(now_ms()).await?;
         Ok::<_, dante_core::CoreError>(())
     }
     .await
     {
         eprintln!("engine startup error: {e}");
+        // The client stays up: most of the app works against local state, and
+        // the tick loop keeps retrying. Say what broke rather than hanging on
+        // a spinner that will never finish.
+        step(dante_core::BootStep::Failed {
+            error: e.to_string(),
+        });
     } else {
         eprintln!("ready");
+        step(dante_core::BootStep::Ready);
     }
     if let Some(name) = engine.my_username() {
         *engine_shared.my_name.lock().await = name;

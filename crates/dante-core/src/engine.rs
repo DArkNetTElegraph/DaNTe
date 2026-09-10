@@ -626,6 +626,73 @@ pub struct Engine {
     dirty: bool,
 }
 
+/// One step of client startup, handed to a [`BootProgress`] sink as it begins.
+///
+/// Startup is not instant and not uniform: entering the DHT, dialling relays,
+/// decrypting the local store, rebuilding MLS state for every channel, and
+/// solving the registration proof-of-work are each separately slow, and which
+/// one dominates depends on the deployment. Reporting the *step* — with the
+/// scale of the work where it is known — lets a client say what it is waiting
+/// on rather than showing an unmoving spinner.
+///
+/// Steps arrive in order and each is reported when it *starts*. Not every step
+/// occurs in every startup: a client with no local store never reports
+/// [`BootStep::RestoringState`], and only DHT bootstrap reports
+/// [`BootStep::DiscoveringRelays`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BootStep {
+    /// Entering the libp2p DHT to find relays from their provider records.
+    DiscoveringRelays {
+        /// How many bootstrap addresses we were given.
+        bootstrap: usize,
+    },
+    /// Dialling the relay endpoints directly.
+    ConnectingRelay {
+        /// How many endpoints are in the failover list.
+        endpoints: usize,
+    },
+    /// A relay answered.
+    RelayConnected,
+    /// Decrypting the local store.
+    OpeningStore,
+    /// Rebuilding sessions, channels and MLS group state from the store. This
+    /// is CPU work and scales with the counts reported here.
+    RestoringState {
+        /// Channels whose MLS state has to be imported.
+        channels: usize,
+        /// Direct-message sessions (Double Ratchet) to restore.
+        conversations: usize,
+    },
+    /// Asking the relay for this network's STUN / TURN servers.
+    FetchingIce,
+    /// Publishing an MLS key package so peers can add us to group calls.
+    PublishingKeyPackage,
+    /// Solving the registration proof-of-work and announcing to the relay.
+    /// Memory-hard by design, so on a cold start this is usually the longest
+    /// single step.
+    Announcing {
+        /// Difficulty in leading zero bits — higher is exponentially slower.
+        pow_bits: u8,
+    },
+    /// Publishing our prekey bundle so others can start conversations.
+    PublishingPrekeys,
+    /// Pulling the ledger and mailbox up to date.
+    Syncing,
+    /// Startup finished; the UI is usable.
+    Ready,
+    /// Startup failed. The client stays up — most of the app still works
+    /// offline — but the message says what broke.
+    Failed {
+        /// Human-readable cause.
+        error: String,
+    },
+}
+
+/// A sink for [`BootStep`]s. Cheap and non-blocking: it runs on the startup
+/// task itself.
+pub type BootProgress = std::sync::Arc<dyn Fn(BootStep) + Send + Sync>;
+
 impl Engine {
     /// Connect to a relay and build an engine around `identity`, restoring
     /// prior state from `store_path` if that file exists (otherwise a fresh
@@ -644,6 +711,31 @@ impl Engine {
         pow: Difficulty,
         store_path: Option<PathBuf>,
     ) -> Result<Self, CoreError> {
+        Self::connect_with_progress(identity, relay_addr, params, pow, store_path, None).await
+    }
+
+    /// [`Engine::connect`], reporting each step to `progress` as it begins.
+    ///
+    /// Startup does real work — entering the DHT, dialling relays, decrypting
+    /// and rebuilding local state, republishing keys — and on a cold start that
+    /// is tens of seconds. A client that renders nothing until it returns looks
+    /// hung, so every step is handed out as it starts rather than after.
+    ///
+    /// The callback runs on this task: keep it cheap (send on a channel, emit
+    /// an event) and never block in it.
+    pub async fn connect_with_progress(
+        identity: Identity,
+        relay_addr: &str,
+        params: LedgerParams,
+        pow: Difficulty,
+        store_path: Option<PathBuf>,
+        progress: Option<&BootProgress>,
+    ) -> Result<Self, CoreError> {
+        let step = |s: BootStep| {
+            if let Some(p) = progress {
+                p(s);
+            }
+        };
         #[cfg(feature = "p2p")]
         let mut transport_node = None;
         // When the transport is libp2p, the same node also carries DHT prekeys
@@ -662,6 +754,16 @@ impl Engine {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect();
+
+        step(if discover_bootstrap.is_some() {
+            BootStep::DiscoveringRelays {
+                bootstrap: relay_addrs.len(),
+            }
+        } else {
+            BootStep::ConnectingRelay {
+                endpoints: relay_addrs.len(),
+            }
+        });
 
         let client = if discover_bootstrap.is_some() {
             #[cfg(feature = "p2p")]
@@ -703,6 +805,9 @@ impl Engine {
             Client::connect_multi(&relay_addrs).await?
         };
 
+        step(BootStep::RelayConnected);
+
+        step(BootStep::OpeningStore);
         let restored = match &store_path {
             Some(p) => store::load(p, &identity)?,
             None => None,
@@ -767,6 +872,10 @@ impl Engine {
         };
 
         if let Some(s) = restored {
+            step(BootStep::RestoringState {
+                channels: s.channels.len(),
+                conversations: s.sessions.len(),
+            });
             engine.prekeys = PreKeySecrets::import(s.prekeys);
             engine.sessions = s
                 .sessions
@@ -955,10 +1064,12 @@ impl Engine {
 
         // Learn this network's ICE servers (STUN, short-lived TURN creds) from
         // the relay, so calls can traverse NAT. Best-effort.
+        step(BootStep::FetchingIce);
         let _ = engine.refresh_ice_servers().await;
 
         // Publish an MLS KeyPackage so peers can add us to their group calls.
         // Best-effort.
+        step(BootStep::PublishingKeyPackage);
         let _ = engine.refresh_mls_key_package().await;
 
         Ok(engine)

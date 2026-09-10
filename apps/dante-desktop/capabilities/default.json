@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the DaNTe window is allowed to reach: the boot screen listens for engine progress events, and the shell raises OS notifications. Nothing else is granted — the real UI is ordinary web content served over localhost and uses no Tauri APIs.",
+  "windows": ["main"],
+  "permissions": ["core:default", "notification:default"]
+}

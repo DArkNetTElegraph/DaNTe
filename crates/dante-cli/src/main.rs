@@ -249,6 +249,9 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         store_path,
         params,
         pow,
+        // `serve` narrates startup on stderr; the structured sink is for the
+        // desktop shell's boot screen.
+        progress: None,
     };
     serve::run(existing, &http, boot).await
 }

@@ -42,8 +42,14 @@ jobs:
           command: check advisories bans licenses sources
 
   desktop:
-    name: desktop shell
-    runs-on: ubuntu-latest
+    name: desktop shell (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both targets are shipped, so both are built. Don't let one platform's
+      # failure hide the other's result.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -56,7 +62,10 @@ jobs:
       # because it needs these: a webview + GTK stack for Tauri, and libopus +
       # ALSA for the mic/speaker bridge. The other jobs must stay free of them,
       # which is why this is a separate runner rather than a workspace member.
+      # Windows needs none of it: WebView2 ships with the OS and the audio
+      # backend is WASAPI.
       - name: System libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -72,10 +81,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/dante-desktop
+          key: ${{ matrix.os }}
 
       # Being detached, this crate is invisible to the root `cargo fmt --all`
       # and `clippy --workspace` above — so it gets its own checks here.
       - name: rustfmt
+        if: runner.os == 'Linux'
         working-directory: apps/dante-desktop
         run: cargo fmt --check
 

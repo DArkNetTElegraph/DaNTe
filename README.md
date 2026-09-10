@@ -61,9 +61,11 @@ above — it states precisely what is and is not protected.
 - **1:1 and group call audio**: the engine has the full WebRTC + Opus transport,
   but `dante serve` has no browser microphone path for these — only voice
   channels do. Real mic / speaker for 1:1 needs the desktop shell.
-- **Restart gaps**: a few client-side derivations (reaction / pin / edit
-  authorship, the "forwarded from" chip) don't fully survive a client restart.
-  Channel and group-call MLS state *do* persist.
+- **Restart gaps**: channel history now persists each message's relay-log
+  `seq` (plus `reply_to` / `forwarded_from`), so restored messages can still be
+  reacted to, pinned, replied to and edited. One gap remains: a channel history
+  *backfilled from the host* carries no `seq` on the wire, so those lines stay
+  unkeyed until the protocol carries one.
 - **Multi-relay channel writes** converge via rendezvous hashing while every
   relay is up; a relay that flaps then recovers can briefly double-sequence one
   channel (the step-down rule converges it within a few frames). A true network

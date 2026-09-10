@@ -643,6 +643,108 @@ async fn a_group_call_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn channel_message_ids_survive_a_restart() {
+    use dante_identity::keystore;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let dir = std::env::temp_dir().join(format!("dante-e2e-hist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = dir.join("alice.state");
+
+    let mut host = engine(&relay).await;
+    let alice_ks = keystore::seal(&Identity::generate(now), b"pw").unwrap();
+    let alice_id = *keystore::open(&alice_ks, b"pw").unwrap().id().as_bytes();
+
+    let chan;
+    let (first_seq, reply_seq, fwd_seq);
+    {
+        let mut alice = Engine::connect(
+            keystore::open(&alice_ks, b"pw").unwrap(),
+            &relay,
+            test_params(),
+            D,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap();
+        for e in [&mut host, &mut alice] {
+            e.announce("", now).await.unwrap();
+            e.publish_prekeys().await.unwrap();
+        }
+        for e in [&mut host, &mut alice] {
+            e.sync(now).await.unwrap();
+        }
+
+        let server = host.create_server("lodge", now).await.unwrap();
+        chan = host.create_channel(&server, "general", true, None).unwrap();
+        invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+        for _ in 0..8 {
+            for e in [&mut host, &mut alice] {
+                e.sync(now).await.unwrap();
+                e.receive_all(now).await.unwrap();
+            }
+        }
+
+        first_seq = alice.send_channel(&chan, "first", now).await.unwrap();
+        reply_seq = alice
+            .send_channel_reply(&chan, first_seq, "answering", now)
+            .await
+            .unwrap();
+        fwd_seq = alice
+            .forward_to_channel(&chan, "bob", "passed along", now)
+            .await
+            .unwrap();
+        assert!(first_seq != 0, "the relay assigned a seq");
+
+        alice.persist().unwrap();
+    } // alice's process exits
+
+    let mut alice = Engine::connect(
+        keystore::open(&alice_ks, b"pw").unwrap(),
+        &relay,
+        test_params(),
+        D,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+
+    let mine: Vec<_> = alice
+        .channel_history()
+        .iter()
+        .filter(|e| e.channel_id == chan && e.outgoing)
+        .collect();
+    assert_eq!(mine.len(), 3, "all three of our messages replayed");
+
+    // Without the seq, reactions / pins / edits have nothing to key on after a
+    // restart -- which is what made a restored message uneditable.
+    assert_eq!(mine[0].seq, first_seq);
+    assert_eq!(mine[1].seq, reply_seq);
+    assert_eq!(mine[2].seq, fwd_seq);
+
+    assert_eq!(mine[1].reply_to, Some(first_seq), "the reply still quotes");
+    assert_eq!(
+        mine[2].forwarded_from.as_deref(),
+        Some("bob"),
+        "the forwarded-from chip survives"
+    );
+    assert_eq!(mine[0].reply_to, None);
+    assert_eq!(mine[0].forwarded_from, None);
+    drop(mine);
+
+    // The map that authorises an edit is reseeded from the replayed history,
+    // so a message we sent before the restart is still ours to change. This
+    // used to fail with "unknown message (or sent before restart)".
+    alice
+        .edit_channel_message(&chan, first_seq, "edited after the restart", now)
+        .await
+        .expect("the author can still edit a pre-restart message");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_revoked_identity_can_no_longer_be_messaged() {
     use dante_identity::RevokeReason;
 

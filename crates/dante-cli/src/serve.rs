@@ -943,9 +943,11 @@ async fn engine_task(
                     short_id(&e.sender)
                 },
                 text: e.text.clone(),
-                ref_seq: 0,
-                reply_to: None,
-                forwarded_from: None,
+                // Persisted now, so a replayed message keeps the id reactions,
+                // pins and edits key on — and the reply / forward framing.
+                ref_seq: e.seq,
+                reply_to: e.reply_to,
+                forwarded_from: e.forwarded_from.clone(),
             });
         }
     }

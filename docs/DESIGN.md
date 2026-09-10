@@ -776,9 +776,10 @@ infrastructure. Reached. ---**
   never comes back through `poll_channels`. `serve` `POST /api/edit
   {channel,seq,text}` (empty text deletes); own sent messages now carry a
   real `ref_seq`; the SPA folds the edit in, shows `(edited)` / `(message
-  deleted)`, and hover ✎/🗑 on your own lines. CLI `/edit` `/delete`. Same
-  restart caveat as reactions (authorship of a pre-restart message isn't
-  re-derivable).
+  deleted)`, and hover ✎/🗑 on your own lines. CLI `/edit` `/delete`.
+  Authorship is persisted in `channel_edits`, and since `ChannelHistoryEntry`
+  carries the message's `seq`, a restored message is still editable by its
+  author.
 - **Replies** *(done)*: `Content::Reply { target_seq, text }` rides the channel
   log — an ordinary editable/deletable message that also carries the `seq` it
   answers. `ChannelMessage.reply_to: Option<u64>`;
@@ -829,8 +830,8 @@ infrastructure. Reached. ---**
   the SPA/CLI strip and render as a chip. `serve` `POST /api/forward
   {to,origin,text}` routes to either. SPA: an ↪ hover action on any message
   opens a destination picker (channels + DMs). CLI `/forward <#chan|fp>
-  <origin> <text>`. The channel `forwarded_from` isn't persisted, so the chip
-  is lost after a restart (same class of caveat as reactions/edits).
+  <origin> <text>`. The channel `forwarded_from` is persisted alongside the
+  history entry, so the chip survives a restart.
 - **Unread counts + per-conversation mute** *(done, client-side)*: the SPA
   tracks an unread *count* per DM / channel (was a binary dot), shows it as a
   badge on the sidebar row, and reflects the total in the browser tab title.

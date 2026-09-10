@@ -77,6 +77,15 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# Every test binary statically links the whole tree (webrtc, libp2p, openmls,
+# ring). At the default `debug = true` that is ~350 MB of DWARF per binary, and
+# cargo never prunes the copy it wrote for the previous source hash — a few days
+# of building runs to tens of gigabytes. Line tables keep backtraces pointing at
+# file:line, which is what we actually read, at a fraction of the size.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 # Crypto and hashing want optimization even in dev/test.
 [profile.dev.package."*"]
 opt-level = 2

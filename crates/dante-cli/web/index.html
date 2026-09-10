@@ -605,6 +605,12 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .md-spoiler { background: var(--text); color: transparent; border-radius: 4px; cursor: pointer;
   padding: 0 3px; transition: color .08s; }
 .md-spoiler.revealed { background: color-mix(in srgb, var(--text) 12%, transparent); color: inherit; }
+.md-h1 { font-size: 1.35em; font-weight: 700; line-height: 1.25; margin: 2px 0; }
+.md-h2 { font-size: 1.18em; font-weight: 700; line-height: 1.25; margin: 2px 0; }
+.md-h3 { font-size: 1.05em; font-weight: 700; line-height: 1.25; margin: 2px 0; }
+.md-sub { font-size: .8em; color: var(--text-muted); }
+.md-list { margin: 2px 0; padding-left: 22px; }
+.md-list li { margin: 1px 0; }
 #mention-popup { position: fixed; z-index: 95; background: var(--bg-pane); border: 1px solid var(--divider);
   border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.4); overflow: hidden; max-height: 220px; overflow-y: auto; }
 #mention-popup .mrow { padding: 6px 12px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
@@ -2846,7 +2852,8 @@ function richText(s) {
    escaping cannot contain a quote or angle bracket, so they are safe in an
    href. Supports: ```code blocks```, `inline code`, **bold**, *italic* / _italic_,
    ***bold italic***, __underline__, ~~strike~~, ||spoiler||, > blockquotes,
-   :emoji:, @mentions, links, and line breaks. */
+   # / ## / ### headers, -# subtext, - / 1. lists, [masked](links), bare links,
+   :emoji:, @mentions, and line breaks. */
 function mdRender(src) {
   const codes = [];
   const stash = (h) => "\u0000" + (codes.push(h) - 1) + "\u0000";
@@ -2877,7 +2884,14 @@ function mdRender(src) {
     const me = hit === store.me.fingerprint;
     return `<span class="mention${me ? " mention-me" : ""}" title="${esc(hit)}">@${esc(mentionLabel(hit))}</span>`;
   });
-  // 6. Autolink http(s). NB esc() (textContent->innerHTML) does NOT escape
+  // 6a. Masked links [label](url) — restricted to http(s); href quote-escaped.
+  // Stash the finished anchor so the bare-autolink pass below can't re-match the
+  // URL sitting inside its href.
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => {
+    const href = url.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    return stash(`<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+  });
+  // 6b. Autolink bare http(s). NB esc() (textContent->innerHTML) does NOT escape
   // double quotes, so a URL can carry a `"` that would break out of the href
   // attribute — quote-escape it explicitly. The visible text is in element
   // content position, where a bare quote is harmless.
@@ -2887,23 +2901,46 @@ function mdRender(src) {
     const href = url.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
     return `<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>` + tail;
   });
-  // 7. Blockquotes + line breaks. Code tokens are single-line, so this is safe.
-  const parts = [];
-  let quote = [];
-  const flush = () => { if (quote.length) { parts.push({ q: quote }); quote = []; } };
-  for (const ln of s.split("\n")) {
-    const qm = ln.match(/^&gt;\s?(.*)$/);
-    if (qm) quote.push(qm[1]);
-    else { flush(); parts.push({ t: ln }); }
-  }
-  flush();
+  // 7. Block structure: headers, subtext, blockquotes, lists, and line breaks.
+  // Code tokens are single-line, so this is safe.
+  const lines = s.split("\n");
   let out = "";
   let prevText = false;
-  for (const p of parts) {
-    if (p.q) { out += '<blockquote class="md-quote">' + p.q.join("<br>") + "</blockquote>"; prevText = false; }
-    else { out += (prevText ? "<br>" : "") + p.t; prevText = true; }
+  let li = 0;
+  while (li < lines.length) {
+    const ln = lines[li];
+    // Blockquote: group consecutive "> " lines.
+    let mm = ln.match(/^&gt;\s?(.*)$/);
+    if (mm) {
+      const buf = [];
+      while (li < lines.length && (mm = lines[li].match(/^&gt;\s?(.*)$/))) { buf.push(mm[1]); li++; }
+      out += '<blockquote class="md-quote">' + buf.join("<br>") + "</blockquote>";
+      prevText = false; continue;
+    }
+    // Headers / subtext (check -# before the "- " list rule).
+    if ((mm = ln.match(/^###\s+(.*)$/))) { out += '<div class="md-h3">' + mm[1] + "</div>"; prevText = false; li++; continue; }
+    if ((mm = ln.match(/^##\s+(.*)$/)))  { out += '<div class="md-h2">' + mm[1] + "</div>"; prevText = false; li++; continue; }
+    if ((mm = ln.match(/^#\s+(.*)$/)))   { out += '<div class="md-h1">' + mm[1] + "</div>"; prevText = false; li++; continue; }
+    if ((mm = ln.match(/^-#\s+(.*)$/)))  { out += '<div class="md-sub">' + mm[1] + "</div>"; prevText = false; li++; continue; }
+    // Unordered list.
+    if (/^[-*]\s+\S/.test(ln)) {
+      const buf = [];
+      while (li < lines.length && /^[-*]\s+/.test(lines[li])) { buf.push("<li>" + lines[li].replace(/^[-*]\s+/, "") + "</li>"); li++; }
+      out += '<ul class="md-list">' + buf.join("") + "</ul>";
+      prevText = false; continue;
+    }
+    // Ordered list.
+    if (/^\d+\.\s+\S/.test(ln)) {
+      const buf = [];
+      while (li < lines.length && /^\d+\.\s+/.test(lines[li])) { buf.push("<li>" + lines[li].replace(/^\d+\.\s+/, "") + "</li>"); li++; }
+      out += '<ol class="md-list">' + buf.join("") + "</ol>";
+      prevText = false; continue;
+    }
+    // Plain line.
+    out += (prevText ? "<br>" : "") + ln;
+    prevText = true; li++;
   }
-  // 8. Restore code spans.
+  // 8. Restore code spans and stashed links.
   return out.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[+i] || "");
 }
 

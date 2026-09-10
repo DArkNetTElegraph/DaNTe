@@ -168,6 +168,31 @@ async fn two_engines_exchange_e2e_dms_through_a_relay() {
 }
 
 #[tokio::test]
+async fn a_relay_without_an_ice_policy_does_not_wipe_known_servers() {
+    // A relay whose operator configured no STUN/TURN. `client` can land here
+    // after failing over from a sibling that did have one.
+    let relay = spawn_relay_with_ice(dante_relay::state::IcePolicy::default()).await;
+    let mut e = engine(&relay).await;
+    assert!(
+        e.ice_servers().is_empty(),
+        "nothing to learn from this relay"
+    );
+
+    let known = vec![dante_voice::IceServer {
+        urls: vec!["turn:turn.example.org:3478".into()],
+        username: "1789000000".into(),
+        credential: "c2VjcmV0".into(),
+    }];
+    e.set_ice_servers(known.clone());
+
+    e.refresh_ice_servers().await.expect("refresh succeeds");
+
+    // Dropping these would cost every peer behind a symmetric NAT its relay
+    // candidate, silently, on a hop the user never sees.
+    assert_eq!(e.ice_servers(), known.as_slice());
+}
+
+#[tokio::test]
 async fn engine_learns_ice_servers_from_the_relay() {
     let ice = dante_relay::state::IcePolicy {
         stun: vec!["stun:stun.example.org:3478".into()],

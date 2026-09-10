@@ -1908,6 +1908,14 @@ function renderChat() {
   }
 
   const msgs = store.msgsFor(target);
+  // Preserve the reader's scroll: the log is rebuilt on every poll/render, and
+  // it used to snap to the bottom each time — yanking you down while you were
+  // reading history. Only auto-scroll if you were already near the bottom, or
+  // you just switched into this conversation.
+  const switched = log.dataset.target !== target;
+  const nearBottom = switched || (log.scrollHeight - log.scrollTop - log.clientHeight < 80);
+  const keepScroll = log.scrollTop;
+  log.dataset.target = target;
   log.innerHTML = "";
   if (!msgs.length) {
     log.appendChild(el("div", "empty", "No messages yet — say hello."));
@@ -1999,7 +2007,8 @@ function renderChat() {
     log.appendChild(g.node);
     lastAuthor = m.from;
   }
-  log.scrollTop = log.scrollHeight;
+  // Stick to the bottom only when appropriate; otherwise hold the reader's spot.
+  log.scrollTop = nearBottom ? log.scrollHeight : keepScroll;
   msgPaintTs = Date.now();
   renderCallbar();
   renderReplyBar();

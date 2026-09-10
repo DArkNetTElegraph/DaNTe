@@ -66,6 +66,14 @@ pub struct ChannelHistoryEntry {
     pub ts_ms: u64,
     /// The message text.
     pub text: String,
+    /// The relay-log sequence number — the stable id reactions, pins and edits
+    /// point at. 0 when unknown (a store written before this was persisted, or
+    /// a host history backfill, which carries no seq on the wire).
+    pub seq: u64,
+    /// If this message is a reply, the `seq` it answers.
+    pub reply_to: Option<u64>,
+    /// If this message was forwarded in, the origin label the forwarder set.
+    pub forwarded_from: Option<String>,
 }
 
 /// A persisted channel-message edit / delete.
@@ -445,6 +453,24 @@ fn encode_state(s: &PersistedState) -> Vec<u8> {
     for gc in &s.group_calls {
         w.fixed(&gc.channel_id).bytes(&gc.mls);
     }
+
+    // Per-message channel metadata, aligned positionally with
+    // `channel_history`. Split out as its own trailing section so a store
+    // written before it still decodes — those entries simply keep the struct
+    // defaults, which is exactly the old behaviour.
+    w.u32(s.channel_history.len() as u32);
+    for e in &s.channel_history {
+        w.u64(e.seq).bool(e.reply_to.is_some());
+        w.u64(e.reply_to.unwrap_or(0));
+        match &e.forwarded_from {
+            Some(f) => {
+                w.bool(true).string(f);
+            }
+            None => {
+                w.bool(false);
+            }
+        }
+    }
     w.into_vec()
 }
 
@@ -552,6 +578,10 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
                 outgoing: r.bool()?,
                 ts_ms: r.u64()?,
                 text: r.string()?,
+                // Filled in by the aligned metadata section below, if present.
+                seq: 0,
+                reply_to: None,
+                forwarded_from: None,
             });
         }
     }
@@ -731,6 +761,27 @@ fn decode_state(bytes: &[u8]) -> Result<PersistedState, StoreError> {
         }
     }
 
+    // Per-message channel metadata, aligned positionally with
+    // `channel_history`. Absent in stores written before it existed, in which
+    // case every entry keeps its defaults.
+    if r.remaining() > 0 {
+        let n = bounded_count(&mut r)?;
+        for i in 0..n {
+            let seq = r.u64()?;
+            let reply_to = {
+                let present = r.bool()?;
+                let v = r.u64()?;
+                present.then_some(v)
+            };
+            let forwarded_from = if r.bool()? { Some(r.string()?) } else { None };
+            if let Some(e) = channel_history.get_mut(i) {
+                e.seq = seq;
+                e.reply_to = reply_to;
+                e.forwarded_from = forwarded_from;
+            }
+        }
+    }
+
     // Restore message ids onto the aligned history entries.
     for (e, id) in history.iter_mut().zip(dm_msg_ids.iter()) {
         e.msg_id = *id;
@@ -814,6 +865,9 @@ mod tests {
                 outgoing: false,
                 ts_ms: 77,
                 text: "channel hello".into(),
+                seq: 12,
+                reply_to: Some(9),
+                forwarded_from: Some("alice".into()),
             }],
             invite_uses: vec![([1u8; 8], 3), ([2u8; 8], 0)],
             channel_removed: vec![([7u8; 32], [6u8; 32], 55)],
@@ -901,6 +955,63 @@ mod tests {
         assert_eq!(back.last_fetch_since_ms, 200);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A store written before channel metadata was persisted must still load —
+    /// otherwise upgrading silently drops every user's channel history.
+    #[test]
+    fn a_store_without_the_metadata_section_still_loads() {
+        let state = PersistedState {
+            prekeys: PreKeySecrets::generate(1).export(),
+            sessions: vec![],
+            channels: vec![],
+            hosted: vec![],
+            history: vec![],
+            channel_history: vec![ChannelHistoryEntry {
+                channel_id: [7u8; 32],
+                sender: [6u8; 32],
+                outgoing: true,
+                ts_ms: 77,
+                text: "written by an older build".into(),
+                seq: 12,
+                reply_to: None,
+                forwarded_from: None,
+            }],
+            invite_uses: vec![],
+            channel_removed: vec![],
+            server_autokick: vec![],
+            server_policies: vec![],
+            server_join_pw: vec![],
+            channel_reactions: vec![],
+            verified_peers: vec![],
+            contacts: vec![],
+            blocked: vec![],
+            channel_edits: vec![],
+            channel_pins: vec![],
+            dm_msg_ids: vec![],
+            dm_edits: vec![],
+            seen_envelopes: vec![],
+            last_announce_ms: 0,
+            last_fetch_since_ms: 0,
+            server_bans: vec![],
+            server_register_pow: vec![],
+            group_calls: vec![],
+        };
+
+        // Chop off the trailing metadata section to get the old wire shape:
+        // u32 count + one entry of u64 seq, bool + u64 reply_to, bool for the
+        // absent forwarded_from.
+        let bytes = encode_state(&state);
+        let old = &bytes[..bytes.len() - (4 + 8 + 1 + 8 + 1)];
+
+        let back = decode_state(old).expect("an older store still decodes");
+        assert_eq!(back.channel_history.len(), 1);
+        assert_eq!(back.channel_history[0].text, "written by an older build");
+        // No metadata on the wire, so the entry keeps the defaults — exactly
+        // how it behaved before the section existed.
+        assert_eq!(back.channel_history[0].seq, 0);
+        assert_eq!(back.channel_history[0].reply_to, None);
+        assert_eq!(back.channel_history[0].forwarded_from, None);
     }
 
     #[test]

@@ -37,8 +37,19 @@ explicitly from this directory.
                    build-essential curl wget file libssl-dev \
                    libayatana-appindicator3-dev librsvg2-dev
   ```
-- An icon at `icons/icon.png` (any square PNG; `cargo tauri icon path/to.png`
-  regenerates the full set). A placeholder is fine for `cargo tauri dev`.
+  On Fedora:
+  ```
+  sudo dnf install webkit2gtk4.1-devel libsoup3-devel gtk3-devel \
+                   librsvg2-devel libappindicator-gtk3-devel \
+                   opus-devel alsa-lib-devel openssl-devel
+  ```
+  The audio bridge additionally links **libopus** and the platform audio stack
+  (`libopus-dev` + `libasound2-dev` on Debian, in the Fedora list above).
+- Nothing else: `icons/icon.png` is committed (a 512x512 mesh mark). It is the
+  *source* icon — `generate_context!` embeds it, so the crate will not compile
+  without one. `cargo tauri icon icons/icon.png` regenerates the full platform
+  set (`.ico` / `.icns` / the sized PNGs); those are generated artefacts and
+  stay untracked. Replace the source with real artwork whenever you have it.
 
 ## Run
 

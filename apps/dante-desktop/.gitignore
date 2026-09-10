@@ -1,6 +1,10 @@
 /target
 /gen
 /Cargo.lock
+# `cargo tauri icon icons/icon.png` regenerates the whole platform set from the
+# source below. Only the source is tracked — without it `generate_context!`
+# has no icon to embed and the crate will not compile.
 /icons/*.png
+!/icons/icon.png
 /icons/*.ico
 /icons/*.icns

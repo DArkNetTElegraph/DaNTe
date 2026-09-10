@@ -859,6 +859,28 @@ impl Engine {
                         },
                     );
             }
+            // Re-derive message authorship from the replayed history. Every
+            // entry already records who sent it and (since the metadata
+            // section) the seq it was assigned, so the standing `channel_edits`
+            // map can be reseeded for free rather than persisting a second
+            // copy of the same fact. `or_insert` leaves any real stored edit
+            // above untouched. Without this an author cannot edit or delete
+            // their own message after a restart — the map is what authorises
+            // the change.
+            for e in &engine.channel_history {
+                if e.seq != 0 {
+                    engine
+                        .channel_edits
+                        .entry(e.channel_id)
+                        .or_default()
+                        .entry(e.seq)
+                        .or_insert(MsgEdit {
+                            author: e.sender,
+                            text: None,
+                            deleted: false,
+                        });
+                }
+            }
             for sp in s.channel_pins {
                 engine
                     .channel_pins
@@ -3791,12 +3813,25 @@ impl Engine {
                     deleted: false,
                 });
         }
+        // Our own message never comes back through `poll_channels`, so this is
+        // the only chance to record what it was: the seq reactions / pins /
+        // edits will point at, and the reply / forward framing the client
+        // renders. Without it a restart replays the text alone.
         self.push_channel_history(ChannelHistoryEntry {
             channel_id: *channel_id,
             sender: me,
             outgoing: true,
             ts_ms: now_ms,
             text: history_text.to_owned(),
+            seq,
+            reply_to: match &content {
+                Content::Reply { target_seq, .. } => Some(*target_seq),
+                _ => None,
+            },
+            forwarded_from: match &content {
+                Content::Forward { origin, .. } => Some(origin.clone()),
+                _ => None,
+            },
         });
         self.dirty = true;
         Ok(seq)
@@ -4235,6 +4270,9 @@ impl Engine {
                                         outgoing: false,
                                         ts_ms: now_ms,
                                         text: text.clone(),
+                                        seq,
+                                        reply_to,
+                                        forwarded_from: forwarded_from.clone(),
                                     });
                                     out.push(ChannelMessage {
                                         channel_id: id,
@@ -4509,12 +4547,18 @@ impl Engine {
                 if from_host && !already && !entries.is_empty() {
                     let me = self.my_member_id();
                     for (sender, ts_ms, text) in &entries {
+                        // A host backfill carries (sender, ts_ms, text) only —
+                        // there is no seq on the wire, so these lines stay
+                        // unkeyed until the protocol carries one.
                         self.push_channel_history(ChannelHistoryEntry {
                             channel_id,
                             sender: *sender,
                             outgoing: *sender == me,
                             ts_ms: *ts_ms,
                             text: text.clone(),
+                            seq: 0,
+                            reply_to: None,
+                            forwarded_from: None,
                         });
                     }
                     self.dirty = true;

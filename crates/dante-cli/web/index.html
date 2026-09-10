@@ -539,17 +539,24 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch;
 }
 
-#log { flex: 1; overflow-y: auto; padding: 14px 12px 4px; }
-.msg-group { display: flex; gap: 12px; padding: 6px 10px; border-radius: var(--radius); transition: background .1s ease; }
+#log { flex: 1; overflow-y: auto; padding: 12px 8px 8px; }
+.msg-group { display: flex; gap: 14px; padding: 1px 12px; border-radius: var(--radius); transition: background .08s ease; }
+.msg-group:not(.cont) { margin-top: 14px; padding-top: 3px; padding-bottom: 3px; }
+.msg-group:first-child { margin-top: 2px; }
 .msg-group:hover { background: var(--bg-hover); }
-.msg-group .avatar { width: 38px; height: 38px; margin-top: 2px; }
+.msg-group .avatar { width: 40px; height: 40px; margin-top: 2px; }
+.msg-gutter { flex: 0 0 40px; display: flex; justify-content: flex-end; align-items: flex-start; }
+.cont-time { font: 10px/1.7 var(--font-mono); color: var(--text-faint); opacity: 0; white-space: nowrap;
+  transition: opacity .06s; }
+.msg-group.cont:hover .cont-time { opacity: 1; }
 .msg-group .body { min-width: 0; flex: 1; }
-.msg-group .meta { display: flex; align-items: baseline; gap: 8px; }
-.msg-group .author { font-weight: 650; letter-spacing: -0.01em; color: var(--text); }
+.msg-group .meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 1px; }
+.msg-group .author { font-weight: 650; letter-spacing: -0.01em; color: var(--text); cursor: pointer; }
+.msg-group .author:hover { text-decoration: underline; }
 .msg-group .author.you { color: var(--accent-warm); }
 .msg-group .stamp { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .msg-group .fp { font: 11px/1 var(--font-mono); color: var(--text-faint); }
-.msg-line { color: var(--text); white-space: pre-wrap; word-wrap: break-word; text-wrap: pretty; }
+.msg-line { color: var(--text); white-space: pre-wrap; word-wrap: break-word; text-wrap: pretty; line-height: 1.375; }
 .msg-line.file { color: var(--link); }
 .msg-line.deleted { color: var(--text-faint); font-style: italic; }
 .edited-tag { color: var(--text-faint); font-size: 11px; }
@@ -1003,24 +1010,15 @@ const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) 
 const initials = s => (s || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
 
 // Discord-style avatars: a stable colour per identity (from its fingerprint),
-// white monogram on top. Colours are drawn from the project's own brand palette
-// (see the :root tokens / DESIGN.md) — flame, amber, cornflower, indigo, green
-// and blends — each darkened enough to keep white text legible.
-const AVATAR_COLORS = [
-  "var(--blazing-flame)",
-  "color-mix(in srgb, var(--orange) 76%, #000)",
-  "color-mix(in srgb, var(--cornflower-blue) 60%, #000)",
-  "var(--space-indigo)",
-  "color-mix(in srgb, var(--ok) 70%, #000)",
-  "color-mix(in srgb, var(--cornflower-blue) 50%, var(--blazing-flame))",
-  "color-mix(in srgb, var(--orange) 55%, var(--blazing-flame))",
-  "color-mix(in srgb, var(--cornflower-blue) 60%, var(--space-indigo))",
-];
+// white monogram on top. A hue is hashed from the seed and spread across the
+// wheel for good variety; saturation/lightness are fixed in a range that keeps
+// white text legible on every hue (and reads on-brand next to the accent set).
 function avatarColor(seed) {
   let h = 0;
   const s = seed || "";
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+  const hue = (h % 360 + 137 * (h % 7)) % 360;   // scatter adjacent seeds apart
+  return `hsl(${hue} 56% 46%)`;
 }
 // Build an avatar div: initials of `label`, coloured by `seed` (optional).
 function avatar(label, seed, cls) {
@@ -2529,24 +2527,30 @@ function renderFile(m) {
 }
 
 function groupShell(m, sameAuthor) {
-  const node = el("div", "msg-group");
+  const node = el("div", "msg-group" + (sameAuthor ? " cont" : ""));
   const name = m.from === "you" ? (store.me.username || short(store.me.fingerprint)) : authorLabel(m.from);
   const fp = m.from === "you" ? store.me.fingerprint : m.from;
-  const av = avatar(name, fp);
-  if (fp) { av.classList.add("clickable"); av.onclick = () => openProfile(fp); }
+  const hhmm = m._at ? new Date(m._at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   const body = el("div", "body");
   if (!sameAuthor) {
+    const av = avatar(name, fp);
+    if (fp) { av.classList.add("clickable"); av.onclick = () => openProfile(fp); }
+    node.appendChild(av);
     const meta = el("div", "meta");
     const a = el("span", "author" + (m.from === "you" ? " you" : ""), name);
     a.onclick = () => fp && openProfile(fp);
     meta.appendChild(a);
     if (m.from !== "you" && m.from) meta.appendChild(el("span", "fp", short(m.from)));
-    meta.appendChild(el("span", "stamp", m._at ? new Date(m._at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""));
+    meta.appendChild(el("span", "stamp", hhmm));
     body.appendChild(meta);
   } else {
-    av.style.visibility = "hidden";
+    // Continuation line: the avatar gutter instead holds a faint timestamp
+    // that appears on hover (Discord-style).
+    const gutter = el("div", "msg-gutter");
+    if (hhmm) gutter.appendChild(el("span", "cont-time", hhmm));
+    node.appendChild(gutter);
   }
-  node.appendChild(av); node.appendChild(body);
+  node.appendChild(body);
   return { node, body };
 }
 

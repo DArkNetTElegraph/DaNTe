@@ -623,6 +623,11 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .date-divider::before, .date-divider::after { content: ""; flex: 1; height: 1px; background: var(--divider); }
 .date-divider span { font-size: 11px; font-weight: 700; letter-spacing: .02em; color: var(--text-faint);
   text-transform: uppercase; }
+/* ---- mute / deafen in the user panel ---- */
+.vc-btn { font-size: 15px; line-height: 1; }
+.vc-btn.on { color: #e0555c; position: relative; }
+.vc-btn.on::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 2px;
+  background: #e0555c; transform: rotate(-20deg); border-radius: 2px; }
 #mention-popup { position: fixed; z-index: 95; background: var(--bg-pane); border: 1px solid var(--divider);
   border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.4); overflow: hidden; max-height: 220px; overflow-y: auto; }
 #mention-popup .mrow { padding: 6px 12px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
@@ -940,6 +945,8 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
         <div class="fp" id="me-fp" title="click to copy">…</div>
         <div class="sub" id="me-sub">connecting…</div>
       </div>
+      <button class="icon-btn vc-btn" id="me-mute" title="Mute">🎙</button>
+      <button class="icon-btn vc-btn" id="me-deafen" title="Deafen">🎧</button>
       <button class="icon-btn" id="me-gear" title="Settings" data-icon="gear"></button>
     </div>
   </section>
@@ -3218,6 +3225,7 @@ async function callRtcStart(fp) {
   });
   callRtc.peer = fp;
   callRtc.localStream = stream;
+  applyVoiceCtl();                 // honour an existing mute/deafen
   callRtc.offered = false;
   callRtc.pending = [];
   callRtc.polite = store.me.fingerprint > fp;    // higher fp is the polite peer
@@ -3234,6 +3242,7 @@ async function callRtcStart(fp) {
   pc.ontrack = e => {
     let a = callRtc.audio;
     if (!a) { a = new Audio(); a.autoplay = true; callRtc.audio = a; }
+    a.muted = voiceCtl.deafened;
     a.srcObject = e.streams[0];
     a.play().catch(() => {});
   };
@@ -3251,13 +3260,32 @@ function callRtcStop() {
   callRtc.audio = null; callRtc.pending = []; callRtc.offered = false; callRtc.makingOffer = false;
 }
 
-function callRtcMicOn() { return !callRtc.localStream || callRtc.localStream.getAudioTracks().some(t => t.enabled); }
-function callRtcToggleMic() {
-  if (!callRtc.localStream) return;
-  const on = !callRtcMicOn();
-  for (const t of callRtc.localStream.getAudioTracks()) t.enabled = on;
-  renderCallbar();
+/* ---------- global mute / deafen (Discord-style) --------------------
+   One control for every voice session (voice channels + 1:1 calls).
+   Mute silences your mic; deafen mutes everyone you hear AND, like Discord,
+   forces your mic off while active. Applied by toggling track.enabled on the
+   local mic and .muted on each remote <audio>, so there's no renegotiation. */
+const voiceCtl = { muted: false, deafened: false };
+function micEnabled() { return !(voiceCtl.muted || voiceCtl.deafened); }
+function applyVoiceCtl() {
+  const on = micEnabled();
+  for (const st of [voiceRtc.localStream, callRtc.localStream]) {
+    if (st) for (const t of st.getAudioTracks()) t.enabled = on;
+  }
+  voiceRtc.micOn = on;
+  for (const entry of voiceRtc.peers.values()) if (entry.audio) entry.audio.muted = voiceCtl.deafened;
+  if (callRtc.audio) callRtc.audio.muted = voiceCtl.deafened;
 }
+function toggleMute() { voiceCtl.muted = !voiceCtl.muted; applyVoiceCtl(); paintVoiceCtl(); renderCallbar(); }
+function toggleDeafen() { voiceCtl.deafened = !voiceCtl.deafened; applyVoiceCtl(); paintVoiceCtl(); renderCallbar(); }
+function paintVoiceCtl() {
+  const mb = $("#me-mute"), db = $("#me-deafen");
+  if (mb) { mb.classList.toggle("on", voiceCtl.muted); mb.title = voiceCtl.muted ? "Unmute" : "Mute"; }
+  if (db) { db.classList.toggle("on", voiceCtl.deafened); db.title = voiceCtl.deafened ? "Undeafen" : "Deafen"; }
+}
+
+function callRtcMicOn() { return micEnabled(); }
+function callRtcToggleMic() { toggleMute(); }
 
 // Called each poll: once the call is connected, the lower fp sends the offer;
 // when the call is gone or dead, tear the media leg down.
@@ -3550,6 +3578,7 @@ async function voiceRtcStart(channelId) {
   });
   voiceRtc.localStream = stream;
   voiceRtc.micOn = true;
+  applyVoiceCtl();                 // honour an existing mute/deafen
   voiceRtc.channelId = channelId;
   try {
     const ice = await api.get("/api/ice");
@@ -3581,12 +3610,7 @@ function voiceRtcStop() {
   voiceRtc.peers.clear();
 }
 
-function voiceToggleMic() {
-  if (!voiceRtc.localStream) return;
-  voiceRtc.micOn = !voiceRtc.micOn;
-  for (const t of voiceRtc.localStream.getAudioTracks()) t.enabled = voiceRtc.micOn;
-  render();
-}
+function voiceToggleMic() { toggleMute(); render(); }
 
 // Share (or stop sharing) this screen into the room. Adding / removing the
 // video track fires `onnegotiationneeded`; the perfect-negotiation logic in
@@ -3685,6 +3709,7 @@ async function voicePeerConnect(fp, initiator) {
     sframeAttach(e.receiver, "dec");
     let a = entry.audio;
     if (!a) { a = new Audio(); a.autoplay = true; entry.audio = a; }
+    a.muted = voiceCtl.deafened;
     a.srcObject = e.streams[0];
     a.play().catch(() => {});
     voiceRerender();
@@ -4082,6 +4107,9 @@ $("#btn-members").onclick = () => {
 };
 $("#me-sub").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(store.me.fingerprint); ui.sys("Block-ID copied."); };
 $("#me-gear").onclick = openSettings;
+$("#me-mute").onclick = toggleMute;
+$("#me-deafen").onclick = toggleDeafen;
+paintVoiceCtl();
 
 // Notifications: what's unread / where you were mentioned, click to jump.
 $("#btn-notif").onclick = () => {

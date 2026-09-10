@@ -933,16 +933,7 @@ impl Engine {
 
         // Learn this network's ICE servers (STUN, short-lived TURN creds) from
         // the relay, so calls can traverse NAT. Best-effort.
-        if let Ok(cfg) = sync::get_ice_config(&mut engine.client).await {
-            engine.ice_servers = cfg
-                .into_iter()
-                .map(|c| IceServer {
-                    urls: c.urls,
-                    username: c.username,
-                    credential: c.credential,
-                })
-                .collect();
-        }
+        let _ = engine.refresh_ice_servers().await;
 
         // Publish an MLS KeyPackage so peers can add us to their group calls.
         // Best-effort.
@@ -1642,6 +1633,25 @@ impl Engine {
     /// The configured STUN/TURN servers.
     pub fn ice_servers(&self) -> &[IceServer] {
         &self.ice_servers
+    }
+
+    /// Re-fetch this network's ICE servers from the relay.
+    ///
+    /// TURN credentials are short-lived (the coturn `use-auth-secret` scheme —
+    /// an hour by default), so a client that only learned them at connect will
+    /// eventually hand out expired ones. Refresh before starting a call. On
+    /// failure the previously learned list is left in place.
+    pub async fn refresh_ice_servers(&mut self) -> Result<(), CoreError> {
+        let cfg = sync::get_ice_config(&mut self.client).await?;
+        self.ice_servers = cfg
+            .into_iter()
+            .map(|c| IceServer {
+                urls: c.urls,
+                username: c.username,
+                credential: c.credential,
+            })
+            .collect();
+        Ok(())
     }
 
     /// Whether a call with `peer_id` is active (connecting or connected).

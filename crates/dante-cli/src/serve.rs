@@ -1464,6 +1464,28 @@ async fn refresh_voice(engine: &Engine, shared: &Shared) {
     }
 }
 
+/// The `GET /api/ice` body: the ICE servers the page hands `RTCPeerConnection`.
+///
+/// TURN rows carry their credentials. Without them a browser can only gather
+/// host and srflx candidates, so a call between two peers behind symmetric NAT
+/// never connects. The page already drives the whole engine over this
+/// localhost API, and the credential is a short-lived coturn token that grants
+/// nothing but relayed media, so exposing it here adds no authority.
+fn ice_json(servers: &[dante_core::IceServer]) -> String {
+    let rows: Vec<_> = servers
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "urls": s.urls,
+                "kind": if s.username.is_empty() { "stun" } else { "turn" },
+                "username": s.username,
+                "credential": s.credential,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows).to_string()
+}
+
 async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
     match cmd {
         Cmd::Send {
@@ -2276,17 +2298,11 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let _ = reply.send(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
         }
         Cmd::Ice { reply } => {
-            let rows: Vec<_> = engine
-                .ice_servers()
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "urls": s.urls,
-                        "kind": if s.username.is_empty() { "stun" } else { "turn" },
-                    })
-                })
-                .collect();
-            let _ = reply.send(serde_json::Value::Array(rows).to_string());
+            // TURN credentials expire, so re-mint them from the relay rather
+            // than serving whatever was learned at connect. Best-effort: on a
+            // relay hiccup the last known list still gets the page STUN.
+            let _ = engine.refresh_ice_servers().await;
+            let _ = reply.send(ice_json(engine.ice_servers()));
         }
         Cmd::CallAudioSend {
             peer,
@@ -4235,7 +4251,7 @@ async fn respond(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{loopback_authorities, request_is_local, typing_text, TYPING_FRESH_MS};
+    use super::{ice_json, loopback_authorities, request_is_local, typing_text, TYPING_FRESH_MS};
 
     const NOW: u64 = 1_000_000;
 
@@ -4248,6 +4264,31 @@ mod tests {
         }
         s.push_str("\r\n");
         s
+    }
+
+    #[test]
+    fn ice_json_carries_turn_credentials_to_the_page() {
+        let servers = vec![
+            dante_core::IceServer {
+                urls: vec!["stun:stun.example.org:3478".into()],
+                ..Default::default()
+            },
+            dante_core::IceServer {
+                urls: vec!["turn:turn.example.org:3478?transport=udp".into()],
+                username: "1789000000".into(),
+                credential: "c2VjcmV0".into(),
+            },
+        ];
+        let v: serde_json::Value = serde_json::from_str(&ice_json(&servers)).unwrap();
+
+        assert_eq!(v[0]["kind"], "stun");
+        assert_eq!(v[0]["username"], "");
+
+        // Without these two fields the browser cannot allocate a relay
+        // candidate, and a cross-NAT call never connects.
+        assert_eq!(v[1]["kind"], "turn");
+        assert_eq!(v[1]["username"], "1789000000");
+        assert_eq!(v[1]["credential"], "c2VjcmV0");
     }
 
     #[test]

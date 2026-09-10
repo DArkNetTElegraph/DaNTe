@@ -3250,6 +3250,17 @@ async function refreshCalls() {
   } catch (_) {}
 }
 
+/* `/api/ice` rows -> `RTCIceServer` entries. TURN rows carry short-lived
+   coturn credentials; drop them and the browser gathers only host + srflx
+   candidates, so two peers behind symmetric NAT never connect. */
+function iceToRtc(rows) {
+  return (rows || [])
+    .filter(s => s && Array.isArray(s.urls) && s.urls.length)
+    .map(s => s.username
+      ? { urls: s.urls, username: s.username, credential: s.credential || "" }
+      : { urls: s.urls });
+}
+
 /* ---------- 1:1 DM calls: real browser WebRTC audio --------------------
    Mirrors the voice-channel mesh but for a single peer. The engine's own
    Call (CallOffer/CallIce) still runs and feeds the native desktop bridge;
@@ -3280,10 +3291,7 @@ async function callRtcStart(fp) {
   callRtc.pending = [];
   callRtc.polite = store.me.fingerprint > fp;    // higher fp is the polite peer
   try {
-    const ice = await api.get("/api/ice");
-    callRtc.iceServers = (ice || [])
-      .filter(s => s.kind === "stun" && s.urls && s.urls.length)
-      .map(s => ({ urls: s.urls }));
+    callRtc.iceServers = iceToRtc(await api.get("/api/ice"));
   } catch (_) { callRtc.iceServers = []; }
   const pc = new RTCPeerConnection({ iceServers: callRtc.iceServers });
   callRtc.pc = pc;
@@ -3695,12 +3703,7 @@ async function voiceRtcStart(channelId) {
   monitorStream(store.me.fingerprint, stream);
   voiceRtc.channelId = channelId;
   try {
-    const ice = await api.get("/api/ice");
-    // `/api/ice` exposes only urls+kind (never TURN creds), so this yields
-    // STUN for srflx candidates; TURN needs creds and isn't wired here.
-    voiceRtc.iceServers = (ice || [])
-      .filter(s => s.kind === "stun" && s.urls && s.urls.length)
-      .map(s => ({ urls: s.urls }));
+    voiceRtc.iceServers = iceToRtc(await api.get("/api/ice"));
   } catch (_) { voiceRtc.iceServers = []; }
   sframeStart();
   voiceSyncPeers();

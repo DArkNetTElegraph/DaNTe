@@ -55,9 +55,9 @@ above — it states precisely what is and is not protected.
   the SFrame transform are written to the standard browser WebRTC patterns but
   have never been exercised in a real browser (none in the dev env / CI). The
   Rust relay/signalling halves have e2e tests; the browser halves do not.
-- **Browser TURN.** Only STUN is exposed to the browser (TURN credentials
-  aren't), so cross-NAT voice channels don't connect yet — localhost / same-LAN
-  today.
+- **Browser TURN.** The page now gets the relay's TURN credentials from
+  `/api/ice`, so cross-NAT calls can allocate a relay candidate — but this has
+  only been exercised against a local relay, never between two real NATs.
 - **1:1 and group call audio**: the engine has the full WebRTC + Opus transport,
   but `dante serve` has no browser microphone path for these — only voice
   channels do. Real mic / speaker for 1:1 needs the desktop shell.

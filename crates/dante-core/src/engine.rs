@@ -1639,10 +1639,18 @@ impl Engine {
     ///
     /// TURN credentials are short-lived (the coturn `use-auth-secret` scheme —
     /// an hour by default), so a client that only learned them at connect will
-    /// eventually hand out expired ones. Refresh before starting a call. On
-    /// failure the previously learned list is left in place.
+    /// eventually hand out expired ones. Refresh before starting a call.
+    ///
+    /// The previously learned list survives both a failed request and an empty
+    /// answer. The empty case matters because `client` may have failed over to
+    /// a sibling relay whose operator configured no ICE policy: dropping a
+    /// working TURN config on that hop would silently cost every peer behind a
+    /// symmetric NAT its relay candidate.
     pub async fn refresh_ice_servers(&mut self) -> Result<(), CoreError> {
         let cfg = sync::get_ice_config(&mut self.client).await?;
+        if cfg.is_empty() {
+            return Ok(());
+        }
         self.ice_servers = cfg
             .into_iter()
             .map(|c| IceServer {

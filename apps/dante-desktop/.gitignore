@@ -7,4 +7,7 @@
 /icons/*.png
 !/icons/icon.png
 /icons/*.ico
+# tauri-build requires this one on Windows to emit the resource file — without
+# it the crate does not compile there at all, so it is a source, not an output.
+!/icons/icon.ico
 /icons/*.icns

@@ -32,6 +32,7 @@ mod notify;
 mod tray;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -45,7 +46,12 @@ use tokio::net::TcpListener;
 
 /// Where the real UI lives once the engine is up. Set as soon as the port is
 /// bound; the boot screen is swapped for it when startup finishes.
-struct AppUrl(Mutex<Option<String>>);
+struct AppUrl {
+    url: Mutex<Option<String>>,
+    /// Whether the window has already left the boot screen. The swap has more
+    /// than one trigger and must happen at most once — see [`show_app`].
+    swapped: AtomicBool,
+}
 
 fn dante_home() -> PathBuf {
     if let Ok(h) = std::env::var("DANTE_HOME") {
@@ -202,10 +208,25 @@ fn open_app_anyway(app: AppHandle) {
     show_app(&app);
 }
 
-/// Swap the boot screen for the real UI.
+/// Swap the boot screen for the real UI, at most once.
+///
+/// Three things can ask for this: startup reaching `Ready`, there being no
+/// keystore to unlock (nothing to narrate, so go straight in), and the user
+/// pressing "Continue anyway" after a failure. They are not mutually
+/// exclusive — onboarding in the page leads to `serve` connecting the engine
+/// and reporting `Ready` afterwards — and navigating a second time would
+/// reload the SPA out from under someone who had just finished setting up.
 fn show_app(app: &AppHandle) {
-    let url = app.state::<AppUrl>().0.lock().ok().and_then(|u| u.clone());
-    let Some(url) = url else { return };
+    let state = app.state::<AppUrl>();
+    let Some(url) = state.url.lock().ok().and_then(|u| u.clone()) else {
+        // The UI port is not bound yet, so there is nothing to swap to —
+        // startup failed before it got that far. Leave the latch alone so a
+        // later, real attempt still works rather than dead-ending the screen.
+        return;
+    };
+    if state.swapped.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -222,7 +243,10 @@ fn show_app(app: &AppHandle) {
 fn main() -> Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .manage(AppUrl(Mutex::new(None)))
+        .manage(AppUrl {
+            url: Mutex::new(None),
+            swapped: AtomicBool::new(false),
+        })
         .invoke_handler(tauri::generate_handler![open_app_anyway])
         .setup(|app| {
             // The window comes up first, before any engine work, so startup is
@@ -279,7 +303,9 @@ async fn start(app: AppHandle) -> Result<()> {
         boot,
     } = prepare(sink).await?;
 
-    *app.state::<AppUrl>().0.lock().unwrap() = Some(format!("http://127.0.0.1:{port}/"));
+    if let Ok(mut slot) = app.state::<AppUrl>().url.lock() {
+        *slot = Some(format!("http://127.0.0.1:{port}/"));
+    }
 
     // Bridge the OS mic/speaker to whichever call is connected, and watch for
     // messages worth a notification. Both talk to the service over localhost.

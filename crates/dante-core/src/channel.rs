@@ -142,8 +142,8 @@ pub enum ChannelControl {
     History {
         /// The channel the snapshot belongs to.
         channel_id: [u8; 32],
-        /// `(sender member id, Unix ms, text)`, oldest first.
-        entries: Vec<([u8; 32], u64, String)>,
+        /// The snapshot, oldest first.
+        entries: Vec<BacklogEntry>,
     },
     /// The host offers the recipient a channel. Nothing is added until the
     /// recipient replies with [`InviteAccept`](ChannelControl::InviteAccept) —
@@ -211,9 +211,9 @@ impl ChannelControl {
                 channel_id,
                 entries,
             } => {
-                w.u8(10).fixed(channel_id).u32(entries.len() as u32);
-                for (sender, at_ms, text) in entries {
-                    w.fixed(sender).u64(*at_ms).string(text);
+                w.u8(14).fixed(channel_id).u32(entries.len() as u32);
+                for e in entries {
+                    w.fixed(&e.sender).u64(e.at_ms).string(&e.text).u64(e.seq);
                 }
             }
             ChannelControl::Invite {
@@ -275,11 +275,19 @@ impl ChannelControl {
                 name: r.string()?,
             },
             10 => {
+                // Tag 10: a host from before the backlog carried seqs. The
+                // lines are still worth showing, they just cannot be reacted
+                // to or edited — which is the behaviour this tag always had.
                 let channel_id = r.fixed::<32>()?;
                 let n = r.u32()? as usize;
                 let mut entries = Vec::with_capacity(n.min(1024));
                 for _ in 0..n {
-                    entries.push((r.fixed::<32>()?, r.u64()?, r.string()?));
+                    entries.push(BacklogEntry {
+                        sender: r.fixed::<32>()?,
+                        at_ms: r.u64()?,
+                        text: r.string()?,
+                        seq: 0,
+                    });
                 }
                 ChannelControl::History {
                     channel_id,
@@ -297,6 +305,23 @@ impl ChannelControl {
             13 => ChannelControl::InviteDecline {
                 channel_id: r.fixed::<32>()?,
             },
+            14 => {
+                let channel_id = r.fixed::<32>()?;
+                let n = r.u32()? as usize;
+                let mut entries = Vec::with_capacity(n.min(1024));
+                for _ in 0..n {
+                    entries.push(BacklogEntry {
+                        sender: r.fixed::<32>()?,
+                        at_ms: r.u64()?,
+                        text: r.string()?,
+                        seq: r.u64()?,
+                    });
+                }
+                ChannelControl::History {
+                    channel_id,
+                    entries,
+                }
+            }
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "ChannelControl",
@@ -307,6 +332,25 @@ impl ChannelControl {
         r.finish()?;
         Ok(out)
     }
+}
+
+/// One line of the plaintext backlog a host hands a new member on join.
+///
+/// MLS forward secrecy means a joiner cannot decrypt the channel log from
+/// before their epoch, so the host shares recent messages directly over the
+/// DM instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BacklogEntry {
+    /// The sender's group member id.
+    pub sender: [u8; 32],
+    /// Wall-clock time (Unix ms).
+    pub at_ms: u64,
+    /// The message text.
+    pub text: String,
+    /// The relay-log sequence number, so the joiner can key reactions, pins,
+    /// replies and edits to this line like any other message. 0 when the host
+    /// was too old to send one, in which case the line is display-only.
+    pub seq: u64,
 }
 
 /// A decrypted inbound channel message.
@@ -471,8 +515,18 @@ mod tests {
             ChannelControl::History {
                 channel_id: [8u8; 32],
                 entries: vec![
-                    ([1u8; 32], 111, "hi".into()),
-                    ([2u8; 32], 222, "there".into()),
+                    BacklogEntry {
+                        sender: [1u8; 32],
+                        at_ms: 111,
+                        text: "hi".into(),
+                        seq: 7,
+                    },
+                    BacklogEntry {
+                        sender: [2u8; 32],
+                        at_ms: 222,
+                        text: "there".into(),
+                        seq: 8,
+                    },
                 ],
             },
             ChannelControl::Invite {

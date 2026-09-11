@@ -63,11 +63,10 @@ above — it states precisely what is and is not protected.
 - **1:1 and group call audio**: the engine has the full WebRTC + Opus transport,
   but `dante serve` has no browser microphone path for these — only voice
   channels do. Real mic / speaker for 1:1 needs the desktop shell.
-- **Restart gaps**: channel history now persists each message's relay-log
-  `seq` (plus `reply_to` / `forwarded_from`), so restored messages can still be
-  reacted to, pinned, replied to and edited. One gap remains: a channel history
-  *backfilled from the host* carries no `seq` on the wire, so those lines stay
-  unkeyed until the protocol carries one.
+- **Restart gaps**: *(closed)* channel history persists each message's
+  relay-log `seq` (plus `reply_to` / `forwarded_from`), and the plaintext
+  backlog a host hands a new member carries the `seq` too, so both restored and
+  backfilled messages can be reacted to, pinned, replied to and edited.
 - **Desktop shell not runtime-verified.** The native layer (startup progress,
   tray, notifications, the mic/speaker bridge) builds green in CI on both Linux
   and Windows, but no one has yet opened the window: how it looks, whether the

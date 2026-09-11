@@ -1196,15 +1196,21 @@ async fn engine_task(
                         if let Inbound::ChannelBacklog { channel_id, entries } = it {
                             let ch = id_b32(&channel_id);
                             let me = *engine.identity().id().as_bytes();
-                            for (sender, at_ms, text) in entries {
-                                let _ = at_ms;
+                            for e in entries {
                                 inbox.push_back(Item::Channel {
                                     seq: engine_shared.next(),
                                     channel: ch.clone(),
                                     channel_name: String::new(),
-                                    from: if sender == me { "you".into() } else { short_id(&sender) },
-                                    text,
-                                    ref_seq: 0,
+                                    from: if e.sender == me {
+                                        "you".into()
+                                    } else {
+                                        short_id(&e.sender)
+                                    },
+                                    text: e.text,
+                                    // Carries the relay-log seq now, so a
+                                    // backfilled line gets the same hover
+                                    // actions as a live one.
+                                    ref_seq: e.seq,
                                     reply_to: None,
                                     forwarded_from: None,
                                 });

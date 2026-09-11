@@ -284,8 +284,8 @@ pub enum Inbound {
     ChannelBacklog {
         /// The channel the snapshot belongs to.
         channel_id: [u8; 32],
-        /// `(sender member id, Unix ms, text)`.
-        entries: Vec<([u8; 32], u64, String)>,
+        /// The snapshot, oldest first.
+        entries: Vec<crate::channel::BacklogEntry>,
     },
     /// A WebRTC signalling blob for a voice-channel mesh leg, relayed from
     /// another participant's browser. The engine does not interpret it.
@@ -2708,13 +2708,18 @@ impl Engine {
 
         // Share a plaintext snapshot of recent messages — the joiner can't
         // decrypt the log from before their MLS epoch.
-        let entries: Vec<([u8; 32], u64, String)> = self
+        let entries: Vec<crate::channel::BacklogEntry> = self
             .channel_history
             .iter()
             .filter(|e| &e.channel_id == channel_id)
             .rev()
             .take(200)
-            .map(|e| (e.sender, e.ts_ms, e.text.clone()))
+            .map(|e| crate::channel::BacklogEntry {
+                sender: e.sender,
+                at_ms: e.ts_ms,
+                text: e.text.clone(),
+                seq: e.seq,
+            })
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -4657,17 +4662,30 @@ impl Engine {
                     .any(|e| e.channel_id == channel_id);
                 if from_host && !already && !entries.is_empty() {
                     let me = self.my_member_id();
-                    for (sender, ts_ms, text) in &entries {
-                        // A host backfill carries (sender, ts_ms, text) only —
-                        // there is no seq on the wire, so these lines stay
-                        // unkeyed until the protocol carries one.
+                    for e in &entries {
+                        // The backlog now carries each line's relay-log seq, so
+                        // a backfilled message can be reacted to, pinned and
+                        // edited like any other. It is 0 only when the host was
+                        // too old to send one, and then the line is
+                        // display-only — the same as before.
+                        if e.seq != 0 {
+                            self.channel_edits
+                                .entry(channel_id)
+                                .or_default()
+                                .entry(e.seq)
+                                .or_insert(MsgEdit {
+                                    author: e.sender,
+                                    text: None,
+                                    deleted: false,
+                                });
+                        }
                         self.push_channel_history(ChannelHistoryEntry {
                             channel_id,
-                            sender: *sender,
-                            outgoing: *sender == me,
-                            ts_ms: *ts_ms,
-                            text: text.clone(),
-                            seq: 0,
+                            sender: e.sender,
+                            outgoing: e.sender == me,
+                            ts_ms: e.at_ms,
+                            text: e.text.clone(),
+                            seq: e.seq,
                             reply_to: None,
                             forwarded_from: None,
                         });

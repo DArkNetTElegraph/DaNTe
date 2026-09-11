@@ -19,6 +19,7 @@
 pub mod error;
 pub mod mailbox;
 pub mod ratelimit;
+pub mod socks5;
 pub mod sync;
 pub mod transport;
 pub mod wire;

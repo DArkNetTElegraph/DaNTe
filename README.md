@@ -29,8 +29,16 @@ identities.
 - **Anonymous.** An identity is a keypair. No phone number, email, payment, or
   invite required. Your unique ID is your public-key fingerprint ("block-ID");
   you also pick a non-unique display username at registration.
+  An anonymous identity is only as anonymous as the network under it, so a
+  relay reached at an `.onion` address is dialled through Tor automatically
+  (or set `DANTE_SOCKS5` to send everything through a proxy). Run that way the
+  relay never learns a client IP — which is the difference between anonymous
+  and merely pseudonymous. Note Tor carries TCP only, so voice does not work
+  over it.
 - **No infrastructure.** The project operates nothing. Relays are run by whoever
-  creates a server, for their own community.
+  creates a server, for their own community — as a Tor onion service needing no
+  public IP, or on a public host. See
+  [`docs/RUNNING_A_RELAY.md`](docs/RUNNING_A_RELAY.md).
 
 Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before relying on any of the
 above — it states precisely what is and is not protected.

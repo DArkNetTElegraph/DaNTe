@@ -10,9 +10,11 @@ identities.
 > persistent-channel voice, screen share, reactions / custom emoji / stickers /
 > soundboards, opt-in link previews, a headless bot bridge, and a single-file
 > browser client (`dante serve`). The libp2p transport (DHT relay discovery,
-> redundant relay set, relay federation) is **on by default**. Main gaps: a
-> native desktop app, a group-call SFU, and browser runtime-verification of the
-> media paths. Wire formats still change without notice. See the
+> redundant relay set, relay federation) is **on by default**, and the Tauri
+> desktop shell has its native layer — live startup progress, tray, OS
+> notifications — built for Linux and Windows in CI. Main gaps: **nothing in
+> the voice/media path or the desktop shell has been run by a human yet**, and
+> there is no group-call SFU. Wire formats still change without notice. See the
 > [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
 ## What it is
@@ -46,7 +48,7 @@ above — it states precisely what is and is not protected.
 | **Servers & channels** | MLS group per channel (host is sole committer); create server / channel, direct invites + invite links, **server-level join password**, roles & permissions v1, member kick + inactivity auto-kick, channel history, delete server / channel, leave channel, rename channel, always-present `#general`, public **discovery** & join |
 | **In-channel** | Emoji reactions (unicode + custom), **categorised emoji picker**, edit / delete, replies, pinned messages, @mentions, message forwarding, per-conversation unread counts + mute, **custom per-server emoji / stickers / soundboards** |
 | **Voice** | 1:1 calls, group calls (shared MLS media key + 1:1 mesh), **persistent Discord-style voice channels with real browser audio**, **screen share**, optional **SFrame** media encryption under the group-call key, ≥ 64 kbps Opus floor, STUN / TURN plumbing |
-| **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `bot` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates, opt-in link previews; `dante bot` — a JSON-lines headless bridge |
+| **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `bot` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates, opt-in link previews; `dante bot` — a JSON-lines headless bridge; `apps/dante-desktop` — a Tauri 2 native window around the same service, with a live startup screen, system tray and OS notifications |
 | **P2P (on by default; `--no-default-features` for a lean TCP build)** | `dante-p2p` libp2p node (Kademlia + gossipsub + identify + ping); the relay wire over `/dante/relay/1`; **DHT relay discovery**, a redundant relay set with health scoring, **relay↔relay federation** (ledger, prekeys, mailbox, key packages, channel logs), rendezvous-hashed single-writer channel logs, relay-assisted bootstrap + `DANTE_BOOTSTRAP` |
 
 ### Partial / caveats
@@ -66,6 +68,13 @@ above — it states precisely what is and is not protected.
   reacted to, pinned, replied to and edited. One gap remains: a channel history
   *backfilled from the host* carries no `seq` on the wire, so those lines stay
   unkeyed until the protocol carries one.
+- **Desktop shell not runtime-verified.** The native layer (startup progress,
+  tray, notifications, the mic/speaker bridge) compiles in CI on Linux and
+  Windows, but no one has yet opened the window: how it looks, whether the tray
+  behaves per-platform, and whether notifications fire at sensible moments are
+  all unconfirmed. The dev environment has no GTK/webview stack, so this needs
+  a real desktop — see
+  [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md).
 - **Multi-relay channel writes** converge via rendezvous hashing while every
   relay is up; a relay that flaps then recovers can briefly double-sequence one
   channel (the step-down rule converges it within a few frames). A true network
@@ -73,10 +82,13 @@ above — it states precisely what is and is not protected.
 
 ### Not done yet
 
-- **Native desktop app** — `apps/dante-desktop` (Tauri 2) is a thin shell that
-  reuses `dante serve`; native menus / tray / notifications / auto-update and a
-  buildable CI target are outstanding. A mic / speaker bridge (`dante-audio`)
-  exists for it.
+- **Desktop app: packaging and updates.** The shell itself is in place —
+  it reuses `dante serve` verbatim, opens the window *before* the engine starts
+  and narrates each startup step into it, hides to the tray instead of quitting,
+  raises OS notifications, and bridges the mic/speaker for calls via
+  `dante-audio`. What is outstanding is the release side: native application
+  menus, auto-update, signed bundles, and a macOS build (CI covers Linux and
+  Windows).
 - A **group-call SFU** for large voice rooms (full mesh only now, fine to ~8).
 - Tenor / Giphy GIF search.
 - Custom profiles, per-server nicknames / avatars; emoji in roles.
@@ -147,7 +159,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 A bare `cargo build` / `cargo test` excludes `dante-p2p` (the libp2p tree) by
 design; `--workspace` and `-p dante-p2p` include it. `dante-audio` and
 `apps/dante-desktop` are detached (they need libopus / webkit2gtk) and are not
-part of the workspace build.
+part of the workspace build — which also means `cargo fmt --all` and
+`clippy --workspace` do not see them. CI builds the desktop crate in its own
+job (Linux + Windows, with its own fmt and clippy) so the detachment cannot
+hide a break; to build it by hand, follow
+[`apps/dante-desktop/README.md`](apps/dante-desktop/README.md).
 
 `cargo-deny` (license / advisory / source checks) runs in CI; install locally
 with `cargo install cargo-deny` and run `cargo deny check`.

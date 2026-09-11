@@ -45,6 +45,17 @@ explicitly from this directory.
   ```
   The audio bridge additionally links **libopus** and the platform audio stack
   (`libopus-dev` + `libasound2-dev` on Debian, in the Fedora list above).
+
+  On **Windows** nothing needs installing — WebView2 ships with the OS and the
+  audio backend is WASAPI — but `audiopus_sys` has no system libopus to find,
+  so it builds the vendored copy with CMake. That copy still declares
+  `cmake_minimum_required(VERSION <3.5)`, which CMake 4 refuses outright, so
+  set CMake's documented escape hatch before building:
+  ```
+  $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+  ```
+  CI sets the same variable. It can go away once `audiopus_sys` ships a libopus
+  that configures under CMake 4 unaided.
 - Nothing else: `icons/icon.png` is committed (a 512x512 mesh mark). It is the
   *source* icon — `generate_context!` embeds it, so the crate will not compile
   without one. `cargo tauri icon icons/icon.png` regenerates the full platform

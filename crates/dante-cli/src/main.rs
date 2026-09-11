@@ -579,8 +579,8 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                                 dante_core::Inbound::VoiceSignal { .. } => {}
                                 dante_core::Inbound::CallSignal { .. } => {}
                                 dante_core::Inbound::ChannelBacklog { entries, .. } => {
-                                    for (_who, _at, text) in entries {
-                                        println!("  · {text}");
+                                    for e in entries {
+                                        println!("  · {}", e.text);
                                     }
                                 }
                                 dante_core::Inbound::ChannelInvite {

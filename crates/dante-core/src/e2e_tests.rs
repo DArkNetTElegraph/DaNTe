@@ -1206,8 +1206,8 @@ async fn a_new_member_gets_a_backlog_of_recent_messages() {
 
     let server = host.create_server("lodge", now).await.unwrap();
     let chan = host.create_channel(&server, "general", true, None).unwrap();
-    host.send_channel(&chan, "first", now).await.unwrap();
-    host.send_channel(&chan, "second", now).await.unwrap();
+    let first_seq = host.send_channel(&chan, "first", now).await.unwrap();
+    let second_seq = host.send_channel(&chan, "second", now).await.unwrap();
 
     // Bob joins after those were sent — he can't decrypt the pre-join log, so
     // the host hands him a plaintext snapshot.
@@ -1222,12 +1222,24 @@ async fn a_new_member_gets_a_backlog_of_recent_messages() {
     let (cid, entries) = backlog.expect("bob received a channel backlog");
     assert_eq!(cid, chan);
     assert_eq!(
-        entries
-            .iter()
-            .map(|(_, _, t)| t.clone())
-            .collect::<Vec<_>>(),
+        entries.iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
         vec!["first", "second"]
     );
+
+    // The snapshot carries each line's relay-log seq. Without it a backfilled
+    // message renders as inert text — `serve` keys reactions, pins, replies and
+    // edits off this id, and the SPA hides every hover action when it is 0.
+    assert_eq!(
+        entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![first_seq, second_seq],
+        "backlog lines keep the seq the relay gave them"
+    );
+
+    // And they are usable: bob can react to a message he was backfilled,
+    // which is the whole point of carrying the seq.
+    bob.send_react(&chan, first_seq, "👍", false, now)
+        .await
+        .expect("a backfilled message can be reacted to");
 }
 
 #[tokio::test]

@@ -254,9 +254,11 @@ no relay at all (the relay is still the store-and-forward node — but the
 wire over a `/dante/relay/1` libp2p stream, redundant fan-out/merge across
 the discovered relay set, ledger gossip + startup backfill that federates
 relay replicas, and gossip acceleration for channel logs — see Phase 3);
-the group-call SFU that the Phase 7 SFrame layer is for; the Tauri desktop
-native layer. Phase 8 (stickers, soundboards, opt-in URL embeds, headless
-bot bridge) is done.
+the group-call SFU that the Phase 7 SFrame layer is for; desktop packaging
+(auto-update, signed bundles, macOS). Phase 8 (stickers, soundboards, opt-in
+URL embeds, headless bot bridge) is done. The Tauri native layer itself —
+startup progress, tray, OS notifications — landed; what no one has done is
+*run* it.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
 stored copy; `Engine::publish_prekeys` refills the client pool to 50 before
@@ -585,20 +587,46 @@ DaNTe/
   save, and connects the engine; *unlock* opens the existing keystore file
   with a passphrase; *import* accepts a pasted keystore **or** recovery blob.
   `DANTE_PASSPHRASE` still short-circuits to a direct load when set.
-- **Desktop shell *(scaffolded)*:** `apps/dante-desktop` — a Tauri 2 crate that
-  is a **thin wrapper**, not a rewrite. `crates/dante-cli` now has a `[lib]`
-  target exposing `serve::run` / `serve::run_on(existing, listener, boot)` plus
-  `now_ms` / `parse_fingerprint`; the desktop `main.rs` binds an ephemeral
-  `127.0.0.1` port, spawns `serve::run_on`, and points a native `WebviewWindow`
-  at it. So the whole existing web UI + JSON API + onboarding is reused
-  verbatim; the desktop build only adds the native layer (window/menus, OS
-  notifications, tray, auto-update — TODO). Config via env (`DANTE_HOME`,
-  `DANTE_RELAY`, `DANTE_PASSPHRASE`, `DANTE_POW_BITS`), matching `dante serve`.
+- **Desktop shell *(built, never run)*:** `apps/dante-desktop` — a Tauri 2
+  crate that is a **thin wrapper**, not a rewrite. `crates/dante-cli` has a
+  `[lib]` target exposing `serve::run` / `serve::run_on(existing, listener,
+  boot)` plus `now_ms` / `parse_fingerprint`; the desktop `main.rs` binds an
+  ephemeral `127.0.0.1` port, spawns `serve::run_on`, and points a native
+  `WebviewWindow` at it. The whole web UI + JSON API + onboarding is reused
+  verbatim. Config via env (`DANTE_HOME`, `DANTE_RELAY`, `DANTE_PASSPHRASE`,
+  `DANTE_POW_BITS`), matching `dante serve`. SvelteKit is no longer planned —
+  the vanilla-JS SPA is the frontend.
+
+  The native layer on top:
+  - **Startup is narrated, not waited out.** The window opens *before* any
+    engine work. `Engine::connect_with_progress` reports a `BootStep` as each
+    step begins, and `serve::Bootstrap.progress` carries the same sink so the
+    second half (registration PoW, prekeys, first sync) is reported too — the
+    two halves are in different crates, so a complete picture needs both. The
+    boot screen renders what arrives and swaps itself for the SPA on `Ready`;
+    its bar is indeterminate because startup length depends on the relay, the
+    store and the PoW difficulty, so a percentage would be invented.
+  - **Tray** (open / hide / quit) with the close button hiding rather than
+    exiting, so closing the window does not silently drop you off the network.
+  - **OS notifications** off the same localhost API the page uses — silent
+    while focused, never for your own lines, bursts collapsed, and message
+    text withheld while the window is hidden so a lock-screen preview cannot
+    leak a conversation.
+  - **Mic/speaker bridge** (`dante-audio`, Opus + cpal) for call audio, which
+    a plain webview cannot do.
+
   The crate is **detached from the workspace** (own `[workspace]`, not a
   member) because Tauri needs `webkit2gtk-4.1` / `libsoup-3` (Linux) /
-  WebView2 / WKWebView that the CI container lacks — `cargo build --workspace`
-  skips it; build it with `cd apps/dante-desktop && cargo tauri dev` (see its
-  README). SvelteKit is no longer planned — the vanilla-JS SPA is the frontend.
+  WebView2 / WKWebView, and `dante-audio` links libopus and the platform audio
+  stack — `cargo build --workspace` skips it, and so do the root `cargo fmt
+  --all` and `clippy --workspace`. That invisibility is why it once stopped
+  compiling entirely without anyone noticing, so CI builds it in a dedicated
+  job on **Linux and Windows**, with its own fmt and clippy. Build it by hand
+  with `cd apps/dante-desktop && cargo tauri dev` (see its README).
+
+  **Still outstanding:** native application menus, auto-update, signed
+  bundles, a macOS build — and runtime verification. A green build says the
+  code is well-formed; no one has opened the window.
 - **Settings screen** *(done)*: a ⚙ overlay in the SPA — Identity (recovery
   phrase), Appearance (light/dark/auto theme), Behaviour (typing-broadcast
   toggle, desktop-notification permission), Network (relay list, read-only),

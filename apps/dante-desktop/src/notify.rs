@@ -38,7 +38,15 @@ pub fn spawn(app: AppHandle, port: u16) {
 fn run(app: AppHandle, port: u16) {
     // Start from "now": whatever is already in the log was there before the app
     // opened, and replaying history as notifications would be obnoxious.
-    let mut cursor = latest_seq(port).unwrap_or(0);
+    //
+    // This thread starts before the service is serving, so the first requests
+    // fail. Wait for a real answer rather than defaulting the cursor to 0 —
+    // that would treat the entire stored history as unread and fire a
+    // notification for every line of it on launch.
+    let Some(mut cursor) = wait_for_log(port) else {
+        eprintln!("dante-desktop: notifications disabled, the local service never answered");
+        return;
+    };
 
     loop {
         std::thread::sleep(POLL);
@@ -155,6 +163,20 @@ fn fetch(port: u16, since: u64) -> Option<Vec<Value>> {
         Value::Array(v) => Some(v),
         _ => None,
     }
+}
+
+/// Block until the local service answers, and report the highest `seq` it
+/// already holds. An empty log answers `Some(0)`; only an unreachable service
+/// retries. Bounded, so a service that never comes up leaves this thread dead
+/// instead of spinning for the life of the process.
+fn wait_for_log(port: u16) -> Option<u64> {
+    for _ in 0..120 {
+        if let Some(seq) = latest_seq(port) {
+            return Some(seq);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    None
 }
 
 /// Highest `seq` currently in the log, so a fresh start does not replay.

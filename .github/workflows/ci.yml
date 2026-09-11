@@ -44,6 +44,16 @@ jobs:
   desktop:
     name: desktop shell (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # `audiopus_sys` vendors a libopus whose CMakeLists.txt still declares
+      # `cmake_minimum_required(VERSION <3.5)`, and CMake 4 removed
+      # compatibility with that — configuring aborts outright. This is CMake's
+      # own documented escape hatch for exactly this case.
+      #
+      # It only matters on Windows: Linux links the system libopus found via
+      # pkg-config and never builds it from source. Drop this when audiopus_sys
+      # ships a libopus that configures under CMake 4 on its own.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
       # Both targets are shipped, so both are built. Don't let one platform's
       # failure hide the other's result.

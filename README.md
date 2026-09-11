@@ -69,10 +69,11 @@ above — it states precisely what is and is not protected.
   *backfilled from the host* carries no `seq` on the wire, so those lines stay
   unkeyed until the protocol carries one.
 - **Desktop shell not runtime-verified.** The native layer (startup progress,
-  tray, notifications, the mic/speaker bridge) compiles in CI on Linux and
-  Windows, but no one has yet opened the window: how it looks, whether the tray
-  behaves per-platform, and whether notifications fire at sensible moments are
-  all unconfirmed. The dev environment has no GTK/webview stack, so this needs
+  tray, notifications, the mic/speaker bridge) builds green in CI on both Linux
+  and Windows, but no one has yet opened the window: how it looks, whether the
+  tray behaves per-platform, and whether notifications fire at sensible moments
+  are all unconfirmed. A passing build says the code is well-formed, nothing
+  more. The dev environment has no GTK/webview stack, so this needs
   a real desktop — see
   [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md).
 - **Multi-relay channel writes** converge via rendezvous hashing while every
@@ -112,6 +113,23 @@ cargo build --release -p dante-relay -p dante-cli
 Open <http://127.0.0.1:8080>, pick a username + passphrase, and you're in. Run a
 second `dante serve` on another `--http` port with a different `--keystore` to
 talk to yourself. `dante chat --keystore … --relay …` is the terminal client.
+
+### As a desktop app
+
+The same thing in a native window, with a startup screen that reports what the
+engine is doing, a system tray, and OS notifications. It needs a webview and
+audio stack the plain CLI does not, so it is built separately — see
+[`apps/dante-desktop/README.md`](apps/dante-desktop/README.md) for the
+per-platform packages:
+
+```bash
+cargo install tauri-cli --version '^2'
+cd apps/dante-desktop
+DANTE_RELAY=127.0.0.1:9944 DANTE_POW_BITS=8 cargo tauri dev
+```
+
+Nobody has run this yet — it is built on Linux and Windows in CI, and that is
+the whole of what is known about it. Expect rough edges and please report them.
 
 ## Repository layout
 

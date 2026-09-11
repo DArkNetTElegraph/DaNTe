@@ -1,0 +1,74 @@
+# systemd unit for a DaNTe relay.
+#
+#   sudo install -m0644 deploy/dante-relay.service /etc/systemd/system/
+#   sudo install -m0755 target/release/dante-relay /usr/local/bin/
+#   sudo systemctl edit dante-relay          # set DANTE_TURN_SECRET, see below
+#   sudo systemctl enable --now dante-relay
+#
+# The default here runs the relay behind a Tor onion service — no public IP,
+# no port forwarding, and the relay never learns a client's address. See
+# docs/RUNNING_A_RELAY.md, which also covers running it on a public host.
+
+[Unit]
+Description=DaNTe relay
+Documentation=https://github.com/DArkNetTElegraph/DaNTe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The relay holds no long-lived secret of its own and needs no state directory:
+# the ledger replica, mailbox and blob store are rebuilt from peers and from
+# what clients deposit. A dynamic user is therefore enough, and means a
+# compromise of the process reaches nothing that outlives it.
+DynamicUser=yes
+
+# --turn-public-ip must be the address clients can actually reach. Put the real
+# values in a drop-in (`systemctl edit dante-relay`) rather than editing this
+# file, so a package update does not clobber them:
+#
+#   [Service]
+#   Environment=DANTE_TURN_SECRET=<32+ random bytes, base64>
+#   ExecStart=
+#   ExecStart=/usr/local/bin/dante-relay --listen 0.0.0.0:9944 \
+#       --turn-listen 0.0.0.0:3478 --turn-public-ip 203.0.113.10 \
+#       --p2p-listen /ip4/0.0.0.0/tcp/9945
+#
+# The TURN secret is read from the environment on purpose: passing it as
+# --turn-secret puts it in argv, where every local user can read it from /proc.
+# Bound to localhost by default, which is what an onion service wants: Tor is
+# the only thing that should reach the relay, and nothing is exposed directly.
+# A public host overrides this in a drop-in (see above).
+ExecStart=/usr/local/bin/dante-relay --listen 127.0.0.1:9944
+
+Restart=always
+RestartSec=5s
+
+# A relay is a network daemon that parses untrusted input from strangers, so
+# give it as little of the host as it can run with.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# Relays are rate-limited internally, but a public port is a public port.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

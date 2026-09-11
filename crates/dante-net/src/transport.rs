@@ -161,6 +161,53 @@ impl Client {
     }
 }
 
+/// Tor's default SOCKS port. An `.onion` address goes here unless told otherwise.
+const TOR_SOCKS: &str = "127.0.0.1:9050";
+
+/// Open a TCP connection to `addr`, through a SOCKS5 proxy where that is what
+/// the address calls for.
+///
+/// The proxy is used when either:
+/// - `DANTE_SOCKS5` is set — an explicit "send everything through here",
+///   which is how you put the whole client behind Tor or a VPN's proxy; or
+/// - the host ends in `.onion`, which cannot be reached any other way. A plain
+///   `TcpStream::connect` on one fails at DNS, so routing it to Tor's default
+///   port is the only interpretation that can work.
+///
+/// Anything else dials directly, so a self-hosted relay at a bare `host:port`
+/// keeps working with no configuration.
+async fn dial(addr: &str) -> Result<TcpStream, NetError> {
+    let (host, port) = split_host_port(addr)?;
+
+    let proxy = match std::env::var("DANTE_SOCKS5") {
+        Ok(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
+        _ if host.ends_with(".onion") => Some(TOR_SOCKS.to_string()),
+        _ => None,
+    };
+
+    match proxy {
+        Some(p) => crate::socks5::connect_via(&p, host, port).await,
+        None => Ok(TcpStream::connect(addr).await?),
+    }
+}
+
+/// Split `host:port`, keeping the host a name. IPv6 literals arrive bracketed.
+fn split_host_port(addr: &str) -> Result<(&str, u16), NetError> {
+    let (host, port) = addr.rsplit_once(':').ok_or_else(|| {
+        NetError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("relay address {addr} has no port"),
+        ))
+    })?;
+    let port: u16 = port.parse().map_err(|_| {
+        NetError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("relay address {addr} has a bad port"),
+        ))
+    })?;
+    Ok((host.trim_start_matches('[').trim_end_matches(']'), port))
+}
+
 impl TcpBackend {
     /// Drop any stream and open a fresh one, trying every endpoint once
     /// starting from the last-known-good.
@@ -170,14 +217,14 @@ impl TcpBackend {
         let mut last = NetError::Closed;
         for step in 0..n {
             let idx = (self.current + step) % n;
-            match TcpStream::connect(self.addrs[idx].as_str()).await {
+            match dial(self.addrs[idx].as_str()).await {
                 Ok(stream) => {
                     stream.set_nodelay(true).ok();
                     self.stream = Some(stream);
                     self.current = idx;
                     return Ok(());
                 }
-                Err(e) => last = e.into(),
+                Err(e) => last = e,
             }
         }
         Err(last)
@@ -663,6 +710,32 @@ async fn serve_conn<H: RequestHandler>(
             Err(e) => Response::Error(format!("bad request: {e}")),
         };
         write_frame(&mut stream, &response.encode()).await?;
+    }
+}
+
+#[cfg(test)]
+mod dial_tests {
+    use super::split_host_port;
+
+    #[test]
+    fn splits_addresses_without_resolving_them() {
+        assert_eq!(
+            split_host_port("relay.example.org:9944").unwrap(),
+            ("relay.example.org", 9944)
+        );
+        // The host stays a name: an .onion has no DNS record, and resolving it
+        // locally would leak the destination to the resolver.
+        let (host, port) = split_host_port("abcxyz.onion:9944").unwrap();
+        assert_eq!((host, port), ("abcxyz.onion", 9944));
+        assert!(host.ends_with(".onion"), "routing keys off this suffix");
+        // IPv6 literals arrive bracketed.
+        assert_eq!(split_host_port("[::1]:9944").unwrap(), ("::1", 9944));
+
+        assert!(split_host_port("relay.example.org").is_err(), "no port");
+        assert!(
+            split_host_port("relay.example.org:http").is_err(),
+            "bad port"
+        );
     }
 }
 

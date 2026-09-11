@@ -152,7 +152,15 @@ provide.
    `--turn-listen` also hosts the TURN server in-process — that operator then
    sees both call peers' IPs (still not the media). An operator who wants TURN
    handled by a separate, differently-run box omits `--turn-listen` and points
-   `--turn` at it.
+   `--turn` at it. The browser client is handed those credentials over its
+   localhost API (`GET /api/ice`) so it can actually allocate a relay
+   candidate — without them it gathers only host and srflx candidates and a
+   call between two symmetric NATs never connects. That hands nothing to the
+   page it did not already hold: the page drives the whole engine over the same
+   localhost API, and the credential is a short-lived token good for relaying
+   media and nothing else. It is re-minted from the relay when close to
+   expiring rather than on every call, so a wedged relay cannot stall the
+   client at call start.
 6. **Availability against a resourced censor.** Bootstrap addresses can be
    blocked; a nation-state can disrupt the DHT. DaNTe aims for resilience, not
    invulnerability.

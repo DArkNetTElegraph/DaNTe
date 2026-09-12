@@ -368,6 +368,13 @@ img.sticker { display: block; max-width: 180px; max-height: 180px; object-fit: c
   background: #000; border-radius: var(--radius-lg); border: 1px solid var(--divider);
   padding: 6px; max-width: 520px; }
 .voice-screen video { width: 100%; max-height: 300px; border-radius: var(--radius); background: #000; }
+.voice-screen-off { display: none; }
+.voice-screen.preview-off video { display: none; }
+.voice-screen.preview-off .voice-screen-off {
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  width: 100%; min-height: 160px; border-radius: var(--radius); background: var(--bg-raised);
+  color: var(--text-faint); font-size: 12.5px; padding: 12px;
+}
 .voice-screen-label { font-size: 12px; color: var(--text-muted); }
 .voice-soundboard { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
   margin: 12px 0 2px; max-width: 460px; }
@@ -581,6 +588,9 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .set-wide { display: block; width: 100%; margin-top: 8px; text-align: left; }
 .set-pill.on { background: var(--bg-active); border-color: var(--cornflower-blue); color: var(--text); }
 .set-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; text-transform: none; letter-spacing: 0; }
+.set-label { font-size: 12px; color: var(--text-muted); min-width: 76px; }
+.set-row + .set-row { margin-top: 8px; }
+.set-hint { font-size: 11.5px; color: var(--text-faint); margin-top: 8px; line-height: 1.4; }
 .set-toggle input { width: auto; margin: 0; }
 .set-sec.danger .set-h { color: var(--blazing-flame); }
 .danger-btn { border-color: var(--blazing-flame) !important; color: var(--blazing-flame) !important; }
@@ -2159,26 +2169,16 @@ function renderVoiceRoom(c, target) {
 
   if (connected) {
     const shares = [];
-    if (voiceRtc.screenStream) shares.push(["You — sharing", voiceRtc.screenStream]);
+    if (voiceRtc.screenStream) shares.push(["me", "You — sharing", voiceRtc.screenStream]);
     for (const fp of people) {
       const link = voiceRtc.peers.get(fp);
       if (link && link.remoteScreen)
-        shares.push([(dmLabel(fp) || short(fp)) + " — sharing", link.remoteScreen]);
+        shares.push([fp, (dmLabel(fp) || short(fp)) + " — sharing", link.remoteScreen]);
     }
-    if (shares.length) {
-      const grid = el("div", "voice-screens");
-      for (const [label, stream] of shares) {
-        const cell = el("div", "voice-screen");
-        const v = el("video");
-        v.autoplay = true; v.playsInline = true; v.muted = true;
-        v.srcObject = stream;
-        v.play().catch(() => {});
-        cell.appendChild(v);
-        cell.appendChild(el("div", "voice-screen-label", label));
-        grid.appendChild(cell);
-      }
-      wrap.appendChild(grid);
-    }
+    if (shares.length) wrap.appendChild(renderScreenShareGrid(shares));
+    else releaseScreenTiles();
+  } else {
+    releaseScreenTiles();
   }
 
   if (connected) {
@@ -2214,6 +2214,85 @@ function renderVoiceRoom(c, target) {
   wrap.appendChild(row);
 
   log.appendChild(wrap);
+}
+
+/* Screen-share preview tiles are kept in a DOM cache keyed by "me" or a
+   peer's fingerprint, instead of being torn down and rebuilt on every
+   render() — renderChat() clears and rebuilds `#log` on every poll tick,
+   voice presence update and SFrame epoch bump, and re-creating the <video>
+   element each time (fresh srcObject, fresh .play()) is what made shares
+   look choppy independent of the encoder settings above: the picture was
+   restarting several times a second. Reusing the same element keeps
+   playback continuous across those rebuilds. */
+const screenTileEls = new Map(); // key -> { cell, video, labelEl, offEl, stream }
+
+// Mirrors Discord: while the window isn't focused (or the tab isn't visible),
+// pause preview playback and show a placeholder instead of decoding video no
+// one is looking at.
+function previewsSuspended() {
+  return document.visibilityState === "hidden" || !document.hasFocus();
+}
+
+function applyPreviewFocusState(t) {
+  const off = previewsSuspended();
+  t.cell.classList.toggle("preview-off", off);
+  if (off) {
+    if (!t.video.paused) t.video.pause();
+  } else if (t.stream && t.video.paused) {
+    t.video.play().catch(() => {});
+  }
+}
+
+function refreshScreenPreviewFocus() {
+  for (const t of screenTileEls.values()) applyPreviewFocusState(t);
+}
+window.addEventListener("focus", refreshScreenPreviewFocus);
+window.addEventListener("blur", refreshScreenPreviewFocus);
+document.addEventListener("visibilitychange", refreshScreenPreviewFocus);
+
+function renderScreenShareGrid(shares) {
+  const grid = el("div", "voice-screens");
+  const liveKeys = new Set();
+  for (const [key, label, stream] of shares) {
+    liveKeys.add(key);
+    let t = screenTileEls.get(key);
+    if (!t) {
+      const cell = el("div", "voice-screen");
+      const v = el("video");
+      v.autoplay = true; v.playsInline = true; v.muted = true;
+      const labelEl = el("div", "voice-screen-label");
+      const offEl = el("div", "voice-screen-off", "Preview paused — window not focused");
+      cell.append(v, offEl, labelEl);
+      t = { cell, video: v, labelEl, offEl, stream: null };
+      screenTileEls.set(key, t);
+    }
+    if (t.stream !== stream) {
+      t.stream = stream;
+      t.video.srcObject = stream;
+      if (!previewsSuspended()) t.video.play().catch(() => {});
+    }
+    t.labelEl.textContent = label;
+    applyPreviewFocusState(t);
+    grid.appendChild(t.cell);
+  }
+  for (const key of [...screenTileEls.keys()]) {
+    if (!liveKeys.has(key)) {
+      const t = screenTileEls.get(key);
+      try { t.video.pause(); t.video.srcObject = null; } catch (_) {}
+      screenTileEls.delete(key);
+    }
+  }
+  return grid;
+}
+
+// Called when the room has no active shares, or we've left/disconnected —
+// there is nothing left worth caching a paused <video> element for.
+function releaseScreenTiles() {
+  if (!screenTileEls.size) return;
+  for (const t of screenTileEls.values()) {
+    try { t.video.pause(); t.video.srcObject = null; } catch (_) {}
+  }
+  screenTileEls.clear();
 }
 
 const FWD_PREFIX = "↪ Forwarded from ";
@@ -3740,10 +3819,16 @@ async function voiceToggleScreen() {
     ui.say("this browser can't share a screen (needs a secure context)");
     return;
   }
+  const fps = screenShareFps();
+  const [resW, resH] = SCREEN_RES[screenShareRes()];
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 15 }, audio: false,
+      video: {
+        width: { ideal: resW, max: resW }, height: { ideal: resH, max: resH },
+        frameRate: { ideal: fps, max: fps },
+      },
+      audio: false,
     });
   } catch (e) {
     if (e && e.name === "NotAllowedError") return;   // user dismissed the picker
@@ -3753,8 +3838,13 @@ async function voiceToggleScreen() {
   voiceRtc.screenStream = stream;
   const vid = stream.getVideoTracks()[0];
   if (vid) vid.onended = () => { voiceStopScreen(); render(); };  // "Stop sharing" in the browser chrome
+  if (vid) vid.contentHint = "motion";   // bias capture itself toward smoothness
   for (const entry of voiceRtc.peers.values()) {
-    for (const t of stream.getTracks()) entry.screenSenders.push(entry.pc.addTrack(t, stream));
+    for (const t of stream.getTracks()) {
+      const sender = entry.pc.addTrack(t, stream);
+      entry.screenSenders.push(sender);
+      if (t.kind === "video") applyScreenSenderParams(sender, fps);
+    }
   }
   render();
 }
@@ -3808,8 +3898,12 @@ async function voicePeerConnect(fp, initiator) {
   for (const t of voiceRtc.localStream.getTracks()) pc.addTrack(t, voiceRtc.localStream);
   // If we're already sharing when this peer joins, send them the screen too.
   if (voiceRtc.screenStream) {
-    for (const t of voiceRtc.screenStream.getTracks())
-      entry.screenSenders.push(pc.addTrack(t, voiceRtc.screenStream));
+    const fps = screenShareFps();
+    for (const t of voiceRtc.screenStream.getTracks()) {
+      const sender = pc.addTrack(t, voiceRtc.screenStream);
+      entry.screenSenders.push(sender);
+      if (t.kind === "video") applyScreenSenderParams(sender, fps);
+    }
   }
   for (const s of pc.getSenders()) sframeAttach(s, "enc");
 
@@ -4294,6 +4388,41 @@ function applyTheme(t) {
 applyTheme(LS.get("theme", "system"));
 function typingEnabled() { return LS.get("typing_off", false) !== true; }
 
+/* ---------- screen share quality settings ------------------------------- */
+// Resolution presets, ideal dimensions handed to getDisplayMedia as a cap —
+// asking the browser to encode at 4K when the user picked 720p is how a
+// screen share ends up choppy: bitrate goes to pixels instead of frames.
+const SCREEN_RES = {
+  "480p": [854, 480], "720p": [1280, 720], "1080p": [1920, 1080],
+  "1440p": [2560, 1440], "2160p": [3840, 2160],
+};
+const SCREEN_FPS_OPTS = [15, 30, 60, 120];
+
+function screenShareFps() {
+  const v = LS.get("screen_fps", 30);
+  return SCREEN_FPS_OPTS.includes(v) ? v : 30;
+}
+function screenShareRes() {
+  const v = LS.get("screen_res", "1080p");
+  return SCREEN_RES[v] ? v : "1080p";
+}
+
+// Bias the encoder toward frame rate over resolution under bandwidth
+// pressure. WebRTC's default (`balanced`) drops fps first to protect
+// sharpness, which is the usual cause of a screen share looking choppy even
+// on a fine connection — most of what's shared is motion (video, scrolling,
+// cursor movement), not fine static detail.
+function applyScreenSenderParams(sender, fps) {
+  if (!sender || !sender.setParameters || !sender.getParameters) return;
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+    params.encodings[0].maxFramerate = fps;
+    params.degradationPreference = "maintain-framerate";
+    sender.setParameters(params).catch(() => {});
+  } catch (_) {}
+}
+
 function openSettings() {
   if ($("#settings-overlay")) return;
   const ov = el("div"); ov.id = "settings-overlay";
@@ -4353,6 +4482,40 @@ function openSettings() {
   };
   beSec.appendChild(notifBtn);
   box.appendChild(beSec);
+
+  // Screen share quality — applies to the next share started, not one
+  // already in progress.
+  const ssSec = el("div", "set-sec");
+  ssSec.appendChild(Object.assign(el("div", "set-h"), { textContent: "Screen share" }));
+  const fpsRow = el("div", "set-row");
+  fpsRow.appendChild(Object.assign(el("span", "set-label"), { textContent: "Frame rate" }));
+  const curFps = screenShareFps();
+  SCREEN_FPS_OPTS.forEach(f => {
+    const b = el("button", "set-pill" + (curFps === f ? " on" : ""), f + " fps");
+    b.onclick = () => {
+      LS.set("screen_fps", f);
+      [...fpsRow.querySelectorAll(".set-pill")].forEach(c => c.classList.remove("on"));
+      b.classList.add("on");
+    };
+    fpsRow.appendChild(b);
+  });
+  ssSec.appendChild(fpsRow);
+  const resRow = el("div", "set-row");
+  resRow.appendChild(Object.assign(el("span", "set-label"), { textContent: "Resolution" }));
+  const curRes = screenShareRes();
+  Object.keys(SCREEN_RES).forEach(r => {
+    const b = el("button", "set-pill" + (curRes === r ? " on" : ""), r);
+    b.onclick = () => {
+      LS.set("screen_res", r);
+      [...resRow.querySelectorAll(".set-pill")].forEach(c => c.classList.remove("on"));
+      b.classList.add("on");
+    };
+    resRow.appendChild(b);
+  });
+  ssSec.appendChild(resRow);
+  ssSec.appendChild(Object.assign(el("div", "set-hint"),
+    { textContent: "Higher settings need more bandwidth and CPU on both ends. Applies the next time you start sharing." }));
+  box.appendChild(ssSec);
 
   // Network
   const nwSec = el("div", "set-sec");

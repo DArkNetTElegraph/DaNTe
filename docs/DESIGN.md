@@ -636,8 +636,8 @@ DaNTe/
   stack — `cargo build --workspace` skips it, and so do the root `cargo fmt
   --all` and `clippy --workspace`. That invisibility is why it once stopped
   compiling entirely without anyone noticing, so CI builds it in a dedicated
-  job on **Linux and Windows**, with its own fmt and clippy. Build it by hand
-  with `cd apps/dante-desktop && cargo tauri dev` (see its README).
+  job on **Linux, Windows and macOS**, with its own fmt and clippy. Build it
+  by hand with `cd apps/dante-desktop && cargo tauri dev` (see its README).
 
   **Still outstanding:** native application menus, auto-update, signed
   bundles, a macOS build — and runtime verification. A green build says the

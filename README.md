@@ -12,9 +12,10 @@ identities.
 > browser client (`dante serve`). The libp2p transport (DHT relay discovery,
 > redundant relay set, relay federation) is **on by default**, and the Tauri
 > desktop shell has its native layer — live startup progress, tray, OS
-> notifications — built for Linux and Windows in CI. Main gaps: **nothing in
-> the voice/media path or the desktop shell has been run by a human yet**, and
-> there is no group-call SFU. Wire formats still change without notice. See the
+> notifications — built for Linux, Windows and macOS in CI. Main gaps:
+> **nothing in the voice/media path or the desktop shell has been run by a
+> human yet**, and there is no group-call SFU. Wire formats still change
+> without notice. See the
 > [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
 ## What it is
@@ -135,8 +136,9 @@ cd apps/dante-desktop
 DANTE_RELAY=127.0.0.1:9944 DANTE_POW_BITS=8 cargo tauri dev
 ```
 
-Nobody has run this yet — it is built on Linux and Windows in CI, and that is
-the whole of what is known about it. Expect rough edges and please report them.
+Nobody has run this yet — it is built on Linux, Windows and macOS in CI, and
+that is the whole of what is known about it. Expect rough edges and please
+report them.
 
 ## Repository layout
 

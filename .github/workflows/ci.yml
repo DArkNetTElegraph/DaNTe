@@ -55,11 +55,11 @@ jobs:
       # ships a libopus that configures under CMake 4 on its own.
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
-      # Both targets are shipped, so both are built. Don't let one platform's
-      # failure hide the other's result.
+      # Every platform this ships on is built here. Don't let one platform's
+      # failure hide another's result.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -73,7 +73,11 @@ jobs:
       # ALSA for the mic/speaker bridge. The other jobs must stay free of them,
       # which is why this is a separate runner rather than a workspace member.
       # Windows needs none of it: WebView2 ships with the OS and the audio
-      # backend is WASAPI.
+      # backend is WASAPI. macOS ships WKWebView and CoreAudio the same way —
+      # only libopus has no system copy, so pkg-config + Homebrew's opus let
+      # the audio bridge link that instead of falling back to a from-source
+      # CMake build of the vendored copy (the same one that needs
+      # `CMAKE_POLICY_VERSION_MINIMUM` below on Windows).
       - name: System libraries
         if: runner.os == 'Linux'
         run: |
@@ -87,6 +91,10 @@ jobs:
             libayatana-appindicator3-dev \
             libopus-dev \
             libasound2-dev
+
+      - name: System libraries
+        if: runner.os == 'macOS'
+        run: brew install pkg-config opus
 
       - uses: Swatinem/rust-cache@v2
         with:

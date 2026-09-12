@@ -269,10 +269,11 @@ no relay at all (the relay is still the store-and-forward node — but the
 wire over a `/dante/relay/1` libp2p stream, redundant fan-out/merge across
 the discovered relay set, ledger gossip + startup backfill that federates
 relay replicas, and gossip acceleration for channel logs — see Phase 3);
-the group-call SFU that the Phase 7 SFrame layer is for; desktop packaging
-(auto-update, signed bundles, macOS). Phase 8 (stickers, soundboards, opt-in
-URL embeds, headless bot bridge) is done. The Tauri native layer itself —
-startup progress, tray, OS notifications — landed; what no one has done is
+the group-call SFU that the Phase 7 SFrame layer is for; desktop release
+packaging (native menus, auto-update, signed installers). Phase 8 (stickers,
+soundboards, opt-in URL embeds, headless bot bridge) is done. The Tauri
+native layer itself — startup progress, tray, OS notifications — landed,
+and CI compiles it on Linux, Windows and macOS; what no one has done is
 *run* it.
 
 One-time prekeys: the relay hands out one OTP per `GetPrekeys` and shrinks its
@@ -639,9 +640,11 @@ DaNTe/
   job on **Linux, Windows and macOS**, with its own fmt and clippy. Build it
   by hand with `cd apps/dante-desktop && cargo tauri dev` (see its README).
 
-  **Still outstanding:** native application menus, auto-update, signed
-  bundles, a macOS build — and runtime verification. A green build says the
-  code is well-formed; no one has opened the window.
+  **Still outstanding:** native application menus, auto-update, and
+  signed/notarized installers for distribution — CI proves the code builds
+  on all three platforms, but produces no distributable bundle for any of
+  them yet. And runtime verification: a green build says the code is
+  well-formed; no one has opened the window.
 - **Settings screen** *(done)*: a ⚙ overlay in the SPA — Identity (recovery
   phrase), Appearance (light/dark/auto theme), Behaviour (typing-broadcast
   toggle, desktop-notification permission), Network (relay list, read-only),

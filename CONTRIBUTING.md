@@ -70,6 +70,12 @@ Also:
   body when it isn't obvious.
 - Reference the relevant phase or issue (`Refs #12`, `Phase 2`).
 - Rebase on `main` rather than merging it into your branch.
+- **Open every PR with base `main`**, even one that builds on another
+  still-open PR — merge or rebase that PR's branch into yours locally first,
+  then open against `main` regardless. Opening against the other PR's branch
+  instead means a squash-merge later lands on that branch, not `main`, and the
+  change silently never reaches production even though the PR shows as merged.
+  Confirm with `gh pr view <N> --json baseRefName` before calling a PR done.
 - Fill in the pull-request template. Draft PRs are welcome for early feedback.
 
 ### Developer Certificate of Origin (DCO)

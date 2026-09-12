@@ -9,7 +9,10 @@ roles, reactions, custom emoji, contacts, block list, safety numbers — comes
 from `crates/dante-cli` unchanged. The desktop build's job over time is the
 *native* layer: window/menus, OS notifications, tray, deep links, auto-update.
 
-One native piece is already here: **`src/audio.rs`** bridges the OS microphone
+Two native pieces are already here: **`src/menu.rs`** builds the application
+menu bar (About/Hide/Quit, Close Window, Edit, Window) — the OS menu bar on
+macOS, the window's own on Windows and Linux, via Tauri 2's unified
+`tauri::menu` API — and **`src/audio.rs`** bridges the OS microphone
 and speaker to live calls — 1:1 and group. It runs on its own thread (`cpal`
 streams are `!Send`), captures + encodes Opus once with `crates/dante-audio`,
 fans the frames out to every `connected` leg in `/api/calls`, decodes each leg

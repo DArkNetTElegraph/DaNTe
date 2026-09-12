@@ -164,14 +164,15 @@ above — it states precisely what is and is not protected.
 - **Desktop app: signing, auto-update.** The shell itself is in place — it
   reuses `dante serve` verbatim, opens the window *before* the engine starts
   and narrates each startup step into it, hides to the tray instead of
-  quitting, raises OS notifications, and bridges the mic/speaker for calls via
-  `dante-audio`. CI compiles it on Linux, Windows and macOS, and a `v*` tag now
-  produces real installers for all three (`.dmg`, `.msi`/`.exe`,
+  quitting, raises OS notifications, has a native application menu bar
+  (About/Hide/Quit, Close Window, Edit, Window), and bridges the mic/speaker
+  for calls via `dante-audio`. CI compiles it on Linux, Windows and macOS, and
+  a `v*` tag now produces real installers for all three (`.dmg`, `.msi`/`.exe`,
   `.deb`/`.rpm`/`.AppImage` — see
   [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md#release)).
   What is outstanding: the bundles are unsigned (macOS Gatekeeper and Windows
   SmartScreen both warn), which needs certificates this project does not have
-  yet; native application menus; and auto-update.
+  yet; and auto-update.
 - Browser/desktop wiring for the **group-call SFU**. The media plane, the
   relay-hosted signalling and the `dante-core` client mode are built and proven
   (`Engine::enable_sfu()`, real 3-peer/3-engine tests) — what is missing is SPA

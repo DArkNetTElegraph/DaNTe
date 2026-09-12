@@ -2,10 +2,12 @@
 
 SFU (selective forwarding unit) media component for large DaNTe voice rooms.
 
-> **Status: component proven, not wired in.** A real three-participant test
-> terminates DTLS-SRTP and forwards RTP opaquely; nothing in `dante-relay`,
-> `dante-core` or the SPA uses this crate yet. The default client path is
-> still the full mesh. See [`docs/SFU.md`](../../docs/SFU.md) for the design.
+> **Status: media plane proven; hosted by the relay behind a non-default
+> feature.** A real three-participant test terminates DTLS-SRTP and forwards
+> RTP opaquely, and `dante-relay`'s `sfu` feature hosts rooms and carries
+> SDP/ICE over the relay wire (also proven end to end). Nothing in `dante-core`
+> or the SPA uses it yet — the default client path is still the full mesh.
+> See [`docs/SFU.md`](../../docs/SFU.md) for the design.
 
 ## What it does
 

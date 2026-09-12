@@ -1,12 +1,13 @@
 # Group-call SFU (selective forwarding unit)
 
-> **Status: media-plane component proven, integration not started.** The crate
-> [`crates/dante-sfu`](../crates/dante-sfu/README.md) terminates real
-> DTLS-SRTP PeerConnections and forwards RTP payloads opaquely; a Rust-only
-> three-peer test proves real RTP reaches the other participants and never
-> loops back to the sender. Nothing is wired into `dante-relay`, `dante-core`
-> or the SPA yet — the default client path is still the full mesh. This
-> document is the design the rest of that work should follow.
+> **Status: media plane and relay-hosted signalling proven; client integration
+> not started.** [`crates/dante-sfu`](../crates/dante-sfu/README.md) terminates
+> real DTLS-SRTP PeerConnections and forwards RTP payloads opaquely, and
+> `dante-relay`'s `sfu` feature (off by default) hosts rooms and carries
+> SDP/ICE over the existing relay wire — both proven by real three-peer tests.
+> Nothing wires this into `dante-core` or the SPA yet: the default client path
+> is still the full mesh. This document is the design the rest of that work
+> should follow.
 
 ## Why
 
@@ -56,24 +57,27 @@ renegotiation is ever required. That is a deliberate v0 simplification: a
 production SFU would advertise a fixed room size or renegotiate as speakers
 join, rather than carrying silent m-lines.
 
-## Signalling (designed, not implemented)
+## Signalling
 
-Today's mesh signalling is pairwise: `Content::VoiceSignal` carries SDP and
-trickled ICE between browsers over authenticated DMs. For SFU mode each
-participant instead negotiates with the SFU endpoint:
+A relay built with the **non-default `sfu` feature** hosts rooms and carries
+the negotiation over its existing framed-TCP / libp2p wire:
 
-1. The client decides mesh vs SFU (see below) and, in SFU mode, asks the relay
-   to allocate a slot on the channel's call (a new `Request` on the existing
-   relay wire, authorized by the caller's identity and channel membership).
-2. Offer/answer + trickled ICE travel through that same authenticated path —
-   the SFU's DTLS fingerprint is bound to the slot allocation, not to a
-   `VoiceSignal` DM, so a client can verify it is talking to the allocated
-   SFU rather than a substituted peer.
-3. The MLS `group_call_key` still comes from the channel's MLS group and is
-   never sent to the relay; SFrame keys rotate on join/leave as today.
+| request | meaning |
+|---|---|
+| `SfuJoin { room, offer }` → `SfuAnswer { slot, answer }` | join (or create) the room for a channel, get a slot and the SFU's SDP answer |
+| `SfuIce { room, slot, candidate }` | trickle one local candidate to the SFU |
+| `SfuPull { room, slot }` → `SfuIce(candidates)` | drain the SFU's candidates for this slot |
+| `SfuLeave { room, slot }` | close the leg and free the slot |
 
-Until this exists, `dante-sfu` is a library with no network signalling of its
-own — exactly like `dante-voice`, the SDP strings are opaque.
+`room` is the 32-byte channel id — the same capability the channel log already
+uses — so possession of the channel id is the authorization, and the relay
+needs no new identity check. Media never travels this path: each participant
+holds a DTLS-SRTP connection to the SFU's own UDP endpoint.
+
+Still to do on the client side: `dante-core` has no SFU mode (it would own the
+threshold decision and drive these requests), the SPA does no negotiation, and
+no SFU endpoint is advertised to clients yet. The component is also
+feature-gated off in the relay binary, so a release build does not include it.
 
 ## Mesh vs SFU
 
@@ -116,11 +120,16 @@ an SFU or a TURN relay.
 
 ## What the component proves today
 
-`crates/dante-sfu/tests/forwarding.rs`: three `dante_voice::Call` participants
-each negotiate DTLS-SRTP with one `Sfu`, push a distinct audio payload, and
-each receives exactly the other two participants' payloads through the SFU —
-real RTP, opaque payloads, no direct peer connection between them. See the
-crate README for the exact status list.
+- `crates/dante-sfu/tests/forwarding.rs`: three `dante_voice::Call`
+  participants each negotiate DTLS-SRTP with one `Sfu`, push a distinct audio
+  payload, and each receives exactly the other two participants' payloads
+  through the SFU — real RTP, opaque payloads, no direct peer connection.
+- `crates/dante-relay/tests/sfu.rs` (feature `sfu`): the same three-peer
+  exchange, but every bit of signalling — `SfuJoin` / `SfuIce` / `SfuPull` —
+  goes over the relay's real wire to the relay-hosted room, proving the
+  protocol path end to end.
+
+See the crate README for the exact status list.
 
 ## Open questions / next steps
 

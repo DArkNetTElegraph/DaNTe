@@ -250,6 +250,72 @@ pub async fn get_p2p_peers(client: &mut Client) -> Result<Vec<String>, NetError>
     }
 }
 
+/// Join the SFU room for `room` (a channel id) with `offer`; returns the
+/// assigned slot and the SFU's answer. The relay must be built with its `sfu`
+/// feature, otherwise it answers an error.
+pub async fn sfu_join(
+    client: &mut Client,
+    room: &[u8; 32],
+    offer: &str,
+) -> Result<(u8, String), NetError> {
+    match client
+        .request(&Request::SfuJoin {
+            room: *room,
+            offer: offer.to_owned(),
+        })
+        .await?
+    {
+        Response::SfuAnswer { slot, answer } => Ok((slot, answer)),
+        other => Err(NetError::Peer(format!("SfuJoin: {other:?}"))),
+    }
+}
+
+/// Trickle one ICE candidate to the SFU for our slot (empty is a no-op).
+pub async fn sfu_ice(
+    client: &mut Client,
+    room: &[u8; 32],
+    slot: u8,
+    candidate: &str,
+) -> Result<(), NetError> {
+    match client
+        .request(&Request::SfuIce {
+            room: *room,
+            slot,
+            candidate: candidate.to_owned(),
+        })
+        .await?
+    {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("SfuIce: {other:?}"))),
+    }
+}
+
+/// Drain the SFU's ICE candidates for our slot.
+pub async fn sfu_pull(
+    client: &mut Client,
+    room: &[u8; 32],
+    slot: u8,
+) -> Result<Vec<String>, NetError> {
+    match client
+        .request(&Request::SfuPull { room: *room, slot })
+        .await?
+    {
+        Response::SfuIce(list) => Ok(list),
+        other => Err(NetError::Peer(format!("SfuPull: {other:?}"))),
+    }
+}
+
+/// Leave the SFU room; the SFU closes our leg and frees the slot.
+pub async fn sfu_leave(client: &mut Client, room: &[u8; 32], slot: u8) -> Result<(), NetError> {
+    match client
+        .request(&Request::SfuLeave { room: *room, slot })
+        .await?
+    {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("SfuLeave: {other:?}"))),
+    }
+}
+
 /// Fetch and decode mailbox envelopes for `hints` since `since_ms`.
 pub async fn fetch(
     client: &mut Client,

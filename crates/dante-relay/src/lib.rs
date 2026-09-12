@@ -12,6 +12,8 @@
 //! parsing, the maintenance loop, and the federation event loop.
 
 pub mod run;
+#[cfg(feature = "sfu")]
+pub mod sfu;
 pub mod state;
 pub mod turn_server;
 

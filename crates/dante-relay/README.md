@@ -37,13 +37,26 @@ Deployed as a process; `dante-core` uses it as a dev-dependency to run an
 in-process relay for its e2e suite. It links `dante-net`, `dante-ledger`,
 `dante-dm` and (feature `p2p`) `dante-p2p`.
 
+## SFU (feature `sfu`, off by default)
+
+With `--features sfu` the relay hosts group-call SFU rooms and serves
+`SfuJoin` / `SfuIce` / `SfuPull` / `SfuLeave` on its wire: participants
+negotiate one DTLS-SRTP connection each with the relay-side
+[`dante-sfu`](../dante-sfu/README.md), which forwards opaque RTP payloads.
+Authorization is possession of the 32-byte room id (the channel capability);
+the relay never holds a media key. Off by default because it pulls the WebRTC
+tree into the relay and the client integration is not shipped — see
+[`docs/SFU.md`](../../docs/SFU.md).
+
 ## Test
 
 ```sh
 cargo test -p dante-relay
+cargo test -p dante-relay --features sfu   # + the relay-hosted SFU e2e
 ```
 
 Covers store-and-fetch for every directory, rate limiting, one-time prekeys and
 last-resort KeyPackages, TURN credential minting, federation ingest / outbox
-dedup, writer step-down on channel-log overtake, and the in-process TURN server
-(credential accept / reject).
+dedup, writer step-down on channel-log overtake, the in-process TURN server
+(credential accept / reject), and (feature `sfu`) three participants
+forwarding real RTP through a relay-hosted SFU room.

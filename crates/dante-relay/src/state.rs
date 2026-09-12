@@ -13,6 +13,9 @@ use dante_net::{
 use dante_proto::{record::RecordKind, Envelope, Record};
 use tokio::sync::Mutex;
 
+#[cfg(feature = "sfu")]
+use crate::sfu::SfuRooms;
+
 /// Wall-clock Unix milliseconds.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -870,6 +873,14 @@ impl RelayState {
                 }
                 Response::P2pPeers(out)
             }
+
+            // SFU signalling is intercepted by `RelayHandler` before the state
+            // sees it. Reaching here means this relay was built without the
+            // `sfu` feature.
+            Request::SfuJoin { .. }
+            | Request::SfuIce { .. }
+            | Request::SfuPull { .. }
+            | Request::SfuLeave { .. } => Response::Error("sfu not supported".into()),
         }
     }
 }
@@ -877,6 +888,8 @@ impl RelayState {
 /// The `RequestHandler` the TCP server calls; wraps [`RelayState`] in a mutex.
 pub struct RelayHandler {
     state: Mutex<RelayState>,
+    #[cfg(feature = "sfu")]
+    sfu: SfuRooms,
 }
 
 impl RelayHandler {
@@ -884,6 +897,8 @@ impl RelayHandler {
     pub fn new(state: RelayState) -> Self {
         Self {
             state: Mutex::new(state),
+            #[cfg(feature = "sfu")]
+            sfu: SfuRooms::new(),
         }
     }
 
@@ -896,6 +911,12 @@ impl RelayHandler {
 #[async_trait]
 impl RequestHandler for RelayHandler {
     async fn handle(&self, req: Request, peer_ip: IpAddr) -> Response {
+        // SFU joins await WebRTC negotiation, so they are served here rather
+        // than under the relay-state lock.
+        #[cfg(feature = "sfu")]
+        if let Some(response) = self.sfu.handle(&req).await {
+            return response;
+        }
         let now = now_ms();
         self.state.lock().await.handle(req, peer_ip, now)
     }

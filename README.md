@@ -171,8 +171,7 @@ above — it states precisely what is and is not protected.
 - Tenor / Giphy GIF search.
 - Custom profiles / avatars.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
-- Reproducible builds + signed releases; external security audit; a
-  `cargo-fuzz` corpus in CI.
+- Reproducible builds + signed releases; external security audit.
 
 ## Try it
 

@@ -1,0 +1,76 @@
+name: Fuzzing
+
+# Short, fixed-duration smoke runs of every cargo-fuzz target. `fuzz/` is a
+# detached workspace (see fuzz/README.md), so the main CI never builds it; this
+# workflow is the only place the targets run under coverage-guided fuzzing.
+#
+# The target input space is not something a 60 s run "finishes" — the point is
+# that a decoder which can be made to panic, over-read or emit non-canonical
+# bytes fails the job within minutes, and that the saved corpus keeps probing
+# deeper on every run. Crashes are libFuzzer reproducers written to
+# `fuzz/artifacts/<target>/` and uploaded as a job artifact.
+
+on:
+  schedule:
+    # Weekly, Monday 04:17 UTC. Decoders change rarely, so a week of drift is
+    # the useful window; the per-PR trigger below catches fuzz-affecting
+    # changes immediately.
+    - cron: "17 4 * * 1"
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  push:
+    branches: [main]
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One target crashing must not hide whether the others pass.
+      fail-fast: false
+      matrix:
+        target: [proto_record, proto_envelope, dm_packet, net_wire]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: fuzz
+
+      # Cache is immutable, so a fresh key per run and a prefix restore makes
+      # each run start from the deepest corpus so far instead of from scratch.
+      - name: Cache fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz ${{ matrix.target }} for 60 s
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+      - name: Upload crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

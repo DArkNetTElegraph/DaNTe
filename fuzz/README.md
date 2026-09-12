@@ -2,7 +2,10 @@
 
 Coverage-guided fuzz targets for the parsers that sit on the untrusted network
 boundary. This crate is **detached from the main workspace** — `cargo
-build/test/clippy --workspace` and CI never build it.
+build/test/clippy --workspace` never builds it. The `Fuzzing` workflow
+(`.github/workflows/fuzz.yml`) runs every target for a fixed 60 s on a weekly
+schedule, on PRs that touch `fuzz/`, and on demand, caching the corpus between
+runs; a crash fails that job and uploads the reproducer.
 
 Each target decodes an arbitrary byte string and, for the length-prefixed
 types, asserts `encode(decode(bytes)) == bytes` (canonical form). A panic, an

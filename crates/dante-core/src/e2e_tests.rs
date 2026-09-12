@@ -3577,7 +3577,7 @@ async fn an_unknown_record_kind_is_rejected_not_fatal() {
     alice.sync(now).await.unwrap();
 
     // New code understands kind 8...
-    let profile = dante_identity::records::IdentityProfile::new(Some([1u8; 32]))
+    let profile = dante_identity::records::IdentityProfile::new(Some([1u8; 32]), None)
         .to_record(alice.identity(), now + 1);
     let good = profile.encode();
     assert_eq!(
@@ -3736,4 +3736,82 @@ async fn an_sfu_group_call_forwards_audio_between_three_engines() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn status_and_avatar_are_independent() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    // A status with a control character is refused before anything is sent.
+    assert!(alice.publish_status("line\nbreak", now).await.is_err());
+
+    let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+    alice.publish_avatar(&png, now).await.unwrap();
+    alice.sync(now).await.unwrap();
+    let first_hash = dante_crypto::hash::sha256(&png);
+    assert_eq!(alice.my_avatar_hash(), Some(first_hash));
+    assert_eq!(alice.my_status(), None);
+
+    // Setting only the status carries the avatar through.
+    alice
+        .publish_status("building a mesh", now + 1_000)
+        .await
+        .unwrap();
+    alice.sync(now + 1_000).await.unwrap();
+    assert_eq!(
+        alice.my_avatar_hash(),
+        Some(first_hash),
+        "a status update kept the avatar"
+    );
+    assert_eq!(alice.my_status(), Some("building a mesh".into()));
+
+    // Bob converges on both fields.
+    bob.sync(now + 1_000).await.unwrap();
+    assert_eq!(bob.avatar_hash_of(&alice_id), Some(first_hash));
+    assert_eq!(bob.status_of(&alice_id), Some("building a mesh".into()));
+
+    // Replacing only the avatar carries the status through.
+    let png2 = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 9];
+    alice.publish_avatar(&png2, now + 2_000).await.unwrap();
+    alice.sync(now + 2_000).await.unwrap();
+    let second_hash = dante_crypto::hash::sha256(&png2);
+    assert_eq!(alice.my_avatar_hash(), Some(second_hash));
+    assert_eq!(
+        alice.my_status(),
+        Some("building a mesh".into()),
+        "an avatar update kept the status"
+    );
+
+    // Clearing the status leaves the avatar.
+    alice.clear_status(now + 3_000).await.unwrap();
+    alice.sync(now + 3_000).await.unwrap();
+    assert_eq!(alice.my_status(), None);
+    assert_eq!(alice.my_avatar_hash(), Some(second_hash));
+
+    // Clearing the avatar leaves a freshly set status.
+    alice
+        .publish_status("still here", now + 4_000)
+        .await
+        .unwrap();
+    alice.sync(now + 4_000).await.unwrap();
+    alice.clear_avatar(now + 5_000).await.unwrap();
+    alice.sync(now + 5_000).await.unwrap();
+    assert_eq!(alice.my_avatar_hash(), None);
+    assert_eq!(alice.my_status(), Some("still here".into()));
+
+    bob.sync(now + 5_000).await.unwrap();
+    assert_eq!(bob.avatar_hash_of(&alice_id), None);
+    assert_eq!(bob.status_of(&alice_id), Some("still here".into()));
 }

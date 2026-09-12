@@ -1278,6 +1278,7 @@ const store = {
   me: { fingerprint: "", words: "", username: "" },
   usernames: {},                      // fp -> self-asserted username (ledger)
   avatars: {},                        // fp -> global avatar blob hash (ledger)
+  statuses: {},                       // fp -> global profile status/bio (ledger)
   channels: [],                       // [{id,name,server}]
   dms: LS.get("dms", []),             // [{fp}]
   messages: [],                       // flat inbox, each tagged with _target
@@ -1783,7 +1784,7 @@ function openProfile(fp) {
   const idr = el("div", "pc-id"); idr.textContent = fp; idr.title = "click to copy";
   idr.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(fp); ui.sys("Block-ID copied."); };
   card.appendChild(idr);
-  card.appendChild(el("div", "pc-desc", "No description set."));
+  card.appendChild(el("div", "pc-desc", store.statuses[fp] || "No description set."));
   if (!mine && s && s.available) {
     card.appendChild(el("div", "pc-verify" + (s.verified ? " ok" : ""),
       s.verified ? "✓ Safety number verified" : "⚠ Safety number not verified"));
@@ -3405,6 +3406,13 @@ async function refreshAvatars() {
   try {
     const a = await api.get("/api/avatars");
     if (JSON.stringify(a) !== JSON.stringify(store.avatars)) { store.avatars = a; render(); }
+  } catch (_) {}
+}
+
+async function refreshStatuses() {
+  try {
+    const s = await api.get("/api/statuses");
+    if (JSON.stringify(s) !== JSON.stringify(store.statuses)) { store.statuses = s; render(); }
   } catch (_) {}
 }
 
@@ -5129,6 +5137,7 @@ async function init() {
   refreshBlocked();
   refreshUsernames();
   refreshAvatars();
+  refreshStatuses();
   refreshInvites();
   refreshCalls();
   refreshVoice();
@@ -5142,6 +5151,7 @@ async function init() {
   setInterval(refreshBlocked, 8000);
   setInterval(refreshUsernames, 10000);
   setInterval(refreshAvatars, 10000);
+  setInterval(refreshStatuses, 10000);
   setInterval(refreshInvites, 6000);
   setInterval(refreshCalls, 1200);
   setInterval(refreshVoice, 1500);

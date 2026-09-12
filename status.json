@@ -1,6 +1,9 @@
 {
-  "checked_at_unix_ms": 1789240773002,
+  "checked_at_unix_ms": 1789244685640,
   "online_count": 0,
   "total_count": 0,
+  "dedicated_count": 0,
+  "user_count": 0,
+  "federated_count": 0,
   "relays": []
 }

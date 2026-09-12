@@ -62,7 +62,7 @@ above — it states precisely what is and is not protected.
 
 | Area | Status |
 |---|---|
-| **Identity** | Ed25519 + X25519 keypairs, Argon2id keystore + recovery backup, Crockford-base32 / BIP39 fingerprints, safety-number verification, memory-hard registration PoW, liveness proofs, key rotation, **key revocation**, self-chosen **usernames** (non-unique, carried on the ledger), **global avatars** (image in the blob store, hash signed onto the ledger) |
+| **Identity** | Ed25519 + X25519 keypairs, Argon2id keystore + recovery backup, Crockford-base32 / BIP39 fingerprints, safety-number verification, memory-hard registration PoW, liveness proofs, key rotation, **key revocation**, self-chosen **usernames** (non-unique, carried on the ledger), **global avatars** (image in the blob store, hash signed onto the ledger), **status / bio text** |
 | **Verifiable ledger** | Append-only RFC 6962 Merkle log, inclusion + consistency proofs, identity / rotation chains, server registry, deterministic 90-day evaporation GC |
 | **Relay + transport** | Client↔relay `Request`/`Response` wire over framed TCP **or** a libp2p `/dante/relay/1` stream; sealed-sender envelopes (day-rotating hint + size padding), mailbox store-and-forward, prekey + key-package directories, blob store, per-IP rate limiting, multi-relay failover, `dante-relay` binary with in-process zero-config TURN |
 | **1:1 DMs** | X3DH + Double Ratchet (FS + PCS), chunked encrypted file transfer, edit / delete, typing indicators, forwarding, block list, contacts / petnames, full-text search over local history |
@@ -176,9 +176,8 @@ above — it states precisely what is and is not protected.
   switch or UI yet and the relay feature is off by default, so the shipped
   client is still a full mesh (fine to ~8). See [`docs/SFU.md`](docs/SFU.md).
 - Tenor / Giphy GIF search.
-- Custom profiles.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
-- Reproducible builds + signed releases; external security audit.
+- External security audit.
 
 ## Try it
 
@@ -291,9 +290,11 @@ check actually verifies before your relay counts as online.
 
 ## Building
 
-Requires a recent **stable** Rust toolchain (≥ 1.91 — the OpenMLS floor);
-[`rust-toolchain.toml`](rust-toolchain.toml) pins the channel and `rustup`
-installs it on first `cargo` invocation.
+Requires the **pinned** Rust toolchain — [`rust-toolchain.toml`](rust-toolchain.toml)
+fixes the exact version (currently 1.98.1, above the OpenMLS 1.91 floor) and
+`rustup` installs it on first `cargo` invocation. Bumping the pin is a
+deliberate commit: a floating `stable` already changed a clippy lint under the
+desktop shell once (#36).
 
 ### Install Rust
 
@@ -325,6 +326,15 @@ detachment cannot hide a break; to build it by hand, follow
 
 `cargo-deny` (license / advisory / source checks) runs in CI; install locally
 with `cargo install cargo-deny` and run `cargo deny check`.
+
+### Reproducible releases
+
+`dante` and `dante-relay` release binaries are built reproducibly for Linux
+x86_64 from a `v*` tag — exact pinned toolchain, `--locked` dependency set,
+path remapping, fixed release profile — and the checksum file is signed with
+cosign keyless OIDC. [`docs/REPRODUCIBLE_BUILDS.md`](docs/REPRODUCIBLE_BUILDS.md)
+walks through rebuilding a release yourself and verifying the signature.
+Windows/macOS and the detached desktop shell are not claimed reproducible.
 
 ## Purpose and disclaimer
 

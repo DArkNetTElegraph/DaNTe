@@ -597,6 +597,10 @@ pub struct Bootstrap {
     /// Network settings — flipping it means restarting with/without the flag,
     /// same as this client's other boot-time `--p2p`-style switches.
     pub also_relay_listen: Option<String>,
+    /// Route group-call media through the relay-hosted SFU instead of the
+    /// full mesh (`--sfu`). The relay must be built with its `sfu` feature.
+    /// Boot-time only, like `also_relay_listen`; not persisted.
+    pub sfu: bool,
     /// Where to report startup steps, if anyone is showing them.
     ///
     /// `Engine::connect` reports its own half; the rest of startup — the
@@ -825,6 +829,17 @@ pub async fn run_on(
     boot: Bootstrap,
 ) -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(32);
+    // `--sfu` opts this client's group calls into the relay-hosted SFU. The
+    // engine half of startup is done by the time `run_on` is called when a
+    // keystore was opened up front; onboarding applies it in
+    // `connect_and_start`.
+    let sfu = boot.sfu;
+    let mut existing = existing;
+    if sfu {
+        if let Some(engine) = existing.as_mut() {
+            engine.enable_sfu();
+        }
+    }
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     let local_authorities = loopback_authorities(bound_port);
     let shared = Arc::new(Shared {
@@ -890,9 +905,12 @@ async fn connect_and_start(
         return Err("already set up".into());
     }
     let b = &shared.boot;
-    let engine = Engine::connect(identity, &b.relay, b.params, b.pow, b.store_path.clone())
+    let mut engine = Engine::connect(identity, &b.relay, b.params, b.pow, b.store_path.clone())
         .await
         .map_err(|e| e.to_string())?;
+    if b.sfu {
+        engine.enable_sfu();
+    }
     let out = {
         let id = engine.identity().id();
         (id.to_base32(), id.to_words())

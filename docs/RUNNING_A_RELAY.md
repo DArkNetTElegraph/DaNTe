@@ -182,6 +182,33 @@ INFO dante_relay: dante-relay listening listen=0.0.0.0:9944
 `turn_creds=true` is the line that matters — without it clients get a `turn:`
 URL they cannot authenticate against.
 
+## Hosting an SFU for large voice rooms (optional)
+
+Group calls are a full mesh by default — every participant connects to every
+other, comfortable to roughly 8. A relay built with the non-default `sfu`
+feature can instead terminate one DTLS-SRTP connection per participant and
+forward the media, so a room scales past the mesh limit:
+
+```sh
+cargo build --release -p dante-relay --features sfu
+```
+
+Clients opt in with `dante serve --sfu` / `dante chat --sfu` (or
+`DANTE_SFU=1` for the desktop shell), and **every member of a call must do
+so** — a mixed-mode call has no shared media path. The relay sees only RTP
+headers, sizes and timing; call audio stays AES-GCM-encrypted under the
+channel's MLS key in SFrame-capable browsers (see [`SFU.md`](SFU.md) and
+[`THREAT_MODEL.md`](THREAT_MODEL.md) §5.10 for the exact boundary, including
+the non-Chromium caveat).
+
+Two honest limitations of the current SFU build:
+
+- The SFU advertises **host candidates only** (no STUN configured), so run it
+  on a host with a publicly reachable IP or full-cone port mapping.
+- It is off by default because it pulls the WebRTC dependency tree into the
+  relay binary. The media plane and signalling are proven with real multi-peer
+  tests, but the browser and desktop client paths are not wired yet.
+
 ## Proof-of-work
 
 The default floor makes registering an identity cost real memory and time,

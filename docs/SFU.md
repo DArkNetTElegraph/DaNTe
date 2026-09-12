@@ -97,7 +97,9 @@ relay-hosted SFU:
 `crates/dante-core/src/e2e_tests.rs::an_sfu_group_call_forwards_audio_between_three_engines`
 runs three real engines against the in-process relay (whose test build enables
 `sfu`), starts a group call, and asserts each engine hears the other two's
-distinct markers and never its own.
+distinct markers and never its own. The CLI reaches this mode with
+`dante serve --sfu` / `dante chat --sfu`, the desktop shell with
+`DANTE_SFU=1`.
 
 ## Mesh vs SFU
 
@@ -156,13 +158,20 @@ See the crate README for the exact status list.
 
 ## Open questions / next steps
 
-- **Signalling + authorization** (above): the largest missing piece.
 - **Renegotiation** for real rooms instead of a fixed `room_size`.
+- **SFU-side ICE**: the SFU gathers host candidates only (no STUN/TURN
+  configured), so a relay behind NAT cannot offer a reachable candidate yet.
 - **RTCP**: the component relies on webrtc-rs' internal sender/receiver
   interceptors; it does not propagate NACK/PLI between legs. Audio at 64 kbps
   is tolerant, but this needs review before video/screen-share forwarding.
-- **Resource limits**: rooms, slots, per-participant bitrate, and fairness.
+- **Resource limits**: per-IP rate limiting, a room cap, offer/candidate size
+  limits and empty-room teardown are in; per-participant bitrate and fairness
+  are not.
 - **Fallback behaviour** when an SFU dies mid-call (demote to mesh? drop the
   call?).
 - **SFrame-capability gating** (above): decide the policy for non-Chromium
   clients before advertising SFU mode.
+- **Desktop/browser wiring**: the SPA does no SFU negotiation, the desktop
+  audio bridge still drives mesh legs, and there is no participant-count
+  threshold or SFU discovery yet. The CLI (`--sfu`) and library
+  (`Engine::enable_sfu`) paths exist.

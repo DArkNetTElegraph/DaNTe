@@ -4,9 +4,9 @@
 //! dante gen    --out KEYSTORE                        # generate an identity
 //! dante fp     --keystore KEYSTORE                   # print the fingerprint
 //! dante chat   --keystore KEYSTORE --relay ADDR      # interactive terminal session
-//!              [--hint NAME] [--pow-bits N]
+//!              [--hint NAME] [--pow-bits N] [--sfu]
 //! dante serve  --keystore KEYSTORE --relay ADDR      # local web UI (JSON API + SPA)
-//!              [--http 127.0.0.1:8080] [--pow-bits N]
+//!              [--http 127.0.0.1:8080] [--pow-bits N] [--sfu]
 //! dante bot    --keystore KEYSTORE --relay ADDR      # JSON-lines bridge on stdio
 //! dante revoke --keystore KEYSTORE --relay ADDR --yes   # publish a revocation
 //! ```
@@ -258,6 +258,7 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         params,
         pow,
         also_relay_listen,
+        sfu: flags.contains_key("sfu"),
         // `serve` narrates startup on stderr; the structured sink is for the
         // desktop shell's boot screen.
         progress: None,
@@ -306,6 +307,9 @@ async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
     eprintln!("connecting to relay {relay} (proof of work: {bits} bits) ...");
     let mut engine = Engine::connect(identity, &relay, params, difficulty, store_path).await?;
     maybe_enable_p2p(&mut engine, flags).await;
+    if flags.contains_key("sfu") {
+        engine.enable_sfu();
+    }
     Ok(engine)
 }
 

@@ -91,6 +91,7 @@ Configuration is read from the environment (same names as `dante serve`):
 | `DANTE_RELAY` | `127.0.0.1:9944` | comma-separated relay endpoints (failover) |
 | `DANTE_PASSPHRASE` | *(unset)* | if set and a keystore exists, unlock at startup; otherwise the window shows the create/import flow |
 | `DANTE_POW_BITS` | `20` | proof-of-work difficulty for our own ledger records |
+| `DANTE_SFU` | *(off)* | `1` routes group-call media through the relay-hosted SFU; the desktop audio bridge still drives mesh legs, so this is for future wiring and test rigs |
 
 You need a relay reachable at `DANTE_RELAY` — run one with
 `cargo run -p dante-relay -- --listen 127.0.0.1:9944` from the repo root.

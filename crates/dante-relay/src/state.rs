@@ -911,13 +911,13 @@ impl RelayHandler {
 #[async_trait]
 impl RequestHandler for RelayHandler {
     async fn handle(&self, req: Request, peer_ip: IpAddr) -> Response {
+        let now = now_ms();
         // SFU joins await WebRTC negotiation, so they are served here rather
         // than under the relay-state lock.
         #[cfg(feature = "sfu")]
-        if let Some(response) = self.sfu.handle(&req).await {
+        if let Some(response) = self.sfu.handle(&req, peer_ip, now).await {
             return response;
         }
-        let now = now_ms();
         self.state.lock().await.handle(req, peer_ip, now)
     }
 }

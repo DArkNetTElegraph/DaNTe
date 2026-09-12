@@ -132,6 +132,12 @@ async fn prepare(progress: dante_core::BootProgress) -> Result<Prepared> {
             pow,
             // Not offered from the desktop shell yet — no UI for it there.
             also_relay_listen: None,
+            // `DANTE_SFU=1` opts group calls into the relay-hosted SFU; the
+            // desktop audio bridge is still per-leg mesh-only, so this is for
+            // future wiring and test rigs.
+            sfu: std::env::var("DANTE_SFU")
+                .map(|v| v != "0")
+                .unwrap_or(false),
             progress: Some(progress),
         },
     })

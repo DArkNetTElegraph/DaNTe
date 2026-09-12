@@ -1241,7 +1241,14 @@ const dmLabel = fp => isSelf(fp)
   ? "Private Note"
   : (petname(fp) || username(fp) || short(fp));
 // Like dmLabel but "you" stays "you" for message authors.
-const authorLabel = fp => fp === "you" ? "you" : (petname(fp) || username(fp) || short(fp));
+// A channel message's author label prefers a per-server nickname over the
+// ledger username (but never over a petname — that's the viewer's own
+// choice); DMs have no server context, so nicknames never apply there.
+const authorLabel = fp => {
+  if (fp === "you") return "you";
+  const root = !isDM() && store.rootOf(store.view.server);
+  return petname(fp) || (root && nicknameOf(root, fp)) || username(fp) || short(fp);
+};
 // Voice contexts want your real name, not the "Private Note" DM label.
 const voiceName = fp => isSelf(fp)
   ? (store.me.username || short(fp))
@@ -1366,6 +1373,7 @@ const api = {
   groupCallJoin(channel)  { return this.post("/api/groupcall/join", { channel }); },
   groupCallLeave(channel) { return this.post("/api/groupcall/leave", { channel }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
+  setNickname(server, member, nickname) { return this.post("/api/nickname", { server, member, nickname }); },
   inviteRespond(channel, accept) { return this.post("/api/invite/" + (accept ? "accept" : "decline"), { channel }); },
   policy(root)            { return this.get("/api/policy?server=" + encodeURIComponent(root)); },
   sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
@@ -2746,7 +2754,8 @@ function renderMembers() {
     wrap.appendChild(el("div", "role-label", g + " — " + members.length));
     for (const fp of members) {
       const isMe = fp === store.me.fingerprint;
-      const label = isMe ? (store.me.username || "you") : dmLabel(fp);
+      const label = isMe ? (store.me.username || "you")
+        : (petname(fp) || (root && nicknameOf(root, fp)) || username(fp) || short(fp));
       const row = el("div", "member-row" + (isMe ? " you" : ""));
       const av = avatar(label, fp, "avatar clickable");
       av.onclick = () => openProfile(fp);
@@ -2760,6 +2769,11 @@ function renderMembers() {
         const rb = actBtn("shield", "Assign / remove a role", "kick");
         rb.onclick = () => assignRoleFlow(store.view.server, fp);
         row.appendChild(rb);
+      }
+      if (inChannel && !isMe && iAmOwner) {
+        const nb = actBtn("edit", "Set nickname", "kick");
+        nb.onclick = () => nicknameFlow(root, fp);
+        row.appendChild(nb);
       }
       const isOwner = root && store.policies[root] && store.policies[root].owner === fp;
       // A member with kick/manage power is staff — only the owner may kick staff.
@@ -3274,6 +3288,22 @@ async function addDmFlow() {
   const nn = await ui.ask("Save as a contact? Enter a petname (or leave blank to skip):", "");
   if (nn) api.post("/api/contact", { peer: fp, petname: nn }).then(refreshContacts).catch(e => ui.say("Contact not saved: " + e.message));
   selectTarget("@dm", fp);
+}
+
+// A member's nickname on server `root`, if the host has set one. `nicknames`
+// arrives from /api/policy as `{ fp: nickname }` (see refreshPolicies).
+function nicknameOf(root, fp) {
+  const p = root && store.policies[root];
+  return (p && p.nicknames && p.nicknames[fp]) || null;
+}
+
+async function nicknameFlow(root, fp) {
+  const cur = nicknameOf(root, fp) || "";
+  const nn = await ui.ask("Nickname on this server (blank clears it):", cur);
+  if (nn === null) return;
+  try { await api.setNickname(root, fp, nn); }
+  catch (e) { ui.sys("nickname update failed: " + e.message); return; }
+  await refreshPolicies();
 }
 
 async function contactFlow(fp) {

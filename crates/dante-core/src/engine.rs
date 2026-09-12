@@ -3319,7 +3319,7 @@ impl Engine {
         rank: u16,
         now_ms: u64,
     ) -> Result<u16, CoreError> {
-        let (mut roles_vec, assignments, emojis, stickers, sounds, owner, version, root) =
+        let (mut roles_vec, assignments, emojis, stickers, sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         let id = id.unwrap_or_else(|| roles_vec.iter().map(|r| r.id).max().unwrap_or(0) + 1);
         match roles_vec.iter_mut().find(|r| r.id == id) {
@@ -3347,6 +3347,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await?;
@@ -3360,8 +3361,17 @@ impl Engine {
         role_id: u16,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (mut roles_vec, mut assignments, emojis, stickers, sounds, owner, version, root) =
-            self.policy_draft(server_root)?;
+        let (
+            mut roles_vec,
+            mut assignments,
+            emojis,
+            stickers,
+            sounds,
+            nicknames,
+            owner,
+            version,
+            root,
+        ) = self.policy_draft(server_root)?;
         roles_vec.retain(|r| r.id != role_id);
         for (_, ids) in &mut assignments {
             ids.retain(|i| *i != role_id);
@@ -3377,6 +3387,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3391,7 +3402,7 @@ impl Engine {
         add: bool,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, mut assignments, emojis, stickers, sounds, owner, version, root) =
+        let (roles_vec, mut assignments, emojis, stickers, sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         if add && !roles_vec.iter().any(|r| r.id == role_id) {
             return Err(CoreError::Channel("no such role"));
@@ -3420,6 +3431,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3447,7 +3459,7 @@ impl Engine {
         if !is_png && !is_jpeg {
             return Err(CoreError::Channel("emoji image must be a PNG or JPEG"));
         }
-        let (roles_vec, assignments, mut emojis, stickers, sounds, owner, version, root) =
+        let (roles_vec, assignments, mut emojis, stickers, sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         // Keep the emoji / sticker / sound shortcodes one namespace (the other
         // two setters already reject cross-collisions).
@@ -3478,6 +3490,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3490,7 +3503,7 @@ impl Engine {
         name: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, assignments, mut emojis, stickers, sounds, owner, version, root) =
+        let (roles_vec, assignments, mut emojis, stickers, sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         let before = emojis.len();
         emojis.retain(|(n, _)| n != name);
@@ -3507,6 +3520,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3546,7 +3560,7 @@ impl Engine {
                 "sticker image must be PNG, JPEG, GIF or WebP",
             ));
         }
-        let (roles_vec, assignments, emojis, mut stickers, sounds, owner, version, root) =
+        let (roles_vec, assignments, emojis, mut stickers, sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         if emojis.iter().any(|(n, _)| n == name) {
             return Err(CoreError::Channel("a custom emoji already uses that name"));
@@ -3571,6 +3585,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3583,7 +3598,7 @@ impl Engine {
         name: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, assignments, emojis, mut stickers, sounds, owner, version, root) =
+        let (roles_vec, assignments, emojis, mut stickers, sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         let before = stickers.len();
         stickers.retain(|(n, _)| n != name);
@@ -3600,6 +3615,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3639,7 +3655,7 @@ impl Engine {
         if !is_ogg && !is_wav && !is_mp3 {
             return Err(CoreError::Channel("sound clip must be OGG, MP3 or WAV"));
         }
-        let (roles_vec, assignments, emojis, stickers, mut sounds, owner, version, root) =
+        let (roles_vec, assignments, emojis, stickers, mut sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         if emojis.iter().any(|(n, _)| n == name) || stickers.iter().any(|(n, _)| n == name) {
             return Err(CoreError::Channel(
@@ -3665,6 +3681,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3677,7 +3694,7 @@ impl Engine {
         name: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let (roles_vec, assignments, emojis, stickers, mut sounds, owner, version, root) =
+        let (roles_vec, assignments, emojis, stickers, mut sounds, nicknames, owner, version, root) =
             self.policy_draft(server_root)?;
         let before = sounds.len();
         sounds.retain(|(n, _)| n != name);
@@ -3694,6 +3711,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         )
         .await
@@ -3705,6 +3723,55 @@ impl Engine {
             .get(server_root)
             .map(|p| p.sounds.clone())
             .unwrap_or_default()
+    }
+
+    /// Set (or, with `nickname: None`, clear) a member's display name on this
+    /// server. Host only — there is no self-service path yet, so a member who
+    /// wants their own nickname changed has to ask their server's owner.
+    pub async fn set_member_nickname(
+        &mut self,
+        server_root: &[u8; 32],
+        member: &[u8; 32],
+        nickname: Option<&str>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if let Some(n) = nickname {
+            if !roles::valid_nickname(n) {
+                return Err(CoreError::Channel("bad nickname"));
+            }
+        }
+        let (roles_vec, assignments, emojis, stickers, sounds, mut nicknames, owner, version, root) =
+            self.policy_draft(server_root)?;
+        match nickname {
+            Some(n) => match nicknames.iter_mut().find(|(m, _)| m == member) {
+                Some(entry) => entry.1 = n.to_owned(),
+                None => nicknames.push((*member, n.to_owned())),
+            },
+            None => nicknames.retain(|(m, _)| m != member),
+        }
+        self.commit_policy(
+            *server_root,
+            &root,
+            owner,
+            version,
+            roles_vec,
+            assignments,
+            emojis,
+            stickers,
+            sounds,
+            nicknames,
+            now_ms,
+        )
+        .await
+    }
+
+    /// A member's nickname on a server (hosted or joined), if the host has set
+    /// one.
+    pub fn member_nickname(&self, server_root: &[u8; 32], member: &[u8; 32]) -> Option<String> {
+        self.server_policies
+            .get(server_root)?
+            .nickname_of(member)
+            .map(str::to_owned)
     }
 
     /// Fetch a blob (custom-emoji image, …) from the relay by its SHA-256.
@@ -3788,6 +3855,7 @@ impl Engine {
             Vec<(String, [u8; 32])>,
             Vec<(String, [u8; 32])>,
             Vec<(String, [u8; 32])>,
+            Vec<([u8; 32], String)>,
             [u8; 32],
             u64,
             SignSecret,
@@ -3810,6 +3878,7 @@ impl Engine {
             p.emojis.clone(),
             p.stickers.clone(),
             p.sounds.clone(),
+            p.nicknames.clone(),
             p.owner_id,
             p.version,
             SignSecret::from_bytes(&root_bytes),
@@ -3828,6 +3897,7 @@ impl Engine {
         emojis: Vec<(String, [u8; 32])>,
         stickers: Vec<(String, [u8; 32])>,
         sounds: Vec<(String, [u8; 32])>,
+        nicknames: Vec<([u8; 32], String)>,
         now_ms: u64,
     ) -> Result<(), CoreError> {
         let np = ServerPolicy::signed(
@@ -3839,6 +3909,7 @@ impl Engine {
             emojis,
             stickers,
             sounds,
+            nicknames,
             now_ms,
         );
         self.server_policies.insert(server_root, np);

@@ -17,7 +17,9 @@ identities.
 > audio (three independent browser peers exchanging live RTP audio in a full
 > mesh — see [Partial / caveats](#partial--caveats)). Main gaps:
 > **the desktop shell has never been opened** and **cross-NAT voice is
-> unverified**, and there is no group-call SFU (mesh only, fine to ~8). Wire
+> unverified**, and the group-call **SFU is not wired in** (its media
+> component is built and tested, but the shipped client is mesh-only, fine to
+> ~8). Wire
 > formats still change without notice. See the
 > [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
@@ -167,7 +169,11 @@ above — it states precisely what is and is not protected.
   outstanding is the release side: native application menus, auto-update, and
   signed/notarized installers — CI proves the code builds on all three
   platforms, but produces no distributable bundle for any of them yet.
-- A **group-call SFU** for large voice rooms (full mesh only now, fine to ~8).
+- Wiring the **group-call SFU** into the relay and clients. The media-plane
+  component is built and proven — it terminates DTLS-SRTP per participant and
+  forwards opaque RTP (real 3-peer test in `crates/dante-sfu`) — but it has no
+  signalling, no mesh/SFU switch and no UI yet, so the shipped client is still
+  a full mesh (fine to ~8). See [`docs/SFU.md`](docs/SFU.md).
 - Tenor / Giphy GIF search.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
 - External security audit.
@@ -274,6 +280,7 @@ check actually verifies before your relay counts as online.
 | [`crates/dante-dm`](crates/dante-dm/README.md) | 1:1 DM sessions (X3DH + Double Ratchet), file transfer, `Content` payloads |
 | [`crates/dante-core`](crates/dante-core/README.md) | Orchestration engine consumed by every client |
 | [`crates/dante-voice`](crates/dante-voice/README.md) | WebRTC (webrtc-rs) call transport + Opus track tuning |
+| [`crates/dante-sfu`](crates/dante-sfu/README.md) | SFU media component: DTLS-SRTP per participant, opaque RTP forwarding (tested, not wired in) |
 | [`crates/dante-audio`](crates/dante-audio/README.md) | Opus codec + cpal capture/playback for the desktop shell (detached) |
 | [`crates/dante-cli`](crates/dante-cli/README.md) | `dante` binary: `gen` / `fp` / `chat` / `serve` / `bot` / `revoke` + the browser SPA |
 | [`apps/dante-desktop`](apps/dante-desktop/README.md) | Tauri 2 desktop shell (detached workspace) |

@@ -12,6 +12,9 @@ members = [
     "crates/dante-core",
     "crates/dante-cli",
     "crates/dante-voice",
+    # SFU media component: implemented and tested, but not wired into the
+    # relay / client yet, so it is deliberately omitted from `default-members`.
+    "crates/dante-sfu",
     "crates/dante-p2p",
     "crates/dante-relay-check",
 ]
@@ -57,6 +60,7 @@ dante-dm = { path = "crates/dante-dm", version = "0.0.1" }
 dante-mls = { path = "crates/dante-mls", version = "0.0.1" }
 dante-core = { path = "crates/dante-core", version = "0.0.1" }
 dante-voice = { path = "crates/dante-voice", version = "0.0.1" }
+dante-sfu = { path = "crates/dante-sfu", version = "0.0.1" }
 dante-p2p = { path = "crates/dante-p2p", version = "0.0.1" }
 
 # Shared third-party deps (kept minimal; phases add their own)

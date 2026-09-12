@@ -24,6 +24,7 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
+use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc_media::Sample;
 use tokio::sync::{mpsc, Mutex};
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
@@ -365,11 +366,42 @@ impl Call {
     /// Caller side: build the connection and the control channel using `ice`
     /// (STUN/TURN), return the call plus the SDP **offer** to hand to the peer.
     pub async fn offer_with(ice: &[IceServer]) -> Result<(Call, String), VoiceError> {
+        Self::offer_inner(0, ice).await
+    }
+
+    /// Caller side for a participant that will talk to an SFU: like
+    /// [`Call::offer_with`], but the offer also advertises `recv_slots`
+    /// **receive-only** audio m-lines. An SDP answer cannot add media sections
+    /// the offer did not carry, so an SFU participant must offer one receive
+    /// slot per possible source up front (`room_size - 1` for a room it
+    /// starts in). The default 1:1 flow uses [`Call::offer_with`] with none.
+    pub async fn offer_for_sfu(
+        recv_slots: usize,
+        ice: &[IceServer],
+    ) -> Result<(Call, String), VoiceError> {
+        Self::offer_inner(recv_slots, ice).await
+    }
+
+    async fn offer_inner(
+        recv_slots: usize,
+        ice: &[IceServer],
+    ) -> Result<(Call, String), VoiceError> {
         let (pc, dc, audio, tx, events) = build_pc(ice).await?;
 
         let channel = pc.create_data_channel("dante", None).await?;
         *dc.lock().await = Some(Arc::clone(&channel));
         pump_dc(channel, tx);
+
+        for _ in 0..recv_slots {
+            pc.add_transceiver_from_kind(
+                RtpCodecKind::Audio,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        }
 
         let offer = pc.create_offer(None).await?;
         pc.set_local_description(offer.clone()).await?;

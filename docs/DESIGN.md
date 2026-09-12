@@ -106,6 +106,21 @@ achievable with no project-run infrastructure.
   tile in the room (own preview + one per remote sharer); ending the browser's
   own "Stop sharing" control, or leaving, tears it down. No audio capture from
   the display yet; SFrame still doesn't cover it (mesh DTLS-SRTP does).
+  **Quality is user-configurable** (Settings → Screen share): resolution
+  (480p–2160p) and frame rate (15/30/60/120) are handed to `getDisplayMedia`
+  as caps, and each sender gets `degradationPreference: "maintain-framerate"`
+  — WebRTC's default degrades fps first to protect resolution, which is the
+  usual cause of a share looking choppy on a perfectly fine connection.
+  Previews are also **cached DOM elements**, not rebuilt every render: `#log`
+  (and the voice room inside it) is torn down and rebuilt on every poll tick,
+  voice-presence update and SFrame epoch bump, and recreating the `<video>`
+  element each time — fresh `srcObject`, fresh `.play()` — was itself making
+  playback restart several times a second independent of the encoder
+  settings above. And, matching Discord: a preview pauses and shows a "window
+  not focused" placeholder while the tab is hidden or the window is
+  unfocused, resuming on refocus, so nothing decodes video no one is
+  watching. None of this has been exercised in a real browser — see the
+  browser-media-paths caveat.
 - **Voice bitrate *(done — ≥64 kbps)*:** all voice comms (1:1 calls + group /
   voice channels) target ≥64 kbps Opus. `dante-voice` munges the outbound SDP
   fmtp for the Opus payload (`maxaveragebitrate=64000`, `useinbandfec=1`,

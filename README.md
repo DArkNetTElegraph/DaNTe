@@ -120,10 +120,11 @@ above — it states precisely what is and is not protected.
   (`ChannelControl::NicknameRequest`), which the host validates and
   auto-applies — the request is self-scoped, so a member can never name anyone
   else. A nickname overrides their username in that server's message authorship
-  and member list, never in DMs or other servers. The self-request path has no
-  `dante serve` UI yet (its `/api/nickname` endpoint is still host-only).
-  Verified live: two real `dante serve` browser sessions, host sets a nickname,
-  both the host's and the member's own client render it in the channel message
+  and member list, never in DMs or other servers. `dante serve` exposes the
+  self-request path as a "Set my nickname" action on your own member row
+  (`POST /api/nickname/request`). The live verification covered the host-set
+  action: two real `dante serve` browser sessions, host sets a nickname, both
+  the host's and the member's own client render it in the channel message
   author label and the member list.
 - **Restart gaps**: *(closed)* channel history persists each message's
   relay-log `seq` (plus `reply_to` / `forwarded_from`), and the plaintext
@@ -154,9 +155,7 @@ above — it states precisely what is and is not protected.
   platforms, but produces no distributable bundle for any of them yet.
 - A **group-call SFU** for large voice rooms (full mesh only now, fine to ~8).
 - Tenor / Giphy GIF search.
-- Custom profiles / avatars. Self-service nicknames exist in
-  the engine but have no `dante serve` UI yet (see
-  [Partial / caveats](#partial--caveats)).
+- Custom profiles / avatars.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
 - Reproducible builds + signed releases; external security audit; a
   `cargo-fuzz` corpus in CI.

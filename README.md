@@ -158,8 +158,7 @@ above — it states precisely what is and is not protected.
   the engine but have no `dante serve` UI yet (see
   [Partial / caveats](#partial--caveats)).
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
-- Reproducible builds + signed releases; external security audit; a
-  `cargo-fuzz` corpus in CI.
+- Reproducible builds + signed releases; external security audit.
 
 ## Try it
 

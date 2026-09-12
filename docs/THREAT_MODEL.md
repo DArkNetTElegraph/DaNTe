@@ -176,19 +176,26 @@ provide.
 9. **Protection of a user from their own correspondents.** Screenshots,
    forwarding, and malicious clients by someone you are talking to are not
    preventable.
-10. **SFU media routing (not enabled in the shipped client).** A group-call SFU
-    media component exists (`crates/dante-sfu`, see [`SFU.md`](SFU.md)) but is
-    not wired into the relay, engine or SPA — the default group call is still a
-    full mesh. If/when it is enabled, the media trust boundary changes: DTLS-SRTP
+10. **SFU media routing (opt-in, browser-only, SFrame-gated).** A group-call
+    SFU stack exists (`crates/dante-sfu`; relay feature `sfu`, off by default;
+    see [`SFU.md`](SFU.md)) and the browser SPA can drive it through
+    `dante serve --sfu`. When used, the media trust boundary changes: DTLS-SRTP
     terminates **at the SFU**, so its operator sees participants' IPs,
     join/leave and participant count, RTP headers, and packet sizes/timing
-    (approximate talk activity), though not audio content — the SPA's SFrame
-    layer keeps each Opus frame AES-GCM-encrypted under the channel's MLS
-    `group_call_key`, which the SFU never holds. **Caveat:** SFrame is
-    Chromium-only; a client without `createEncodedStreams` sends plaintext Opus
-    that an SFU could decode, so SFU mode must be gated on SFrame support to
-    keep this claim true. Traffic analysis (who talks when) is not hidden by
-    SFrame, by either an SFU or a TURN relay.
+    (approximate talk activity). Audio content stays protected by the SPA's
+    SFrame layer (AES-GCM per Opus frame under the channel's MLS
+    `group_call_key`, which the SFU never holds). **The gate is enforced, not
+    merely documented:** a room above the mesh limit is only entered in SFU
+    mode when the browser exposes `createEncodedStreams` and the media key is
+    armed; otherwise the join is refused with a visible explanation, so a
+    client never sends plaintext Opus to an SFU. The desktop shell does not
+    offer SFU mode at all — its native audio path has no SFrame equivalent,
+    and until it does, enabling it would expose plaintext to the operator. The
+    CLI/API engine path (`Engine::enable_sfu`) carries no SFrame layer either;
+    it is for callers whose media is not content-sensitive to the relay.
+    Traffic analysis (who talks when) is not hidden by SFrame, by either an
+    SFU or a TURN relay. SFrame is Chromium-only: non-Chromium clients are
+    refused in over-limit rooms rather than silently downgraded.
 
 ## 6. Known hard problems (tracked, not solved)
 

@@ -1,13 +1,15 @@
 # Group-call SFU (selective forwarding unit)
 
-> **Status: media plane, relay signalling and the `dante-core` client mode are
-> proven; browser/desktop wiring is not done.** [`crates/dante-sfu`](../crates/dante-sfu/README.md)
+> **Status: media plane, relay signalling, engine mode and browser mode are
+> proven; desktop is deliberately excluded.** [`crates/dante-sfu`](../crates/dante-sfu/README.md)
 > terminates real DTLS-SRTP PeerConnections and forwards RTP payloads opaquely;
 > `dante-relay`'s `sfu` feature (off by default) hosts rooms and carries
-> SDP/ICE over the existing relay wire; and `Engine::enable_sfu()` gives an
-> engine one SFU leg instead of a mesh, verified by a three-engine e2e. The
-> shipped browser client and the desktop audio bridge still use the mesh. This
-> document is the design the rest of that work should follow.
+> SDP/ICE over the existing relay wire; `Engine::enable_sfu()` gives an engine
+> one SFU leg instead of a mesh; and the SPA now negotiates the SFU through
+> `dante serve`'s `/api/sfu/*`, gated on SFrame support and chosen by a roster
+> threshold. The desktop shell is not offered SFU mode (no SFrame in its
+> native audio path), and the SPA refuses rather than send plaintext. See
+> [What the component proves today](#what-the-component-proves-today).
 
 ## Why
 
@@ -98,16 +100,64 @@ relay-hosted SFU:
 runs three real engines against the in-process relay (whose test build enables
 `sfu`), starts a group call, and asserts each engine hears the other two's
 distinct markers and never its own. The CLI reaches this mode with
-`dante serve --sfu` / `dante chat --sfu`, the desktop shell with
-`DANTE_SFU=1`.
+`dante chat --sfu`. This path has **no SFrame layer** (it is the engine's own
+Rust media stack), so it is for API/CLI clients whose audio is not
+content-sensitive to the relay operator; the browser path below is the one
+with the SFrame guarantee.
+
+## Browser mode (`dante serve` + SPA)
+
+`dante serve --sfu [--sfu-mesh-limit N]` offers the browser client the
+relay-hosted SFU. The engine is **not** put in SFU mode in this case: the page
+owns the media, so the engine must not open a competing leg. The SPA
+negotiates the relay wire through the local API:
+
+| endpoint | relays to |
+|---|---|
+| `POST /api/sfu/join {channel, offer}` | `Engine::sfu_offer` → `SfuJoin`, returns `{slot, answer}` |
+| `POST /api/sfu/ice {channel, slot, candidate}` | `Engine::sfu_ice` → `SfuIce` |
+| `GET /api/sfu/ice?channel=&slot=` | `Engine::sfu_pull` → `SfuPull`, returns `{candidates}` |
+| `POST /api/sfu/leave {channel, slot}` | `Engine::sfu_leave` → `SfuLeave` |
+
+`GET /api/state` reports `sfu` and `sfu_mesh_limit` to the page. The SPA:
+
+- chooses the mode from the channel's **MLS roster** (all members compute the
+  same size, so the room cannot split into mixed modes): mesh at or below the
+  limit, SFU above it;
+- only enters SFU mode when `sframeAvailable()` is true, and waits for the
+  MLS media key (`sframeEnsureKey`) before opening the peer connection —
+  `sframeEncrypt` drops frames rather than pass plaintext if the key ever
+  vanishes while an SFU leg is up;
+- on a room above the limit where SFrame is unavailable (or the key cannot be
+  derived, or the join fails), **refuses the call and says why** rather than
+  fall back to a mesh that no longer interconnects with the SFU peers;
+- shows a one-time hint in a mesh room that has grown past the limit: leave
+  and rejoin to switch.
+
+The desktop shell deliberately does **not** offer SFU mode: its native audio
+path (`dante-audio` → engine media) has no SFrame equivalent, so the relay
+would receive plaintext Opus. It stays on the mesh until a Rust SFrame layer
+exists.
 
 ## Mesh vs SFU
 
-Threshold-based: keep the mesh at or below **8** participants (the point where
-mesh stops being comfortable); above it the host/relay advertises an SFU
-endpoint for the channel and clients switch. If no SFU is reachable, fall back
-to mesh and surface the degraded mode. The threshold and the fallback belong
-in `dante-core`, not in the SFU component.
+Implemented as a **roster threshold** (default 8, `--sfu-mesh-limit`):
+
+- **At or below the limit:** mesh. Per-leg DTLS-SRTP means the relay never
+  sees media content, and SFrame is a bonus.
+- **Above the limit, SFrame available:** SFU, with SFrame keeping content
+  confidential from the operator.
+- **Above the limit, SFrame unavailable or the SFU cannot be established:**
+  refuse the join with an explanation. This is deliberate: mesh fallback would
+  leave the participant isolated from the SFU peers, and entering the SFU
+  without SFrame would expose plaintext.
+- **Mixed-capability rooms over the limit do not interconnect** — a
+  non-Chromium browser is refused while Chromium peers use the SFU. This is a
+  known limitation until capability is communicated room-wide.
+
+The decision uses the MLS roster, not live presence, so early and late joiners
+agree. If the room later grows past the limit, existing mesh participants get
+the rejoin hint; mid-call switching would drop everyone's audio.
 
 ## Trust boundary: what the operator can and cannot observe
 
@@ -153,6 +203,20 @@ an SFU or a TURN relay.
 - `dante-core` e2e: three full engines with `enable_sfu()` start a group call
   through the in-process relay and hear each other's markers via
   `send_group_audio` / `take_group_audio`.
+- **Browser (headless Chromium, manual rig — not in CI):** two `dante serve
+  --sfu --sfu-mesh-limit 1` instances against a `--features sfu` relay, with a
+  two-member voice channel.
+  - Both pages with real `createEncodedStreams`: each negotiates its own SFU
+    slot, `sframeActive()` is true, and `RTCPeerConnection.getStats()` shows
+    inbound RTP packets both ways (31/32 packets in the recorded run) — real
+    audio through the relay SFU.
+  - One page with `createEncodedStreams` deleted before load: `voiceRtc.sfu`
+    stays `null`, `voiceRtc.sfuNotice === "no-sframe"`, the refusal modal is
+    shown, the join is torn down, and **zero** `/api/sfu/join` requests are
+    made — no plaintext path exists.
+  - Decision checks: `voiceModeFor` returns `"sfu"` above the limit with
+    SFrame, `"mesh"` at/below it, `"refuse"` above it without SFrame, and
+    `"mesh"` when `--sfu` is off.
 
 See the crate README for the exact status list.
 
@@ -169,9 +233,12 @@ See the crate README for the exact status list.
   are not.
 - **Fallback behaviour** when an SFU dies mid-call (demote to mesh? drop the
   call?).
-- **SFrame-capability gating** (above): decide the policy for non-Chromium
-  clients before advertising SFU mode.
-- **Desktop/browser wiring**: the SPA does no SFU negotiation, the desktop
-  audio bridge still drives mesh legs, and there is no participant-count
-  threshold or SFU discovery yet. The CLI (`--sfu`) and library
-  (`Engine::enable_sfu`) paths exist.
+- **Mixed-capability rooms over the limit** do not interconnect: a
+  non-Chromium browser is refused while Chromium peers use the SFU. Needs a
+  room-wide capability signal to converge on one mode.
+- **Desktop SFrame**: the native audio path needs its own SFrame (or another
+  E2E media layer) before the desktop shell can safely offer SFU mode.
+- **Screen share over SFU** is currently refused in the SPA (the pre-allocated
+  audio slots do not carry video; it needs renegotiation).
+- **SFU discovery** beyond "the connected relay hosts it", and a per-network
+  default rather than a `--sfu` flag.

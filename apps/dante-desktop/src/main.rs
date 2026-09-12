@@ -132,12 +132,13 @@ async fn prepare(progress: dante_core::BootProgress) -> Result<Prepared> {
             pow,
             // Not offered from the desktop shell yet — no UI for it there.
             also_relay_listen: None,
-            // `DANTE_SFU=1` opts group calls into the relay-hosted SFU; the
-            // desktop audio bridge is still per-leg mesh-only, so this is for
-            // future wiring and test rigs.
-            sfu: std::env::var("DANTE_SFU")
-                .map(|v| v != "0")
-                .unwrap_or(false),
+            // Deliberately off, and not read from the environment: the native
+            // audio bridge (`dante-audio` -> engine media) has no SFrame
+            // equivalent, so an SFU would receive plaintext Opus from this
+            // client. SFU mode is browser-Chromium-only until a Rust SFrame
+            // layer exists; see docs/SFU.md.
+            sfu: false,
+            sfu_mesh_limit: 8,
             progress: Some(progress),
         },
     })

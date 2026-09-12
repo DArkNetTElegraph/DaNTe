@@ -193,13 +193,18 @@ forward the media, so a room scales past the mesh limit:
 cargo build --release -p dante-relay --features sfu
 ```
 
-Clients opt in with `dante serve --sfu` / `dante chat --sfu` (or
-`DANTE_SFU=1` for the desktop shell), and **every member of a call must do
-so** — a mixed-mode call has no shared media path. The relay sees only RTP
-headers, sizes and timing; call audio stays AES-GCM-encrypted under the
-channel's MLS key in SFrame-capable browsers (see [`SFU.md`](SFU.md) and
-[`THREAT_MODEL.md`](THREAT_MODEL.md) §5.10 for the exact boundary, including
-the non-Chromium caveat).
+Clients opt in with `dante serve --sfu` (optionally
+`--sfu-mesh-limit N`, default 8), and **every member of a call must do
+so** — a mixed-mode call has no shared media path. The browser client only
+enters SFU mode when it can encrypt its own call frames (SFrame, Chromium
+`createEncodedStreams`) and the room's MLS roster is above the limit;
+otherwise it stays on the mesh at or below the limit, and above the limit it
+refuses the join with a visible explanation rather than send plaintext. The
+desktop shell does not offer SFU mode (its native audio path has no SFrame
+layer). The relay sees only RTP headers, sizes and timing; call audio stays
+AES-GCM-encrypted under the channel's MLS key in SFrame-capable browsers (see
+[`SFU.md`](SFU.md) and [`THREAT_MODEL.md`](THREAT_MODEL.md) §5.10 for the
+exact boundary, including the non-Chromium refusal).
 
 Two honest limitations of the current SFU build:
 

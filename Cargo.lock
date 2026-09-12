@@ -928,6 +928,7 @@ dependencies = [
  "dante-crypto",
  "dante-identity",
  "dante-ledger",
+ "dante-relay",
  "rustls",
  "rustls-native-certs",
  "serde",

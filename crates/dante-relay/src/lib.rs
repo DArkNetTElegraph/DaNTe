@@ -11,5 +11,8 @@
 //! The `dante-relay` binary wraps [`state::RelayHandler`] and adds argument
 //! parsing, the maintenance loop, and the federation event loop.
 
+pub mod run;
 pub mod state;
 pub mod turn_server;
+
+pub use run::{run, RunConfig, DEFAULT_LISTEN};

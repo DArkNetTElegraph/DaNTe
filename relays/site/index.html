@@ -62,6 +62,15 @@
   .dot.up { background: var(--ok); box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 70%, transparent); }
   .dot.down { background: var(--bad); }
 
+  .headline .breakdown {
+    flex-basis: 100%; font-size: 12.5px; color: var(--text-faint);
+  }
+  .kind {
+    display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--divider); color: var(--text-muted); white-space: nowrap;
+  }
+  .kind.user { color: var(--cornflower-blue); border-color: color-mix(in srgb, var(--cornflower-blue) 40%, var(--divider)); }
+
   .empty, .error {
     background: var(--bg-pane); border: 1px solid var(--divider); border-radius: 14px;
     padding: 28px 24px; color: var(--text-muted); font-size: 14px; line-height: 1.6;
@@ -122,12 +131,16 @@ async function main() {
     return;
   }
 
-  const { online_count, total_count, checked_at_unix_ms, relays } = status;
+  const { online_count, total_count, checked_at_unix_ms, relays,
+          dedicated_count, user_count, federated_count } = status;
 
   headline.innerHTML =
     '<span class="count' + (online_count === 0 ? ' zero' : '') + '">' + online_count + '</span>' +
     '<span class="label">of ' + total_count + ' ' + (total_count === 1 ? "relay" : "relays") + ' online</span>' +
-    '<span class="checked">checked ' + relTime(checked_at_unix_ms) + '</span>';
+    '<span class="checked">checked ' + relTime(checked_at_unix_ms) + '</span>' +
+    '<span class="breakdown">' + dedicated_count + ' dedicated (homelab / VPS) &middot; '
+      + user_count + ' opt-in from someone\'s own client (online only while they are) &middot; '
+      + federated_count + ' found only via federation</span>';
 
   if (!relays || relays.length === 0) {
     content.innerHTML = '<div class="empty">No relays listed yet. '
@@ -140,14 +153,23 @@ async function main() {
     '<tr>' +
       '<td><span class="dot ' + (r.online ? "up" : "down") + '"></span>' + esc(r.name) + '</td>' +
       '<td class="addr">' + esc(r.addr) + '</td>' +
+      '<td><span class="kind ' + esc(r.kind) + '">' + esc(kindLabel(r.kind)) + '</span></td>' +
       '<td class="source">' + (r.discovered_via ? "via " + esc(r.discovered_via) : "listed") + '</td>' +
       '<td class="latency">' + (r.online && r.latency_ms != null ? r.latency_ms + " ms" : "—") + '</td>' +
     '</tr>'
   ).join("");
 
   content.innerHTML =
-    '<table><thead><tr><th>Relay</th><th>Address</th><th>Source</th><th>Latency</th></tr></thead>' +
+    '<table><thead><tr><th>Relay</th><th>Address</th><th>Kind</th><th>Source</th><th>Latency</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table>';
+}
+
+function kindLabel(kind) {
+  switch (kind) {
+    case "user": return "user opt-in";
+    case "federated": return "federated";
+    default: return "dedicated";
+  }
 }
 
 function esc(s) {

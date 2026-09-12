@@ -42,8 +42,11 @@ identities.
 - **No infrastructure.** The project operates nothing. Relays are run by whoever
   creates a server, for their own community — as a Tor onion service needing no
   public IP, or on a public host. See
-  [`docs/RUNNING_A_RELAY.md`](docs/RUNNING_A_RELAY.md). Looking for one to
-  connect to rather than running your own? See
+  [`docs/RUNNING_A_RELAY.md`](docs/RUNNING_A_RELAY.md). There is no longer a
+  hard split between "client" and "relay operator": any `dante serve` can opt
+  in with `--also-relay` and act as one for others too, in the same process —
+  see [Every client can opt in as a relay](#every-client-can-opt-in-as-a-relay).
+  Looking for one to connect to rather than running your own? See
   [Relay status](#relay-status) below — an opt-in directory, checked from a
   real external vantage point so it reflects who is actually reachable, not
   just who claims to be.
@@ -65,7 +68,7 @@ above — it states precisely what is and is not protected.
 | **In-channel** | Emoji reactions (unicode + custom), **categorised emoji picker**, edit / delete, replies, pinned messages, @mentions, message forwarding, per-conversation unread counts + mute, **custom per-server emoji / stickers / soundboards** |
 | **Voice** | **1:1 calls with real browser audio**, **ad-hoc group calls (in any channel) with real browser audio**, **persistent Discord-style voice channels with real browser audio**, **screen share (verified)**, optional **SFrame** media encryption under the group-call key (verified active), ≥ 64 kbps Opus floor, STUN / TURN plumbing |
 | **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `bot` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates, opt-in link previews; `dante bot` — a JSON-lines headless bridge; `apps/dante-desktop` — a Tauri 2 native window around the same service, with a live startup screen, system tray and OS notifications |
-| **P2P (on by default; `--no-default-features` for a lean TCP build)** | `dante-p2p` libp2p node (Kademlia + gossipsub + identify + ping); the relay wire over `/dante/relay/1`; **DHT relay discovery**, a redundant relay set with health scoring, **relay↔relay federation** (ledger, prekeys, mailbox, key packages, channel logs), rendezvous-hashed single-writer channel logs, relay-assisted bootstrap + `DANTE_BOOTSTRAP` |
+| **P2P (on by default; `--no-default-features` for a lean TCP build)** | `dante-p2p` libp2p node (Kademlia + gossipsub + identify + ping); the relay wire over `/dante/relay/1`; **DHT relay discovery**, a redundant relay set with health scoring, **relay↔relay federation** (ledger, prekeys, mailbox, key packages, channel logs), rendezvous-hashed single-writer channel logs, relay-assisted bootstrap + `DANTE_BOOTSTRAP`, **`dante serve --also-relay`** — the exact `dante-relay` node embedded in a client, so any desktop user can opt in to being a relay for others without a second process |
 
 ### Partial / caveats
 
@@ -126,6 +129,17 @@ above — it states precisely what is and is not protected.
   action: two real `dante serve` browser sessions, host sets a nickname, both
   the host's and the member's own client render it in the channel message
   author label and the member list.
+- **`--also-relay` (2026-09-12): embedded, opt-in, not yet exposed as a live
+  toggle.** `dante-relay`'s run loop (listener, ledger replica, mailbox,
+  optional TURN, optional libp2p federation) was factored out into a plain
+  `dante_relay::run()` library function so `dante serve --also-relay` can
+  spawn the identical relay in-process — no second binary, no separate
+  operator. Verified with an integration test that spawns `dante_relay::run`
+  and drives a real announce + DM round trip through it, exactly the
+  embedding path the flag uses (not the hand-built `RelayHandler` every other
+  test in the suite uses). The SPA's Network settings show whether it's on
+  and its listen address, but flipping it still means restarting with the
+  flag — there is no live start/stop switch yet.
 - **Restart gaps**: *(closed)* channel history persists each message's
   relay-log `seq` (plus `reply_to` / `forwarded_from`), and the plaintext
   backlog a host hands a new member carries the `seq` too, so both restored and
@@ -194,6 +208,39 @@ DANTE_RELAY=127.0.0.1:9944 DANTE_POW_BITS=8 cargo tauri dev
 Nobody has run this yet — it is built on Linux, Windows and macOS in CI, and
 that is the whole of what is known about it. Expect rough edges and please
 report them.
+
+## Every client can opt in as a relay
+
+`dante-relay` was always just a plain library function underneath
+(`dante_relay::run`) driving a listener, a ledger replica, a mailbox, and
+optionally TURN and libp2p federation. `dante serve --also-relay` spawns that
+same function inside the client process:
+
+```bash
+dante serve --keystore ~/dante.keystore --relay <some-relay> \
+    --also-relay --relay-listen 0.0.0.0:9944
+```
+
+This is additive, not a replacement: running a dedicated `dante-relay` on a
+homelab box or a VPS is still the same binary it always was (now a thin argv
+wrapper over the same `dante_relay::run` the client embeds) — the right
+choice for anyone who wants a relay up regardless of whether their own
+client is running. `--also-relay` just means a friend group no longer *needs*
+one of those to have a relay online whenever any one of them happens to be
+running `dante serve`. With the `p2p` feature (on by default) it also
+listens for `/dante/relay/1` and announces itself on the DHT
+(`--relay-p2p-listen`, default an ephemeral port), so `--relay dht` clients
+can find it the same way they'd find a `dante-relay` binary — see
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md)'s DHT relay discovery section. The
+SPA's Network settings show whether this is on and its listen address
+(read-only — restart with the flag to change it).
+
+Same trust model either way: whoever's process this is can see recipient
+hints, sizes and timing for whatever passes through them (see
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)), and on a public host, client
+IPs. Running it as a Tor onion service avoids that last one — see
+[`docs/RUNNING_A_RELAY.md`](docs/RUNNING_A_RELAY.md), which applies exactly
+the same whether the relay is `dante-relay` or an embedded `--also-relay`.
 
 ## Relay status
 

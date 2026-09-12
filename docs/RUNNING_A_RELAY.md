@@ -8,6 +8,15 @@ real networks, relay federation) work at all.
 
 The project runs no infrastructure. A relay is run by whoever wants one.
 
+This doc covers the dedicated `dante-relay` binary — the right choice for a
+homelab box or VPS that should keep relaying whether or not your own client
+happens to be open. If you just want a relay online whenever you're chatting,
+`dante serve --also-relay` runs the exact same code in-process instead — see
+the README's [Every client can opt in as a
+relay](../README.md#every-client-can-opt-in-as-a-relay). Everything below
+(TURN, Tor, the port table, what an operator can see) applies identically
+either way.
+
 **The default way to run one is as a Tor onion service.** It needs no public
 IP, no port forwarding and no VPS — a laptop or a spare box at home is enough —
 and it is the only configuration in which the relay does not learn its users'

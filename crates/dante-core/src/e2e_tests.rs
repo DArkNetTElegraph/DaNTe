@@ -3615,3 +3615,125 @@ async fn an_unknown_record_kind_is_rejected_not_fatal() {
         other => panic!("expected a tree head, got {other:?}"),
     }
 }
+
+/// SFU mode: three engines route one group call through the relay-hosted SFU
+/// instead of a mesh. Media is real DTLS-SRTP between each engine and the
+/// relay, RTP is forwarded opaquely, and each engine hears the other two's
+/// distinct markers — never its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_sfu_group_call_forwards_audio_between_three_engines() {
+    use dante_voice::CallState;
+    use std::collections::HashSet;
+
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+    let bob_id = *bob.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+        e.enable_sfu();
+    }
+    for e in [&mut host, &mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+    invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
+    for _ in 0..8 {
+        for e in [&mut host, &mut alice, &mut bob] {
+            e.sync(now).await.unwrap();
+            e.receive_all(now).await.unwrap();
+        }
+    }
+
+    host.start_group_call(&chan, now).await.unwrap();
+
+    // Alice and bob join on the Welcome, exactly as with a mesh call.
+    let mut joined = 0;
+    for _ in 0..40 {
+        for e in [&mut alice, &mut bob] {
+            for it in e.receive_all(now).await.unwrap() {
+                if let crate::Inbound::GroupCallInvite { channel_id, .. } = it {
+                    if channel_id == chan && !e.in_group_call(&chan) {
+                        e.join_group_call(&chan, now).await.unwrap();
+                        joined += 1;
+                    }
+                }
+            }
+        }
+        host.receive_all(now).await.unwrap();
+        if joined >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(joined, 2, "alice and bob joined the SFU group call");
+
+    // Pump until every engine's single SFU leg is connected.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        for e in [&mut host, &mut alice, &mut bob] {
+            e.poll_group_calls(now).await.unwrap();
+        }
+        let all_up = [&host, &alice, &bob]
+            .iter()
+            .all(|e| e.group_call_state(&chan) == Some(CallState::Connected));
+        if all_up || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    const MARKERS: [&[u8]; 3] = [b"sfu-engine-0", b"sfu-engine-1", b"sfu-engine-2"];
+    let mut engines = [&mut host, &mut alice, &mut bob];
+    let mut heard: [HashSet<Vec<u8>>; 3] = Default::default();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        for (i, e) in engines.iter_mut().enumerate() {
+            let _ = e.send_group_audio(&chan, MARKERS[i], 20).await;
+            for frame in e.take_group_audio(&chan) {
+                heard[i].insert(frame);
+            }
+            e.poll_group_calls(now).await.unwrap();
+        }
+        let all_heard = (0..3).all(|s| {
+            (0..3)
+                .filter(|&o| o != s)
+                .all(|o| heard[s].contains(MARKERS[o]))
+        });
+        if all_heard || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    for (i, e) in engines.iter().enumerate() {
+        assert_eq!(
+            e.group_call_state(&chan),
+            Some(CallState::Connected),
+            "engine {i} has a connected SFU leg"
+        );
+    }
+    for (s, frames) in heard.iter().enumerate() {
+        for (o, marker) in MARKERS.iter().enumerate() {
+            if o == s {
+                assert!(
+                    !frames.contains(*marker),
+                    "engine {s} heard its own audio looped back"
+                );
+            } else {
+                assert!(
+                    frames.contains(*marker),
+                    "engine {s} never heard engine {o} through the SFU"
+                );
+            }
+        }
+    }
+}

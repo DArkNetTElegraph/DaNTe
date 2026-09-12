@@ -236,13 +236,11 @@ achievable with no project-run infrastructure.
   announce PoW when recently done. The channel-history section is appended at
   the tail of the store so stores written before it existed still load.
 - **Channels** wired end-to-end: `Engine::create_server` / `create_channel` /
-  `invite_to_channel` / `send_channel` / `poll_channels`. Invites + sender-key
-  exchange ride authenticated DMs (`Content::Channel`); channel messages go to a
-  per-`channel_id` relay log (`PostToChannel` / `FetchChannel`, opaque to the
-  relay). Every member ends up keyed to every other member, not just the host:
-  an invite carries reconstructed bundles for all members the host knows, and a
-  member replies with its own bundle the first time it hears a `KeyBundle` from
-  a member it did not have. `dante chat`: `/server`, `/channel`, `/invite`,
+  `invite_to_channel` / `send_channel` / `poll_channels`. Each channel is an MLS
+  group (host is sole committer); invites + MLS handshake material (Welcome,
+  Commit) ride authenticated DMs (`Content::Channel`), and channel messages go
+  to a per-`channel_id` relay log (`PostToChannel` / `FetchChannel`, opaque to
+  the relay). `dante chat`: `/server`, `/channel`, `/invite`,
   `/channels`, `/to #<id>`. The `serve` web UI lists channels as clickable chips, has
   create-server / create-channel / invite controls, and routes the composer to
   a channel or a DM peer (`GET /api/channels`, `POST /api/server` / `/channel` /
@@ -380,8 +378,9 @@ DaNTe/
   identify feeding addresses into the kad routing table, ping for liveness.
   Driven by a background Tokio task behind a command channel + `Event` stream.
   It is a **workspace member but not a default one** (`default-members` omits
-  it), so a bare `cargo build` / `cargo test` never pulls the libp2p tree;
-  `--workspace` and `-p dante-p2p` do. `deny.toml` carries an
+  it), and the `p2p` feature is on by default in `dante-core`, `dante-cli` and
+  `dante-relay`, so a bare root `cargo build` still pulls the libp2p tree in
+  transitively; `--no-default-features` is the lean path. `deny.toml` carries an
   `advisories.ignore` for `paste` (RUSTSEC-2024-0436, unmaintained, build-time
   proc-macro from the `netlink`/`if-watch` stack `libp2p-tcp` needs on Linux);
   `licenses`/`bans` are clean. The `dns` feature is left off to avoid
@@ -795,8 +794,8 @@ infrastructure. Reached. ---**
   — DTLS-SRTP still applies. Its point is a future SFU that forwards media
   without decoding; there is no SFU yet. Video (screen share) is not wrapped.
   No browser in the dev env, so this is written but not runtime-verified.
-- **Still to build:** the channel-messaging MLS migration (group calls already
-  use MLS); the group-call SFU itself.
+- **Still to build:** the group-call SFU itself. (Channels and group calls
+  both use MLS now; the sender-keys crate `dante-group` is retired.)
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).
 - SFU role in the server relay above ~5 participants; full mesh below (mesh done).
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

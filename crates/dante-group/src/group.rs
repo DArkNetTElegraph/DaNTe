@@ -10,7 +10,8 @@
 //! member **removal**, every remaining member rotates its own chain and
 //! redistributes, so the removed member cannot read subsequent messages —
 //! O(n) rekey, weaker than MLS's O(log n) and without MLS's post-compromise
-//! security. Migrating channels to MLS (RFC 9420) is planned; see
+//! security. Channels have since migrated to MLS (RFC 9420) in `dante-mls`;
+//! this module is retired and kept only for the fuzz target. See
 //! `docs/THREAT_MODEL.md`.
 
 use std::collections::HashMap;

@@ -1,8 +1,15 @@
-//! `dante-relay` — a community-run DaNTe relay: a ledger replica plus a
-//! sealed-sender mailbox, speaking the `dante-net` protocol over framed TCP.
+//! `dante-relay` — a community-run DaNTe relay.
 //!
-//! The [`dante-relay`](../dante_relay/index.html) binary is a thin wrapper over
-//! [`state::RelayHandler`].
+//! [`state::RelayState`] is the whole node: a ledger replica plus a
+//! sealed-sender mailbox, prekey / MLS key-package directories, a blob store,
+//! per-channel ordered logs, and ephemeral signals, speaking the `dante-net`
+//! protocol over framed TCP — and, with the default `p2p` feature, over libp2p
+//! `/dante/relay/1` as well, with relay↔relay federation over gossipsub. It
+//! can also run an in-process TURN server ([`turn_server::TurnServer`]) and
+//! hands clients signed ICE config.
+//!
+//! The `dante-relay` binary wraps [`state::RelayHandler`] and adds argument
+//! parsing, the maintenance loop, and the federation event loop.
 
 pub mod state;
 pub mod turn_server;

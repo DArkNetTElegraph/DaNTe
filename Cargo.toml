@@ -16,10 +16,12 @@ members = [
     "crates/dante-p2p",
     "crates/dante-relay-check",
 ]
-# dante-p2p pulls the large libp2p tree and is only reachable through the
-# optional `p2p` feature of dante-core / dante-cli. Keep it out of the default
-# `cargo build` / `cargo test` set; build it explicitly (`-p dante-p2p`) or with
-# `--workspace`.
+# dante-p2p pulls the large libp2p tree. `default-members` omits it so a
+# workspace-wide default build does not select it directly, but dante-core,
+# dante-cli and dante-relay all enable their `p2p` feature by default, so a bare
+# root `cargo build` still pulls the tree in transitively. Use
+# `--no-default-features` for the lean TCP-only path, or build it explicitly
+# (`-p dante-p2p`) / with `--workspace`.
 default-members = [
     "crates/dante-crypto",
     "crates/dante-identity",

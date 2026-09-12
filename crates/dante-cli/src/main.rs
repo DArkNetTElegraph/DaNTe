@@ -1,11 +1,14 @@
 //! `dante` — a headless DaNTe client for development and demos.
 //!
 //! ```text
-//! dante gen   --out KEYSTORE                       # generate an identity
-//! dante fp    --keystore KEYSTORE                  # print the fingerprint
-//! dante chat  --keystore KEYSTORE --relay ADDR     # interactive terminal session
-//! dante serve --keystore KEYSTORE --relay ADDR     # local web UI
-//!             [--http 127.0.0.1:8080] [--pow-bits N] [--hint NAME]
+//! dante gen    --out KEYSTORE                        # generate an identity
+//! dante fp     --keystore KEYSTORE                   # print the fingerprint
+//! dante chat   --keystore KEYSTORE --relay ADDR      # interactive terminal session
+//!              [--hint NAME] [--pow-bits N]
+//! dante serve  --keystore KEYSTORE --relay ADDR      # local web UI (JSON API + SPA)
+//!              [--http 127.0.0.1:8080] [--pow-bits N]
+//! dante bot    --keystore KEYSTORE --relay ADDR      # JSON-lines bridge on stdio
+//! dante revoke --keystore KEYSTORE --relay ADDR --yes   # publish a revocation
 //! ```
 //!
 //! The keystore passphrase is read from `DANTE_PASSPHRASE`. `--relay` accepts a
@@ -19,8 +22,11 @@
 //! records. `chat`/`serve` also accept `--p2p` / `--p2p-listen <multiaddr>` to
 //! run a node for the DHT key-directory + ledger-gossip fallback.
 //!
-//! In `chat`, lines starting with `/` are commands:
-//! `/to <fingerprint>`, `/file <path>`, `/whoami`, `/peer`, `/quit`.
+//! In `chat`, lines starting with `/` are commands: DMs (`/to`, `/file`,
+//! `/call`, `/safety`, `/contacts`), servers and channels (`/server`,
+//! `/channel`, `/vchannel`, `/invite`, `/invitelink`, `/redeem`, `/roles`,
+//! `/kick`, `/ban`), and message actions (`/react`, `/edit`, `/delete`,
+//! `/reply`, `/forward`, `/pin`), plus `/whoami` and `/quit`.
 
 use std::{collections::HashMap, time::Duration};
 

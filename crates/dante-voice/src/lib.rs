@@ -9,10 +9,12 @@
 //! fingerprint, so a relay that cannot forge a ratchet message cannot substitute
 //! its own DTLS identity for a man-in-the-middle.
 //!
-//! Group calls need per-epoch keys from the channel's MLS group and are not here
-//! yet. Audio capture / playback (cpal + Opus) is also a later layer — this
-//! establishes the encrypted pipe and the control channel; `send_ctl` already
-//! carries in-call state (mute/hold) and, in tests, a connectivity probe.
+//! Group calls are assembled in `dante-core`: each leg is one of these calls,
+//! and the per-epoch media key comes from the channel's MLS group
+//! (`dante-mls`). Audio capture / playback (cpal + Opus) lives in the detached
+//! `dante-audio` crate used by the desktop shell. This crate establishes the
+//! encrypted pipe and the control channel; `send_ctl` already carries in-call
+//! state (mute/hold) and, in tests, a connectivity probe.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

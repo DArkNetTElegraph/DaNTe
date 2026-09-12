@@ -1,42 +1,33 @@
 //! `dante serve` — run the engine behind a tiny local HTTP UI.
 //!
 //! Single user, localhost only. A minimal hand-rolled HTTP/1.1 handler serves
-//! the embedded SPA and a JSON API:
-//! `GET /api/me`, `GET /api/messages?since=N`, `GET /api/stream?since=N` (SSE),
-//! `GET /api/channels`,
-//! `POST /api/send {to,text}` (`to` may be a fingerprint or `#<channel-id>`),
-//! `POST /api/server {name}`, `POST /api/channel {server,name}`,
-//! `POST /api/invite {channel,peer}`, `POST /api/invite-link
-//! {channel,ttl_secs,max_uses}`, `POST /api/redeem {link}`, `POST /api/remove
-//! {channel,member}`, `POST /api/autokick {server,days}`, `GET
-//! /api/policy?server=`, `POST /api/role {server,id,name,allow,deny,rank}`,
-//! `POST /api/roleassign {server,member,role_id,add}`, `POST /api/joinpw
-//! {server,password}`, `GET /api/typing`, `POST /api/typing {to}`,
-//! `GET /api/state`, `POST /api/onboard {mode,passphrase,blob}`,
-//! `GET /api/discover`, `POST /api/discover {server,on,summary,tags}`,
-//! `POST /api/discover/join {server,password}`, `GET /api/reactions`,
-//! `POST /api/react {channel,seq,emoji,remove}`,
-//! `GET /api/pins?channel=`, `POST /api/pin {channel,seq,pinned}`,
-//! `GET /api/p2p`,
-//! `POST /api/dm/edit {peer,msg_id,text}` (empty text deletes),
-//! `GET /api/voice`, `GET /api/voice/key?channel=`, `POST /api/voice/join|leave {channel}`,
-//! `POST /api/forward {to,origin,text}`,
-//! `POST /api/file?to=<fp>&name=<file>` (raw body = bytes, DMs only),
-//! `GET /api/safety?peer=`, `POST /api/verify {peer,verified}`,
-//! `GET /api/emoji?hash=`, `POST /api/emoji {server,name,image_hex}`,
-//! `POST /api/emoji/remove {server,name}`,
-//! `GET /api/sticker?hash=`, `POST /api/sticker {server,name,image_hex}`,
-//! `POST /api/sticker/remove {server,name}`,
-//! `GET /api/sound?hash=`, `POST /api/sound {server,name,audio_hex}`,
-//! `POST /api/sound/remove {server,name}`,
-//! `GET /api/embeds`, `POST /api/embeds {on}`, `POST /api/unfurl {url}`,
-//! `GET /api/contacts`, `POST /api/contact {peer,petname}`,
-//! `POST /api/contact/remove {peer}`, `POST /api/leave {channel}`,
-//! `POST /api/channel/delete {channel}`, `POST /api/server/delete {server}`,
-//! `GET /api/blocked`, `POST /api/block {peer}`, `POST /api/unblock {peer}`,
-//! `GET /api/calls`, `POST /api/call|call/accept|call/hangup {peer}`,
-//! `GET /api/ice`, `GET /api/call/audio?peer=`,
-//! `POST /api/call/audio {peer,frame_hex|frames_hex,ms}`.
+//! the embedded SPA and a JSON API. Everything under `/api/` is JSON over
+//! `GET` / `POST`, grouped roughly as:
+//!
+//! - identity / onboarding: `/api/me`, `/api/state`, `/api/onboard`,
+//!   `/api/resolve`, `/api/usernames`, `/api/revoke`, `/api/safety`,
+//!   `/api/verify`
+//! - messaging: `/api/send`, `/api/edit`, `/api/dm/edit`, `/api/forward`,
+//!   `/api/file`, `/api/recv-file`, `/api/messages`, `/api/stream` (SSE),
+//!   `/api/typing`, `/api/react`, `/api/pin`, `/api/unfurl`, `/api/embeds`
+//! - contacts / blocking / search: `/api/contacts`, `/api/contact`,
+//!   `/api/block`, `/api/unblock`, `/api/search`
+//! - servers & channels: `/api/server`, `/api/channel`,
+//!   `/api/channel/rename`, `/api/channel/delete`, `/api/server/delete`,
+//!   `/api/leave`, `/api/invite`, `/api/invite-link`, `/api/invites`,
+//!   `/api/invite/accept`, `/api/invite/decline`, `/api/redeem`, `/api/joinpw`,
+//!   `/api/role`, `/api/roleassign`, `/api/policy`, `/api/discover`,
+//!   `/api/discover/join`, `/api/server/kick`, `/api/server/ban`,
+//!   `/api/server/unban`, `/api/server/bans`, `/api/autokick`, `/api/remove`
+//! - custom emoji / stickers / sounds: `/api/emoji`, `/api/sticker`,
+//!   `/api/sound` (plus `/remove`)
+//! - calls & voice: `/api/calls`, `/api/call`, `/api/call/accept`,
+//!   `/api/call/hangup`, `/api/call/signal`, `/api/call/audio`, `/api/ice`,
+//!   `/api/groupcalls`, `/api/groupcall/start|join|leave`, `/api/voice`,
+//!   `/api/voice/join|leave|signal`, `/api/voice/key`
+//!
+//! File bodies are capped at 9 MiB. Mutations reject cross-site /
+//! DNS-rebinding requests, and the SPA is served under a strict CSP.
 //!
 //! `serve` can start with no identity: the page then shows a create / unlock /
 //! import flow and connects the engine when it completes.

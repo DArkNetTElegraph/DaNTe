@@ -1,8 +1,9 @@
 //! `dante-crypto` — cryptographic primitives for DaNTe.
 //!
 //! This crate holds primitives and thin, well-tested wrappers only. It performs
-//! no I/O and encodes no application policy. Every wrapper is checked against
-//! test vectors from the relevant RFC or reference implementation.
+//! no I/O and encodes no application policy. Wrappers are checked against test
+//! vectors from the relevant RFC or reference implementation where published
+//! vectors exist, and against round-trip / tamper tests otherwise.
 //!
 //! Implemented so far (Phase 1):
 //!
@@ -15,8 +16,8 @@
 //! - [`pwhash`] — Argon2id KDF for low-entropy secrets (keystore, key backup)
 //! - [`pow`]    — the `argon2id-pow` memory-hard puzzle (`docs/PROTOCOL.md` §3)
 //!
-//! Still to come: Double Ratchet wrapper (Phase 4) and MLS wrapper over
-//! `OpenMLS` (Phase 6).
+//! The Double Ratchet lives in `dante-dm` and the MLS (RFC 9420) wrapper in
+//! `dante-mls`; both are built on these primitives.
 
 mod error;
 

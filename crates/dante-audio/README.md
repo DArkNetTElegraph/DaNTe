@@ -18,8 +18,10 @@ See the module docs for a runnable bridge loop.
 
 `opus` links **libopus** (needs `pkg-config` + `libopus-dev` / `opus`), and
 `cpal` links the **platform audio stack** (ALSA on Linux, CoreAudio, WASAPI).
-The CI/dev container has none of these, so this crate has its own `[workspace]`
-and `cargo build --workspace` at the repo root skips it.
+A bare workspace build should not assume these, so this crate has its own
+`[workspace]` and `cargo build --workspace` at the repo root skips it. CI
+installs the libraries and builds this crate (via the desktop shell) on Linux,
+Windows and macOS in a dedicated job.
 
 ## Build / test (on a real host)
 

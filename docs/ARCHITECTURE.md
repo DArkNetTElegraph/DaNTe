@@ -59,8 +59,10 @@ community-run relay nodes that provide store-and-forward for offline delivery.
 Dependency direction is strictly downward:
 `cli`/`desktop` → `core` → {`dm`, `mls`, `voice`, `net`, `p2p`, `ledger`, `identity`} → `proto` → `crypto`.
 `crypto` depends on nothing internal; `proto` depends only on `crypto` (a wire
-record hashes and verifies itself). `dante-p2p` is reachable only through the
-`p2p` feature and is kept out of the default `cargo build`/`test` set.
+record hashes and verifies itself). `dante-p2p` is reached through the `p2p`
+feature, which is on by default in `dante-core` / `dante-cli` / `dante-relay`;
+`default-members` omits the crate, but a bare root `cargo build` still pulls it
+in transitively — `--no-default-features` is the lean path.
 
 ## Runtime roles
 

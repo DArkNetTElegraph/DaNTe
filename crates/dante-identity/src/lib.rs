@@ -7,9 +7,9 @@
 //! - [`keystore`] — the Argon2id-wrapped on-disk keystore (`docs/PROTOCOL.md`
 //!   §1.2)
 //! - [`backup`] — the passphrase-encrypted key backup for recovery (§1.3)
-//! - [`records`] — the `IdentityAnnounce` / `LivenessProof` / `KeyRotation`
-//!   ledger-record bodies, their PoW/link challenges, and `Record` wrapping
-//!   (§2.2)
+//! - [`records`] — the `IdentityAnnounce` / `LivenessProof` / `KeyRotation` /
+//!   `IdentityRevoke` ledger-record bodies, their PoW/link challenges, and
+//!   `Record` wrapping (§2.2)
 
 mod error;
 

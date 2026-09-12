@@ -1,11 +1,11 @@
-//! `dante-group` — group message encryption for DaNTe channels.
+//! `dante-group` — **retired** sender-keys ratchet for channel messages.
 //!
-//! A **sender-keys ratchet**: each member keeps its own sender chain per
-//! channel and shares the chain key with other members over authenticated
-//! pairwise DMs. Provides forward secrecy within a chain and removes a
-//! departed member's access on a rekey; it does **not** provide MLS's
-//! post-compromise security or O(log n) rekey. A migration of channels to MLS
-//! (RFC 9420) is planned.
+//! Each member keeps its own sender chain per channel and shares the chain key
+//! with other members over authenticated pairwise DMs. It provided forward
+//! secrecy within a chain and removed a departed member's access on a rekey,
+//! but not MLS's post-compromise security or O(log n) rekey — so channels moved
+//! to `dante-mls` (RFC 9420). No workspace crate depends on this one; it is
+//! kept only because the `fuzz` target `group_state` exercises its decoders.
 //!
 //! - [`Group`] — one member's per-channel view (own sender chain + a receiver
 //!   chain per other member)

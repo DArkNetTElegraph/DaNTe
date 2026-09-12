@@ -16,19 +16,21 @@ fans the frames out to every `connected` leg in `/api/calls`, decodes each leg
 with its own Opus decoder, and plays a summed mix. The mic opens only while at
 least one leg is connected and is released when the last one ends. This is why
 `dante-audio` is a dependency here and not in `dante-cli` — it links `libopus`
-and the platform audio stack, absent from CI.
+and the platform audio stack, which the workspace build does not assume.
 
 ## Why it's detached from the workspace
 
-Tauri needs system libraries the CI/dev container doesn't have
-(`webkit2gtk-4.1` + `libsoup-3` on Linux, WebView2 on Windows, WKWebView on
-macOS). So this crate has its own `[workspace]` and is **not** a member of the
-root workspace — `cargo build --workspace` at the repo root skips it. Build it
-explicitly from this directory.
+Tauri and the audio bridge need system libraries a bare workspace build should
+not assume (`webkit2gtk-4.1` + `libsoup-3` and the ALSA/libopus stack on Linux;
+WebView2/WASAPI on Windows; WKWebView/CoreAudio on macOS). So this crate has its
+own `[workspace]` and is **not** a member of the root workspace —
+`cargo build --workspace` at the repo root skips it. Build it explicitly from
+this directory. CI builds it in a dedicated Linux/Windows/macOS job with its own
+fmt and clippy, so the detachment cannot hide a break.
 
 ## Prerequisites
 
-- Rust ≥ 1.85
+- Rust ≥ 1.91 (the OpenMLS floor `dante-core` declares)
 - The Tauri CLI: `cargo install tauri-cli --version '^2'` (gives `cargo tauri`)
 - Platform WebView deps — see
   <https://tauri.app/start/prerequisites/>. On Debian/Ubuntu:

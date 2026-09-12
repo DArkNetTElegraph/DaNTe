@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Cryptographic primitives for DaNTe: X25519, Ed25519, AEAD, HKDF, Argon2id PoW, Double Ratchet and MLS wrappers."
+description = "Cryptographic primitives for DaNTe: X25519, Ed25519, AEAD, HKDF, HMAC, SHA-2, Argon2id, and the memory-hard proof-of-work puzzle."
 
 [dependencies]
 thiserror.workspace = true

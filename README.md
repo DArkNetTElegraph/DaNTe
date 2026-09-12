@@ -216,23 +216,23 @@ check actually verifies before your relay counts as online.
 
 | Path | What |
 |---|---|
-| `crates/dante-crypto` | Primitives: X25519, Ed25519, AEAD, HKDF, Argon2id PoW |
-| `crates/dante-identity` | Identity keys, fingerprints, encrypted keystore, liveness proofs, backup |
-| `crates/dante-ledger` | Verifiable Merkle log: records, proofs, evaporation GC |
-| `crates/dante-proto` | Canonical wire types + explicit binary codec |
-| `crates/dante-net` | Relay client/server wire (framed TCP or libp2p), sealed-sender envelopes, mailbox, rate limiting, sync |
-| `crates/dante-p2p` | libp2p node: Kademlia, gossipsub, identify, ping, the `/dante/relay/1` protocol (default-on, kept out of the bare `cargo build` set) |
-| `crates/dante-relay` | Relay node binary (mailbox, ledger replica, prekey/key-package dirs, blob store, per-channel log, TURN, federation) |
-| `crates/dante-mls` | OpenMLS 0.9 wrapper — one MLS group per channel / group call |
-| `crates/dante-dm` | 1:1 DM sessions (X3DH + Double Ratchet), file transfer, `Content` payloads |
-| `crates/dante-core` | Orchestration engine consumed by every client |
-| `crates/dante-voice` | WebRTC (webrtc-rs) call transport + Opus track tuning |
-| `crates/dante-audio` | Opus codec + cpal capture/playback for the desktop shell (detached) |
-| `crates/dante-group` | Retired sender-keys ratchet — kept only for its fuzz target |
-| `crates/dante-cli` | `dante` binary: `gen` / `fp` / `chat` / `serve` / `bot` / `revoke` + the browser SPA |
+| [`crates/dante-crypto`](crates/dante-crypto/README.md) | Primitives: X25519, Ed25519, AEAD, HKDF, Argon2id PoW |
+| [`crates/dante-identity`](crates/dante-identity/README.md) | Identity keys, fingerprints, encrypted keystore, liveness proofs, backup |
+| [`crates/dante-ledger`](crates/dante-ledger/README.md) | Verifiable Merkle log: records, proofs, evaporation GC |
+| [`crates/dante-proto`](crates/dante-proto/README.md) | Canonical wire types + explicit binary codec |
+| [`crates/dante-net`](crates/dante-net/README.md) | Relay client/server wire (framed TCP or libp2p), sealed-sender envelopes, mailbox, rate limiting, sync |
+| [`crates/dante-p2p`](crates/dante-p2p/README.md) | libp2p node: Kademlia, gossipsub, identify, ping, the `/dante/relay/1` protocol (default-on via the `p2p` feature; `--no-default-features` skips it) |
+| [`crates/dante-relay`](crates/dante-relay/README.md) | Relay node binary (mailbox, ledger replica, prekey/key-package dirs, blob store, per-channel log, TURN, federation) |
 | `crates/dante-relay-check` | Checks the opt-in relay directory (`relays/registry.toml`) and publishes the status page |
-| `apps/dante-desktop` | Tauri 2 desktop shell (detached workspace) |
-| `relays/` | The opt-in public relay directory + status page — see below |
+| [`crates/dante-mls`](crates/dante-mls/README.md) | OpenMLS 0.9 wrapper — one MLS group per channel / group call |
+| [`crates/dante-dm`](crates/dante-dm/README.md) | 1:1 DM sessions (X3DH + Double Ratchet), file transfer, `Content` payloads |
+| [`crates/dante-core`](crates/dante-core/README.md) | Orchestration engine consumed by every client |
+| [`crates/dante-voice`](crates/dante-voice/README.md) | WebRTC (webrtc-rs) call transport + Opus track tuning |
+| [`crates/dante-audio`](crates/dante-audio/README.md) | Opus codec + cpal capture/playback for the desktop shell (detached) |
+| [`crates/dante-group`](crates/dante-group/README.md) | Retired sender-keys ratchet — kept only for its fuzz target |
+| [`crates/dante-cli`](crates/dante-cli/README.md) | `dante` binary: `gen` / `fp` / `chat` / `serve` / `bot` / `revoke` + the browser SPA |
+| [`apps/dante-desktop`](apps/dante-desktop/README.md) | Tauri 2 desktop shell (detached workspace) |
+| [`relays/`](relays/README.md) | The opt-in public relay directory + status page — see below |
 | `docs/` | `DESIGN.md`, `ARCHITECTURE.md`, `THREAT_MODEL.md`, `PROTOCOL.md` |
 
 ## Building
@@ -257,8 +257,11 @@ cargo fmt   --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-A bare `cargo build` / `cargo test` excludes `dante-p2p` (the libp2p tree) by
-design; `--workspace` and `-p dante-p2p` include it. `dante-audio` and
+A bare `cargo build` / `cargo test` does not select `dante-p2p` directly
+(`default-members` omits it), but `dante-core`, `dante-cli` and `dante-relay`
+enable their `p2p` feature by default, so the libp2p tree is still built
+transitively. Use `--no-default-features` for a lean TCP-only build;
+`--workspace` and `-p dante-p2p` build it explicitly. `dante-audio` and
 `apps/dante-desktop` are detached (they need libopus / webkit2gtk) and are not
 part of the workspace build — which also means `cargo fmt --all` and
 `clippy --workspace` do not see them. CI builds the desktop crate in its own

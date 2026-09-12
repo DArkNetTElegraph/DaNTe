@@ -4,17 +4,21 @@
 //! community-run **relays** and speak a small request/response protocol.
 //!
 //! - [`transport`] — framed TCP [`Client`](transport::Client) /
-//!   [`serve`](transport::serve) / [`RequestHandler`](transport::RequestHandler)
+//!   [`serve`](transport::serve) / [`RequestHandler`](transport::RequestHandler);
+//!   with the `p2p` feature the same wire also rides a libp2p
+//!   `/dante/relay/1` stream
 //! - [`wire`] — the [`Request`](wire::Request) / [`Response`](wire::Response)
 //!   messages
 //! - [`mailbox`] — a relay's sealed-sender store-and-forward
 //!   [`Mailbox`](mailbox::Mailbox)
 //! - [`ratelimit`] — token-bucket [`KeyedRateLimiter`](ratelimit::KeyedRateLimiter)
+//! - [`socks5`] — a minimal no-auth SOCKS5 client for dialling `.onion` relays
+//!   through Tor
 //! - [`sync`] — client helpers: pull/submit ledger records, deposit/fetch
-//!   envelopes
+//!   envelopes, prekeys, key packages, blobs, channel logs, signals, ICE config
 //!
-//! A libp2p DHT + gossip overlay for multi-relay decentralisation is a later
-//! phase; the protocol here is designed to run unchanged over it.
+//! The libp2p DHT + gossip overlay lives in `dante-p2p`; this crate's wire runs
+//! unchanged over it under the `p2p` feature.
 
 pub mod error;
 pub mod mailbox;

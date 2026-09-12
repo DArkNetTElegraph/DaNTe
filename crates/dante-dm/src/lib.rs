@@ -9,9 +9,12 @@
 //! - [`session`] — [`Session`](session::Session) ties them together;
 //!   [`InitMessage`](session::InitMessage) is first contact,
 //!   [`DmMessage`](session::DmMessage) every message after
+//! - [`content`] — the typed application payloads ([`Content`]) carried over a
+//!   session: text, files, channel control, edits, calls, voice signals
+//! - [`file`](mod@file) — chunked encrypted file transfer
+//!   ([`FileManifest`], [`CHUNK_SIZE`])
 //!
-//! Chunked encrypted file transfer and the local encrypted message store are
-//! layered on top in a later step.
+//! The local encrypted message store lives in `dante-core`.
 
 pub mod content;
 pub mod error;

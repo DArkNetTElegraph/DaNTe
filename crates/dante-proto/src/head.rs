@@ -25,7 +25,7 @@ const SIGNING_DOMAIN: &[u8] = b"dante/tree-head/v1";
 pub struct TreeHead {
     /// Number of records in the tree.
     pub size: u64,
-    /// Merkle Tree Hash over those records' ids.
+    /// Merkle Tree Hash over the accepted records' encodings.
     pub root: Hash,
 }
 

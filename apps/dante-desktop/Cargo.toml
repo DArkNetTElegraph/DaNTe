@@ -1,7 +1,9 @@
-# Detached from the main workspace on purpose: Tauri needs system libraries
-# (webkit2gtk / libsoup on Linux, WebView2 on Windows) that are not present in
-# the CI/dev container, so `cargo build --workspace` at the repo root must not
-# try to compile it. Build it explicitly from this directory instead:
+# Detached from the main workspace on purpose: Tauri and the audio bridge need
+# system libraries (webkit2gtk / libsoup / ALSA / libopus on Linux, WebView2 /
+# WASAPI on Windows, WKWebView / CoreAudio on macOS) that a bare workspace build
+# should not assume, so `cargo build --workspace` at the repo root must not try
+# to compile it. CI builds it in a dedicated job (Linux, Windows, macOS); build
+# it by hand from this directory:
 #
 #   cd apps/dante-desktop && cargo tauri dev
 #
@@ -11,7 +13,7 @@
 name = "dante-desktop"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.91"
 license = "AGPL-3.0-or-later"
 description = "DaNTe desktop shell — the dante-cli engine + web UI in a native window."
 publish = false

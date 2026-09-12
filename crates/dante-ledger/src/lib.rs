@@ -13,8 +13,9 @@
 //! - [`server`] — `ServerRegister` / `ServerDelist` bodies (§2.2 kinds 4–5).
 //! - [`tombstone`] — the node-generated `Tombstone` body (§2.3).
 //!
-//! Replication (gossip of new records + range sync + tree-head comparison) is
-//! Phase 3.
+//! Replication is not in this crate: accepted records gossip over the
+//! `dante-p2p` ledger topic, sync by range in `dante-net::sync`, and relays
+//! compare signed tree heads (`dante-relay`).
 
 mod error;
 mod ledger;

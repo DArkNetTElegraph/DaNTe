@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Group message encryption for DaNTe channels: a sender-keys ratchet (an MLS migration is planned)."
+description = "Retired sender-keys ratchet for DaNTe channels; kept only for its fuzz target (channels now use dante-mls)."
 
 [dependencies]
 dante-crypto.workspace = true

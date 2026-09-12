@@ -1,8 +1,9 @@
 //! libp2p transport for DaNTe.
 //!
-//! This crate is deliberately **detached** from the root Cargo workspace (see the
-//! comment at the top of `Cargo.toml`). It is Phase-3 groundwork for a
-//! peer-to-peer control plane and is not yet wired into `dante-core`.
+//! It is a workspace member but is omitted from `default-members`, and it is
+//! reached through the `p2p` feature of `dante-core` / `dante-net` /
+//! `dante-relay` — on by default in all three, so a bare root `cargo build`
+//! still pulls the libp2p tree; `--no-default-features` is the lean path.
 //!
 //! [`Node`] wraps a libp2p [`Swarm`] driven by a background Tokio task. Callers
 //! talk to it through async methods that post a [`Command`] and (where a reply is
@@ -17,6 +18,9 @@
 //!   fan-out for append-only logs: the transparency ledger and channel relay
 //!   logs.
 //! * **identify** / **ping** — connection bring-up and liveness only.
+//! * **request-response** (`/dante/relay/1`) — carries the opaque `dante-net`
+//!   relay wire peer-to-peer (relay clients, and relay↔relay federation
+//!   backfill).
 //!
 //! The sealed-sender mailbox stays on `dante-relay`: offline delivery inherently
 //! needs a storage supernode and does not belong on the DHT.

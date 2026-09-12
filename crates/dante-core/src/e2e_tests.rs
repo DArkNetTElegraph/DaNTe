@@ -3009,6 +3009,62 @@ async fn role_icons_must_name_a_server_emoji() {
 }
 
 #[tokio::test]
+async fn member_requests_own_nickname_and_host_applies_it() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+    macro_rules! settle {
+        () => {
+            for _ in 0..6 {
+                for e in [&mut host, &mut alice] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+
+    // A bad nickname is refused before anything is sent.
+    assert!(alice
+        .request_nickname(&chan, Some("bad\nname"), now)
+        .await
+        .is_err());
+
+    // Alice asks for her own nickname; the host applies it and the signed
+    // policy comes back to her, so both sides render the same name.
+    alice
+        .request_nickname(&chan, Some("Ali"), now)
+        .await
+        .unwrap();
+    settle!();
+    assert_eq!(host.member_nickname(&server, &alice_id), Some("Ali".into()));
+    assert_eq!(
+        alice.member_nickname(&server, &alice_id),
+        Some("Ali".into())
+    );
+
+    // An empty request clears it for both again.
+    alice.request_nickname(&chan, None, now).await.unwrap();
+    settle!();
+    assert_eq!(host.member_nickname(&server, &alice_id), None);
+    assert_eq!(alice.member_nickname(&server, &alice_id), None);
+}
+
+#[tokio::test]
 async fn roles_muting_and_delegated_kick() {
     use crate::roles::PERM_KICK;
 

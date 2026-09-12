@@ -10,6 +10,8 @@
 //!   effective permissions lack it has their channel messages dropped.
 //! - `PERM_KICK` gates a member's `ChannelControl::KickRequest`, which the host
 //!   validates before running the removal.
+//! - A member's `ChannelControl::NicknameRequest` is self-scoped: the host
+//!   applies it to the sender only, so no permission bit gates it.
 //!
 //! The other bits are advisory today; the host still performs every privileged
 //! mutation because only it holds the root key.

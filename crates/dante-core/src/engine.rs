@@ -3730,8 +3730,8 @@ impl Engine {
     }
 
     /// Set (or, with `nickname: None`, clear) a member's display name on this
-    /// server. Host only — there is no self-service path yet, so a member who
-    /// wants their own nickname changed has to ask their server's owner.
+    /// server. Host only — a member changing their own nickname goes through
+    /// [`Engine::request_nickname`].
     pub async fn set_member_nickname(
         &mut self,
         server_root: &[u8; 32],
@@ -3841,6 +3841,49 @@ impl Engine {
             channel_id: *channel_id,
             member: *member,
             ban,
+        };
+        self.send_content(&owner, Content::Channel(req.encode()), now_ms)
+            .await
+    }
+
+    /// Set (or, with `nickname: None`, clear) **our own** per-server display
+    /// name. On a server we don't host this DMs the owner a
+    /// [`ChannelControl::NicknameRequest`], which the host validates and
+    /// applies to us; on a server we do host it is just
+    /// [`Engine::set_member_nickname`] for our own member id.
+    pub async fn request_nickname(
+        &mut self,
+        channel_id: &[u8; 32],
+        nickname: Option<&str>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if let Some(n) = nickname {
+            if !roles::valid_nickname(n) {
+                return Err(CoreError::Channel("bad nickname"));
+            }
+        }
+        let server_root = self
+            .channels
+            .get(channel_id)
+            .ok_or(CoreError::UnknownChannel)?
+            .info
+            .server_root;
+        let me = self.my_member_id();
+        if self.hosted.contains_key(&server_root) {
+            return self
+                .set_member_nickname(&server_root, &me, nickname, now_ms)
+                .await;
+        }
+        let owner = self
+            .server_policies
+            .get(&server_root)
+            .map(|p| p.owner_id)
+            .ok_or(CoreError::Channel(
+                "no server policy — cannot reach the host",
+            ))?;
+        let req = ChannelControl::NicknameRequest {
+            channel_id: *channel_id,
+            nickname: nickname.unwrap_or("").to_owned(),
         };
         self.send_content(&owner, Content::Channel(req.encode()), now_ms)
             .await
@@ -4953,6 +4996,37 @@ impl Engine {
                     self.kick_from_server(&server_root, &member, ban, now_ms)
                         .await?;
                 }
+            }
+            ChannelControl::NicknameRequest {
+                channel_id,
+                nickname,
+            } => {
+                let Some(chan) = self.channels.get(&channel_id) else {
+                    return Ok(());
+                };
+                let server_root = chan.info.server_root;
+                if !self.hosted.contains_key(&server_root) {
+                    return Ok(());
+                }
+                let Ok(pk) = SignPublic::from_bytes(from) else {
+                    return Ok(());
+                };
+                let requester = *IdentityId::of(&pk).as_bytes();
+                // Only a member of the server can appear in its policy.
+                if !chan.roster.contains(&requester) {
+                    return Ok(());
+                }
+                let nickname = (!nickname.is_empty()).then_some(nickname.as_str());
+                if let Some(n) = nickname {
+                    if !roles::valid_nickname(n) {
+                        return Ok(());
+                    }
+                }
+                // Auto-applied: the sender can only name itself, so there is
+                // no moderation decision to gate. Rebuilding the signed policy
+                // broadcasts the change back to every member.
+                self.set_member_nickname(&server_root, &requester, nickname, now_ms)
+                    .await?;
             }
             ChannelControl::Leave { channel_id } => {
                 let Some(server_root) = self.channels.get(&channel_id).map(|c| c.info.server_root)

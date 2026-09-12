@@ -95,9 +95,10 @@ above — it states precisely what is and is not protected.
   it reuses `dante serve` verbatim, opens the window *before* the engine starts
   and narrates each startup step into it, hides to the tray instead of quitting,
   raises OS notifications, and bridges the mic/speaker for calls via
-  `dante-audio`. What is outstanding is the release side: native application
-  menus, auto-update, signed bundles, and a macOS build (CI covers Linux and
-  Windows).
+  `dante-audio`. CI now compiles it on Linux, Windows and macOS. What is
+  outstanding is the release side: native application menus, auto-update, and
+  signed/notarized installers — CI proves the code builds on all three
+  platforms, but produces no distributable bundle for any of them yet.
 - A **group-call SFU** for large voice rooms (full mesh only now, fine to ~8).
 - Tenor / Giphy GIF search.
 - Custom profiles, per-server nicknames / avatars; emoji in roles.
@@ -188,8 +189,8 @@ design; `--workspace` and `-p dante-p2p` include it. `dante-audio` and
 `apps/dante-desktop` are detached (they need libopus / webkit2gtk) and are not
 part of the workspace build — which also means `cargo fmt --all` and
 `clippy --workspace` do not see them. CI builds the desktop crate in its own
-job (Linux + Windows, with its own fmt and clippy) so the detachment cannot
-hide a break; to build it by hand, follow
+job (Linux, Windows and macOS, with its own fmt and clippy) so the
+detachment cannot hide a break; to build it by hand, follow
 [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md).
 
 `cargo-deny` (license / advisory / source checks) runs in CI; install locally

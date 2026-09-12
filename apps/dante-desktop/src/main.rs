@@ -17,6 +17,10 @@
 //!   dropping you off the network.
 //! - **OS notifications** for messages that arrive while you are not looking.
 //! - **Mic/speaker bridge** for calls (`audio`), which a plain webview cannot do.
+//! - **A native application menu** (`menu`): About/Hide/Quit, Close Window,
+//!   standard Edit operations (cut/copy/paste/undo/redo), and Window
+//!   (minimize/fullscreen) — the OS menu bar on macOS, the window's own menu
+//!   bar on Windows and Linux.
 //!
 //! Config comes from the environment, matching `dante serve`:
 //!   DANTE_HOME        directory for the keystore + encrypted state
@@ -28,6 +32,7 @@
 
 mod audio;
 mod localapi;
+mod menu;
 mod notify;
 mod tray;
 
@@ -270,6 +275,7 @@ fn main() -> Result<()> {
 
             tray::hide_on_close(&window);
             tray::install(app)?;
+            menu::install(app)?;
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

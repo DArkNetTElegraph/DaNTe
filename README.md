@@ -161,14 +161,18 @@ above — it states precisely what is and is not protected.
 
 ### Not done yet
 
-- **Desktop app: packaging and updates.** The shell itself is in place —
-  it reuses `dante serve` verbatim, opens the window *before* the engine starts
-  and narrates each startup step into it, hides to the tray instead of quitting,
-  raises OS notifications, and bridges the mic/speaker for calls via
-  `dante-audio`. CI now compiles it on Linux, Windows and macOS. What is
-  outstanding is the release side: native application menus, auto-update, and
-  signed/notarized installers — CI proves the code builds on all three
-  platforms, but produces no distributable bundle for any of them yet.
+- **Desktop app: signing, auto-update.** The shell itself is in place — it
+  reuses `dante serve` verbatim, opens the window *before* the engine starts
+  and narrates each startup step into it, hides to the tray instead of
+  quitting, raises OS notifications, has a native application menu bar
+  (About/Hide/Quit, Close Window, Edit, Window), and bridges the mic/speaker
+  for calls via `dante-audio`. CI compiles it on Linux, Windows and macOS, and
+  a `v*` tag now produces real installers for all three (`.dmg`, `.msi`/`.exe`,
+  `.deb`/`.rpm`/`.AppImage` — see
+  [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md#release)).
+  What is outstanding: the bundles are unsigned (macOS Gatekeeper and Windows
+  SmartScreen both warn), which needs certificates this project does not have
+  yet; and auto-update.
 - Desktop support for the **group-call SFU**: the browser path is wired and
   SFrame-gated (`--sfu`, roster threshold, headless-Chromium-verified), but the
   desktop shell's native audio has no SFrame equivalent, so it is deliberately

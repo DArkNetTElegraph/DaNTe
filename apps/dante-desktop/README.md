@@ -9,7 +9,10 @@ roles, reactions, custom emoji, contacts, block list, safety numbers — comes
 from `crates/dante-cli` unchanged. The desktop build's job over time is the
 *native* layer: window/menus, OS notifications, tray, deep links, auto-update.
 
-One native piece is already here: **`src/audio.rs`** bridges the OS microphone
+Two native pieces are already here: **`src/menu.rs`** builds the application
+menu bar (About/Hide/Quit, Close Window, Edit, Window) — the OS menu bar on
+macOS, the window's own on Windows and Linux, via Tauri 2's unified
+`tauri::menu` API — and **`src/audio.rs`** bridges the OS microphone
 and speaker to live calls — 1:1 and group. It runs on its own thread (`cpal`
 streams are `!Send`), captures + encodes Opus once with `crates/dante-audio`,
 fans the frames out to every `connected` leg in `/api/calls`, decodes each leg
@@ -103,7 +106,44 @@ bridge has no SFrame layer, so the relay would receive plaintext Opus. See
 ## Build a bundle
 
 ```sh
+cargo tauri icon icons/icon.png   # regenerate the full platform icon set first
 cargo tauri build
 ```
 
-Produces platform installers under `target/release/bundle/`.
+Produces platform installers under `target/release/bundle/` (`.dmg`/`.app` on
+macOS, `.msi`/`.exe` (NSIS) on Windows, `.deb`/`.rpm`/`.AppImage` on Linux).
+
+## Release
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, whose `desktop-bundle`
+job does exactly the two commands above on all three platforms and attaches
+the resulting installers to the GitHub release, alongside the CLI/relay
+binaries from `linux-x86_64`'s job (see
+[`docs/REPRODUCIBLE_BUILDS.md`](../../docs/REPRODUCIBLE_BUILDS.md) for those).
+
+**These bundles are unsigned.** Tauri's bundler runs unmodified with no
+signing secrets configured, so:
+
+- **macOS** Gatekeeper blocks the `.app` on first launch ("cannot be opened
+  because the developer cannot be verified") until the user right-click →
+  Open's past it once, or the maintainer notarizes releases.
+- **Windows** SmartScreen shows an "unrecognized app" warning until the
+  maintainer buys and wires in an Authenticode certificate.
+- **Linux** packages are unaffected — neither `.deb`/`.rpm` nor `.AppImage`
+  require a signature to install, though a repository could still want one.
+
+Real code-signing needs the maintainer to provision certificates this project
+does not have and this repo's CI cannot generate on its own:
+
+- an Apple Developer ID application certificate + a notarization credential
+  (an app-specific password or an App Store Connect API key), for macOS;
+- a Windows code-signing (Authenticode) certificate, for the `.msi`/`.exe`.
+
+Tauri's own [code-signing guide](https://tauri.app/distribute/sign/) documents
+the exact environment variables its bundler reads once those exist (for
+macOS: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, plus notarization credentials). Nothing here reads
+them yet — wiring them into `desktop-bundle` as GitHub secrets is a deliberate
+follow-up, not an oversight, because getting the plumbing subtly wrong (a
+secret that's silently never read) is worse than an honestly-unsigned build
+that says so.

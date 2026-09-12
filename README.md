@@ -12,14 +12,13 @@ identities.
 > browser client (`dante serve`). The libp2p transport (DHT relay discovery,
 > redundant relay set, relay federation) is **on by default**, and the Tauri
 > desktop shell has its native layer — live startup progress, tray, OS
-> notifications — built for Linux, Windows and macOS in CI. Voice-channel
-> and 1:1 call audio have now both been verified end to end (two real
-> browser peers exchanging live RTP audio — see
-> [Partial / caveats](#partial--caveats)). Main gaps:
-> **the desktop shell has never been opened, cross-NAT voice is unverified,
-> and group calls have no browser mic path** (only 1:1 and voice channels
-> do), and there is no group-call SFU. Wire formats still change
-> without notice. See the
+> notifications — built for Linux, Windows and macOS in CI. Voice-channel,
+> 1:1 call, and now ad-hoc group-call audio all have real, verified browser
+> audio (three independent browser peers exchanging live RTP audio in a full
+> mesh — see [Partial / caveats](#partial--caveats)). Main gaps:
+> **the desktop shell has never been opened** and **cross-NAT voice is
+> unverified**, and there is no group-call SFU (mesh only, fine to ~8). Wire
+> formats still change without notice. See the
 > [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
 ## What it is
@@ -64,7 +63,7 @@ above — it states precisely what is and is not protected.
 | **1:1 DMs** | X3DH + Double Ratchet (FS + PCS), chunked encrypted file transfer, edit / delete, typing indicators, forwarding, block list, contacts / petnames, full-text search over local history |
 | **Servers & channels** | MLS group per channel (host is sole committer); create server / channel, direct invites + invite links, **server-level join password**, roles & permissions v1, member kick + inactivity auto-kick, channel history, delete server / channel, leave channel, rename channel, always-present `#general`, public **discovery** & join |
 | **In-channel** | Emoji reactions (unicode + custom), **categorised emoji picker**, edit / delete, replies, pinned messages, @mentions, message forwarding, per-conversation unread counts + mute, **custom per-server emoji / stickers / soundboards** |
-| **Voice** | **1:1 calls with real browser audio**, group calls (shared MLS media key + 1:1 mesh, no browser audio yet), **persistent Discord-style voice channels with real browser audio**, **screen share**, optional **SFrame** media encryption under the group-call key, ≥ 64 kbps Opus floor, STUN / TURN plumbing |
+| **Voice** | **1:1 calls with real browser audio**, **ad-hoc group calls (in any channel) with real browser audio**, **persistent Discord-style voice channels with real browser audio**, **screen share**, optional **SFrame** media encryption under the group-call key, ≥ 64 kbps Opus floor, STUN / TURN plumbing |
 | **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `bot` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates, opt-in link previews; `dante bot` — a JSON-lines headless bridge; `apps/dante-desktop` — a Tauri 2 native window around the same service, with a live startup screen, system tray and OS notifications |
 | **P2P (on by default; `--no-default-features` for a lean TCP build)** | `dante-p2p` libp2p node (Kademlia + gossipsub + identify + ping); the relay wire over `/dante/relay/1`; **DHT relay discovery**, a redundant relay set with health scoring, **relay↔relay federation** (ledger, prekeys, mailbox, key packages, channel logs), rendezvous-hashed single-writer channel logs, relay-assisted bootstrap + `DANTE_BOOTSTRAP` |
 
@@ -91,10 +90,20 @@ above — it states precisely what is and is not protected.
   `connected` with real inbound RTP audio both directions (~240 packets each
   way). The engine's own `dante-voice::Call` (webrtc-rs) still separately
   drives the `chat` CLI's `/call` and the desktop mic/speaker bridge.
-- **Group call audio**: the engine has the full WebRTC + Opus transport, but
-  `dante serve` has no browser microphone path for it yet — only 1:1 and
-  voice channels do. Real mic/speaker for group calls needs the desktop
-  shell, or the same `CallSignal`-style browser path extended to a mesh.
+- **Group call audio: added and runtime-verified (2026-09-12).** Ad-hoc group
+  calls (`start_group_call`/`join_group_call` in any channel, not just a
+  dedicated voice channel) now get the same real browser audio as voice
+  channels — the mesh code is the same (`voiceRtc`, `VoiceSignal`, which
+  was already generic over channel id and never actually gated on
+  `channel.voice`), pointed at the group call's participant list
+  (`/api/groupcalls`, extended to carry fingerprints, not just a count)
+  instead of a voice channel's presence beacon. A "Start/Join a group call"
+  button and bar (`#gcallbar`/`#gcall-toast`, CSS already scaffolded from an
+  earlier session, wired up here) sit in any ordinary channel's header —
+  they were tucked behind the header's overflow "More" menu until now
+  because nothing set them up. Verified with three independent
+  headless-Chromium peers in a full mesh: every one of the six directional
+  legs reached `connected` with real inbound RTP audio.
 - **Restart gaps**: *(closed)* channel history persists each message's
   relay-log `seq` (plus `reply_to` / `forwarded_from`), and the plaintext
   backlog a host hands a new member carries the `seq` too, so both restored and

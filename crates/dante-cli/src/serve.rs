@@ -405,8 +405,10 @@ struct GroupCallRow {
     channel_name: String,
     /// True once we have joined (vs. only invited).
     joined: bool,
-    /// Number of other participants (MLS members) we can see.
-    participants: usize,
+    /// Fingerprints of the other participants (MLS members) we can see — who
+    /// the browser dials to build the real-audio mesh. Empty while only
+    /// invited (we join the mesh, not merely observe it).
+    participants: Vec<String>,
     /// Fingerprint of whoever invited us, if we are only invited.
     invited_by: Option<String>,
 }
@@ -1283,7 +1285,7 @@ async fn engine_task(
                                         channel: key,
                                         channel_name: String::new(),
                                         joined: false,
-                                        participants: 0,
+                                        participants: Vec::new(),
                                         invited_by: Some(fp.clone()),
                                     },
                                 );
@@ -1453,7 +1455,7 @@ async fn refresh_group_calls(engine: &Engine, shared: &Shared) {
                     channel: key,
                     channel_name: name.clone(),
                     joined: true,
-                    participants: engine.group_call_peers(cid).len(),
+                    participants: engine.group_call_peers(cid).iter().map(short_id).collect(),
                     invited_by: None,
                 },
             );
@@ -1475,7 +1477,7 @@ async fn refresh_group_calls(engine: &Engine, shared: &Shared) {
                 channel: key,
                 channel_name: name,
                 joined: false,
-                participants: 0,
+                participants: Vec::new(),
                 invited_by: None,
             });
     }

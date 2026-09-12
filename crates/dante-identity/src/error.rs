@@ -48,4 +48,8 @@ pub enum IdentityError {
     /// An embedded proof of work did not meet the required difficulty.
     #[error("proof of work is invalid")]
     BadPow,
+
+    /// A profile `status` was empty, too long, or carried control characters.
+    #[error("invalid profile status")]
+    BadStatus,
 }

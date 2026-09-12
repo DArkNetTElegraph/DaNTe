@@ -17,7 +17,10 @@ use dante_crypto::{
 use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Session};
 use dante_identity::{
     id::IdentityId,
-    records::{IdentityAnnounce, IdentityProfile, IdentityRevoke, LivenessProof, RevokeReason},
+    records::{
+        valid_status, IdentityAnnounce, IdentityProfile, IdentityRevoke, LivenessProof,
+        RevokeReason,
+    },
     Identity,
 };
 use dante_ledger::{
@@ -1434,6 +1437,25 @@ impl Engine {
         self.ledger.avatars()
     }
 
+    /// Another identity's current profile status/bio, by its `IdentityId`
+    /// bytes (fingerprint). Signed, untrusted display text.
+    pub fn status_of(&self, identity_id: &[u8; 32]) -> Option<String> {
+        self.ledger.status_by_id(identity_id).map(str::to_owned)
+    }
+
+    /// Our own current profile status, if the ledger has one.
+    pub fn my_status(&self) -> Option<String> {
+        self.ledger
+            .status_by_id(&self.my_member_id())
+            .map(str::to_owned)
+    }
+
+    /// Every identity whose current status we know, as
+    /// `(IdentityId bytes, text)` — for a client's status cache.
+    pub fn known_statuses(&self) -> Vec<([u8; 32], String)> {
+        self.ledger.statuses()
+    }
+
     /// Publish a fresh liveness proof.
     pub async fn prove_liveness(&mut self, now_ms: u64) -> Result<(), CoreError> {
         let rec = LivenessProof::build(&self.identity, now_ms, self.pow)
@@ -1476,20 +1498,49 @@ impl Engine {
             return Err(CoreError::Channel("avatar image must be a PNG or JPEG"));
         }
         sync::put_blob(&mut self.client, image).await?;
-        self.submit_profile(Some(sha256(image)), now_ms).await
+        let status = self.my_status();
+        self.submit_profile(Some(sha256(image)), status, now_ms)
+            .await
     }
 
-    /// Clear the global avatar (the blob itself is left to expire).
+    /// Clear the global avatar (the blob itself is left to expire). Any
+    /// current status is carried through unchanged.
     pub async fn clear_avatar(&mut self, now_ms: u64) -> Result<(), CoreError> {
-        self.submit_profile(None, now_ms).await
+        let status = self.my_status();
+        self.submit_profile(None, status, now_ms).await
     }
 
+    /// Publish a global status/bio (≤ `STATUS_MAX` bytes, no control
+    /// characters). The current avatar is carried through unchanged.
+    pub async fn publish_status(&mut self, status: &str, now_ms: u64) -> Result<(), CoreError> {
+        if !valid_status(status) {
+            return Err(CoreError::Channel("bad status"));
+        }
+        let avatar = self.my_avatar_hash();
+        self.submit_profile(avatar, Some(status.to_owned()), now_ms)
+            .await
+    }
+
+    /// Clear the global status. Any current avatar is carried through
+    /// unchanged.
+    pub async fn clear_status(&mut self, now_ms: u64) -> Result<(), CoreError> {
+        let avatar = self.my_avatar_hash();
+        self.submit_profile(avatar, None, now_ms).await
+    }
+
+    /// Patch the global profile. The caller passes the other field through as
+    /// it is in the local replica, which is a strict prefix of the relay's log
+    /// until [`Engine::sync`] runs — so two patches back to back without an
+    /// intervening sync would carry a stale field.
     async fn submit_profile(
         &mut self,
         avatar_hash: Option<[u8; 32]>,
+        status: Option<String>,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let rec = IdentityProfile::new(avatar_hash).to_record(&self.identity, now_ms);
+        // A profile record is the full profile: callers patch one field by
+        // passing the other through (see the methods above).
+        let rec = IdentityProfile::new(avatar_hash, status).to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
         self.gossip_record(&rec).await;
         self.dirty = true;

@@ -2964,6 +2964,51 @@ async fn host_set_nickname_reaches_a_member_host_only() {
 }
 
 #[tokio::test]
+async fn role_icons_must_name_a_server_emoji() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    host.announce("", now).await.unwrap();
+    host.publish_prekeys().await.unwrap();
+    host.sync(now).await.unwrap();
+
+    let server = host.create_server("lodge", now).await.unwrap();
+
+    // No such emoji yet: the mutation is refused before anything is signed.
+    assert!(matches!(
+        host.set_role(&server, None, "Mod", 0, 0, 10, Some("wave"), now)
+            .await,
+        Err(crate::CoreError::Channel(_))
+    ));
+
+    // A minimal PNG header is all the blob store asks for.
+    let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    host.set_server_emoji(&server, "wave", &png, now)
+        .await
+        .unwrap();
+    let id = host
+        .set_role(&server, None, "Mod", 0, 0, 10, Some("wave"), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.server_policy(&server)
+            .unwrap()
+            .roles
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.icon.as_deref()),
+        Some("wave")
+    );
+
+    // Removing the emoji a role still points at is refused, so a signed policy
+    // can never carry a dangling icon for a member to reject.
+    assert!(host
+        .remove_server_emoji(&server, "wave", now)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn roles_muting_and_delegated_kick() {
     use crate::roles::PERM_KICK;
 
@@ -3000,7 +3045,16 @@ async fn roles_muting_and_delegated_kick() {
 
     // Mute Bob (a role with no permissions).
     let muted = host
-        .set_role(&server, None, "Muted", 0, crate::roles::PERM_ALL, 1, now)
+        .set_role(
+            &server,
+            None,
+            "Muted",
+            0,
+            crate::roles::PERM_ALL,
+            1,
+            None,
+            now,
+        )
         .await
         .unwrap();
     host.assign_role(&server, &bob_id, muted, true, now)
@@ -3025,7 +3079,7 @@ async fn roles_muting_and_delegated_kick() {
 
     // Give Alice a Mod role; now her kick request is honoured by the host.
     let mods = host
-        .set_role(&server, None, "Mod", PERM_KICK, 0, 10, now)
+        .set_role(&server, None, "Mod", PERM_KICK, 0, 10, None, now)
         .await
         .unwrap();
     host.assign_role(&server, &alice_id, mods, true, now)

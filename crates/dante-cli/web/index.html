@@ -2747,11 +2747,25 @@ function renderMembers() {
     if (!groups.has(rn)) groups.set(rn, []);
     groups.get(rn).push(fp);
   }
+  const roleIcons = new Map();
+  if (root) for (const r of ((store.policies[root] || {}).roles || [])) if (r.icon) roleIcons.set(r.name, r.icon);
   const order = ["Owner", ...[...groups.keys()].filter(k => k !== "Owner" && k !== "Members").sort(), "Members"];
   for (const g of order) {
     const members = groups.get(g);
     if (!members) continue;
-    wrap.appendChild(el("div", "role-label", g + " — " + members.length));
+    const label = el("div", "role-label");
+    const icon = root && roleIcons.get(g);
+    const hash = icon && store.emojis[root] && store.emojis[root][icon];
+    if (hash) {
+      const im = el("img", "emoji");
+      im.alt = ":" + icon + ":";
+      im.title = ":" + icon + ":";
+      im.src = "/api/emoji?hash=" + encodeURIComponent(hash);
+      label.appendChild(im);
+      label.appendChild(document.createTextNode(" "));
+    }
+    label.appendChild(document.createTextNode(g + " — " + members.length));
+    wrap.appendChild(label);
     for (const fp of members) {
       const isMe = fp === store.me.fingerprint;
       const label = isMe ? (store.me.username || "you")
@@ -2799,25 +2813,30 @@ async function rolesFlow(server) {
   const root = store.rootOf(server);
   if (!root) return ui.say("Unknown server root.");
   const p = store.policies[root];
+  const avail = Object.keys((root && store.emojis[root]) || {});
   const list = p && p.roles.length
-    ? p.roles.map(r => `  [${r.id}] ${r.name}` +
+    ? p.roles.map(r => `  [${r.id}]${r.icon ? " :" + r.icon + ":" : ""} ${r.name}` +
         (r.deny & PERM_SEND ? "  (muted)" : "") +
         (r.allow & PERM_KICK ? "  (can kick)" : "") +
         (r.allow & PERM_MANAGE_ROLES ? "  (manage)" : "")).join("\n")
     : "  (none yet)";
   const f = await ui.form("New role", [
     { name: "name", label: "Role name", placeholder: "Moderator" },
+    { name: "icon", label: "Icon (custom emoji name)", placeholder: avail[0] || "party_parrot" },
     { name: "kick", type: "check", label: "Can kick members" },
     { name: "manage", type: "check", label: "Can manage roles & channels" },
     { name: "mute", type: "check", label: "Muted (cannot send messages)" },
-  ], { ok: "Create role", msg: "Existing roles:\n" + list });
+  ], { ok: "Create role", msg: "Existing roles:\n" + list +
+      (avail.length
+        ? "\n\nAvailable custom emoji: " + avail.map(n => ":" + n + ":").join(" ")
+        : "\n\nNo custom emoji on this server yet.") });
   if (!f || !f.name) return;
   let allow = 0, deny = 0;
   if (f.kick) allow |= PERM_KICK;
   if (f.manage) allow |= PERM_MANAGE_ROLES | PERM_MANAGE_CHANNELS;
   if (f.mute) deny |= PERM_SEND;
   try {
-    const r = await api.post("/api/role", { server: root, name: f.name, allow, deny, rank: 10 });
+    const r = await api.post("/api/role", { server: root, name: f.name, icon: f.icon || null, allow, deny, rank: 10 });
     ui.sys(`Role "${f.name}" created (id ${r.ok}).`);
     refreshPolicies();
   } catch (e) { ui.say("Could not create role (host only): " + e.message); }
@@ -2828,7 +2847,7 @@ async function assignRoleFlow(server, memberFp) {
   const p = store.policies[root];
   if (!p || !p.roles.length) return ui.say("No roles defined yet — use the shield button on a member.");
   const idStr = await ui.ask("Toggle which role id on " + short(memberFp) + "?\n" +
-    p.roles.map(r => `  [${r.id}] ${r.name}`).join("\n"));
+    p.roles.map(r => `  [${r.id}]${r.icon ? " :" + r.icon + ":" : ""} ${r.name}`).join("\n"));
   const role_id = parseInt(idStr, 10);
   if (!Number.isFinite(role_id)) return;
   const has = (p.assignments.find(a => a.member === memberFp) || { roles: [] }).roles.includes(role_id);
@@ -4780,7 +4799,7 @@ function openServerSettings(server) {
 
   const rSec = sec("Roles & permissions");
   note(rSec, p && p.roles && p.roles.length
-    ? p.roles.length + " role(s): " + p.roles.map(r => r.name).join(", ")
+    ? p.roles.length + " role(s): " + p.roles.map(r => (r.icon ? ":" + r.icon + ": " : "") + r.name).join(", ")
     : "No custom roles — everyone can send.");
   act(rSec, "Manage roles…", () => rolesFlow(server));
 

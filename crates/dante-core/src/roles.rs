@@ -91,23 +91,58 @@ pub struct Role {
     pub deny: u32,
     /// Higher rank sorts first in the member list.
     pub rank: u16,
+    /// Optional custom-emoji shortcode rendered next to the role's name. Must
+    /// name a shortcode in the owning [`ServerPolicy::emojis`]; an unknown or
+    /// malformed shortcode makes the policy invalid.
+    pub icon: Option<String>,
 }
 
+/// Top bit of the role count in a policy body: set when role entries carry the
+/// optional inline [`Role::icon`] field.
+///
+/// Old bodies (no icons) leave the bit clear and stay byte-identical, so a
+/// policy signed before icons existed still decodes as `icon: None`. A legacy
+/// count can never set the bit: the body is `u32`-length-prefixed and the
+/// smallest role is 16 bytes, so `2^31` roles would need a body larger than the
+/// format can express. That makes the flag unambiguous both ways.
+const ROLE_ICON_FLAG: u32 = 1 << 31;
+
 impl Role {
-    fn write(&self, w: &mut Writer) {
+    fn write(&self, w: &mut Writer, with_icons: bool) {
         w.u16(self.id)
             .string(&self.name)
             .u32(self.allow)
             .u32(self.deny)
             .u16(self.rank);
+        if with_icons {
+            match &self.icon {
+                Some(icon) => {
+                    w.bool(true).string(icon);
+                }
+                None => {
+                    w.bool(false);
+                }
+            }
+        }
     }
-    fn read(r: &mut Reader<'_>) -> Result<Self, WireError> {
+    fn read(r: &mut Reader<'_>, with_icons: bool) -> Result<Self, WireError> {
+        let id = r.u16()?;
+        let name = r.string()?;
+        let allow = r.u32()?;
+        let deny = r.u32()?;
+        let rank = r.u16()?;
+        let icon = if with_icons && r.bool()? {
+            Some(r.string()?)
+        } else {
+            None
+        };
         Ok(Self {
-            id: r.u16()?,
-            name: r.string()?,
-            allow: r.u32()?,
-            deny: r.u32()?,
-            rank: r.u16()?,
+            id,
+            name,
+            allow,
+            deny,
+            rank,
+            icon,
         })
     }
 }
@@ -227,10 +262,18 @@ impl ServerPolicy {
         w.fixed(&self.server_root)
             .fixed(&self.owner_id)
             .u64(self.version)
-            .u64(self.issued_ms)
-            .u32(self.roles.len() as u32);
+            .u64(self.issued_ms);
+        // Icon-bearing role entries are flagged in the count's top bit, so a
+        // policy whose roles have no icons keeps the pre-icon byte layout.
+        let with_icons = self.roles.iter().any(|r| r.icon.is_some());
+        let count = self.roles.len() as u32;
+        w.u32(if with_icons {
+            count | ROLE_ICON_FLAG
+        } else {
+            count
+        });
         for role in &self.roles {
-            role.write(&mut w);
+            role.write(&mut w, with_icons);
         }
         w.u32(self.assignments.len() as u32);
         for (m, ids) in &self.assignments {
@@ -335,10 +378,15 @@ impl ServerPolicy {
         let owner_id = b.fixed::<32>()?;
         let version = b.u64()?;
         let issued_ms = b.u64()?;
-        let nr = bounded(&mut b)?;
+        let raw = b.u32()?;
+        let with_icons = raw & ROLE_ICON_FLAG != 0;
+        let nr = (raw & !ROLE_ICON_FLAG) as usize;
+        if nr > b.remaining() {
+            return Err(WireError::LengthTooLarge(nr as u64));
+        }
         let mut roles = Vec::with_capacity(nr);
         for _ in 0..nr {
-            roles.push(Role::read(&mut b)?);
+            roles.push(Role::read(&mut b, with_icons)?);
         }
         let na = bounded(&mut b)?;
         let mut assignments = Vec::with_capacity(na);
@@ -363,6 +411,17 @@ impl ServerPolicy {
                     return Err(WireError::Invalid("emoji shortcode"));
                 }
                 emojis.push((name, b.fixed::<32>()?));
+            }
+        }
+        // A role's icon must name a custom emoji in this same policy. The host
+        // enforces this when it builds one, but the check belongs here too: a
+        // validly signed policy is still untrusted input at the render sink,
+        // and a dangling or hostile shortcode must not survive decode.
+        for role in &roles {
+            if let Some(icon) = &role.icon {
+                if !valid_emoji_name(icon) || !emojis.iter().any(|(n, _)| n == icon) {
+                    return Err(WireError::Invalid("role icon"));
+                }
             }
         }
         let mut stickers = Vec::new();
@@ -469,6 +528,7 @@ mod tests {
             allow: PERM_KICK,
             deny: 0,
             rank: 10,
+            icon: None,
         };
         let muted = Role {
             id: 2,
@@ -476,6 +536,7 @@ mod tests {
             allow: 0,
             deny: PERM_ALL,
             rank: 1,
+            icon: None,
         };
         let alice = [7u8; 32];
         let p = ServerPolicy::signed(
@@ -762,6 +823,138 @@ mod tests {
         assert!(valid_emoji_name("party_parrot"));
         assert!(!valid_emoji_name("Party"));
         assert!(!valid_emoji_name(""));
+    }
+
+    #[test]
+    fn role_icons_roundtrip_and_must_name_an_emoji() {
+        let owner = [1u8; 32];
+        let emojis = vec![("party_parrot".to_string(), [8u8; 32])];
+        let p = ServerPolicy::signed(
+            &root(),
+            owner,
+            2,
+            vec![Role {
+                id: 1,
+                name: "Mod".into(),
+                allow: PERM_KICK,
+                deny: 0,
+                rank: 10,
+                icon: Some("party_parrot".into()),
+            }],
+            vec![],
+            emojis.clone(),
+            vec![],
+            vec![],
+            vec![],
+            0,
+        );
+        p.verify().unwrap();
+        let decoded = ServerPolicy::decode(&p.encode()).unwrap();
+        assert_eq!(decoded, p);
+        assert_eq!(decoded.roles[0].icon.as_deref(), Some("party_parrot"));
+        // The icon is part of the signed body.
+        decoded.verify().unwrap();
+
+        // A role naming a shortcode this policy does not carry is refused.
+        let dangling = ServerPolicy::signed(
+            &root(),
+            owner,
+            3,
+            vec![Role {
+                id: 1,
+                name: "Mod".into(),
+                allow: 0,
+                deny: 0,
+                rank: 1,
+                icon: Some("nope".into()),
+            }],
+            vec![],
+            emojis,
+            vec![],
+            vec![],
+            vec![],
+            0,
+        );
+        assert!(matches!(
+            ServerPolicy::decode(&dangling.encode()),
+            Err(WireError::Invalid("role icon"))
+        ));
+    }
+
+    #[test]
+    fn a_pre_icon_policy_still_decodes_and_iconless_bytes_are_unchanged() {
+        let root = root();
+        let owner = [1u8; 32];
+        // A body exactly as it would have been encoded before icons existed:
+        // one role, the role count with no icon flag, no tail lists.
+        let mut w = Writer::new();
+        w.fixed(&root.public().to_bytes())
+            .fixed(&owner)
+            .u64(4)
+            .u64(0)
+            .u32(1);
+        w.u16(1).string("Mod").u32(PERM_KICK).u32(0).u16(10);
+        w.u32(0);
+        let body = w.into_vec();
+        let sig = root.sign(&challenge(&body));
+        let mut out = Writer::new();
+        out.bytes(&body).fixed(&sig);
+        let legacy = out.into_vec();
+
+        let p = ServerPolicy::decode(&legacy).unwrap();
+        p.verify().unwrap();
+        assert_eq!(p.version, 4);
+        assert_eq!(p.roles.len(), 1);
+        assert_eq!(p.roles[0].icon, None);
+
+        // Current code emits the very same bytes for an icon-free policy, so
+        // old signatures and old readers are unaffected.
+        let fresh = ServerPolicy::signed(
+            &root,
+            owner,
+            4,
+            vec![Role {
+                id: 1,
+                name: "Mod".into(),
+                allow: PERM_KICK,
+                deny: 0,
+                rank: 10,
+                icon: None,
+            }],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            0,
+        );
+        assert_eq!(fresh.encode(), legacy);
+
+        // An icon-bearing policy uses the flagged format and round-trips.
+        let with_icon = ServerPolicy::signed(
+            &root,
+            owner,
+            5,
+            vec![Role {
+                id: 1,
+                name: "Mod".into(),
+                allow: PERM_KICK,
+                deny: 0,
+                rank: 10,
+                icon: Some("wave".into()),
+            }],
+            vec![],
+            vec![("wave".to_string(), [4u8; 32])],
+            vec![],
+            vec![],
+            vec![],
+            0,
+        );
+        with_icon.verify().unwrap();
+        assert_eq!(
+            ServerPolicy::decode(&with_icon.encode()).unwrap(),
+            with_icon
+        );
     }
 
     #[test]

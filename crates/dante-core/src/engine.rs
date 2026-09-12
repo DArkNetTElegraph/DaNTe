@@ -81,6 +81,40 @@ struct MsgEdit {
     deleted: bool,
 }
 
+/// Cap one channel's authorship-only entries in an [`EditMap`] bucket.
+///
+/// Every message ever sent or seen gets one entry here — it is how the
+/// author is known when a later edit/delete arrives — and unbounded, a
+/// long-lived process (`dante serve` or the desktop shell, both meant to run
+/// for weeks) grows this forever: one entry per message, in every channel,
+/// for the life of the process.
+///
+/// Evict only entries with no recorded edit or delete, oldest `seq` first,
+/// down to `cap`. A real edit or delete is never evicted: those are rarer,
+/// and dropping one would silently un-delete or un-edit a message still on
+/// screen. Pulled out as a free function (rather than a method on `Engine`)
+/// so it can be unit tested without constructing a full engine — see the
+/// tests at the bottom of this file.
+fn trim_edit_map(by_seq: &mut HashMap<u64, MsgEdit>, cap: usize) {
+    let authorship_only = by_seq
+        .values()
+        .filter(|e| e.text.is_none() && !e.deleted)
+        .count();
+    if authorship_only <= cap {
+        return;
+    }
+    let overflow = authorship_only - cap;
+    let mut victims: Vec<u64> = by_seq
+        .iter()
+        .filter(|(_, e)| e.text.is_none() && !e.deleted)
+        .map(|(seq, _)| *seq)
+        .collect();
+    victims.sort_unstable();
+    for seq in victims.into_iter().take(overflow) {
+        by_seq.remove(&seq);
+    }
+}
+
 /// Standing edit/delete state for direct messages: `peer_idk -> msg_id -> state`.
 type DmEditMap = HashMap<[u8; 32], HashMap<[u8; 16], DmMsgEdit>>;
 
@@ -3928,6 +3962,7 @@ impl Engine {
                     text: None,
                     deleted: false,
                 });
+            self.trim_channel_edits(channel_id);
         }
         // Our own message never comes back through `poll_channels`, so this is
         // the only chance to record what it was: the seq reactions / pins /
@@ -4259,6 +4294,20 @@ impl Engine {
         }
     }
 
+    /// Cap the authorship-only entries `channel_edits` holds for one channel.
+    /// See [`trim_edit_map`] for the eviction logic and why it exists.
+    ///
+    /// Reuses [`CHANNEL_HISTORY_CAP`] for parity, not because the two maps
+    /// share a window: `channel_history` is one global, all-channels `Vec`
+    /// capped at that total, while this cap applies per channel, so someone
+    /// active in many channels keeps proportionally more authorship state.
+    /// Still strictly bounded rather than unbounded, which is the actual bug.
+    fn trim_channel_edits(&mut self, channel_id: &[u8; 32]) {
+        if let Some(by_seq) = self.channel_edits.get_mut(channel_id) {
+            trim_edit_map(by_seq, CHANNEL_HISTORY_CAP);
+        }
+    }
+
     /// Poll every channel's relay log: apply MLS Commits from the host, and
     /// return newly decrypted messages (excluding our own).
     pub async fn poll_channels(&mut self, now_ms: u64) -> Result<Vec<ChannelMessage>, CoreError> {
@@ -4271,6 +4320,12 @@ impl Engine {
         let mut pending_edits: Vec<([u8; 32], u64, [u8; 32], Option<String>)> = Vec::new();
         let mut pending_pins: Vec<([u8; 32], u64, [u8; 32], bool)> = Vec::new();
         let mut evicted: Vec<([u8; 32], [u8; 32], String)> = Vec::new();
+        // Channels that gained a new `channel_edits` entry this poll, trimmed
+        // once after the loop rather than inline — `ch` (borrowed from
+        // `self.channels`) is still alive at the insertion point below, and
+        // trimming needs its own `&mut self`.
+        let mut edits_touched: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::new();
         for id in ids {
             let since = self.channels[&id].last_seq;
             let relay = sync::fetch_channel(&mut self.client, &id, since).await?;
@@ -4364,6 +4419,7 @@ impl Engine {
                                         text: None,
                                         deleted: false,
                                     });
+                                edits_touched.insert(id);
                                 // If we already surfaced this seq from a gossip
                                 // frame, the authoritative relay copy just
                                 // confirms it — don't emit it twice.
@@ -4443,6 +4499,9 @@ impl Engine {
                 self.push_channel_history(e);
             }
             self.dirty = true;
+        }
+        for cid in edits_touched {
+            self.trim_channel_edits(&cid);
         }
         Ok(out)
     }
@@ -4678,6 +4737,7 @@ impl Engine {
                                     text: None,
                                     deleted: false,
                                 });
+                            self.trim_channel_edits(&channel_id);
                         }
                         self.push_channel_history(ChannelHistoryEntry {
                             channel_id,
@@ -5685,5 +5745,112 @@ mod pad_tests {
         b.extend_from_slice(&[0u8; 6]);
         assert_eq!(unpad_channel(&b), None);
         assert_eq!(unpad_channel(&[1, 2]), None);
+    }
+}
+
+#[cfg(test)]
+mod trim_edit_map_tests {
+    use super::{trim_edit_map, MsgEdit};
+    use std::collections::HashMap;
+
+    fn authorship_only(author: [u8; 32]) -> MsgEdit {
+        MsgEdit {
+            author,
+            text: None,
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn evicts_the_oldest_authorship_only_entries_once_over_cap() {
+        let mut m: HashMap<u64, MsgEdit> = HashMap::new();
+        for seq in 1..=10u64 {
+            m.insert(seq, authorship_only([1u8; 32]));
+        }
+        trim_edit_map(&mut m, 5);
+        let mut remaining: Vec<u64> = m.keys().copied().collect();
+        remaining.sort_unstable();
+        assert_eq!(
+            remaining,
+            vec![6, 7, 8, 9, 10],
+            "kept the 5 newest by seq, evicted the oldest 5"
+        );
+    }
+
+    #[test]
+    fn a_real_edit_or_delete_is_never_evicted_even_when_it_is_the_oldest() {
+        let mut m: HashMap<u64, MsgEdit> = HashMap::new();
+        for seq in 1..=10u64 {
+            m.insert(seq, authorship_only([1u8; 32]));
+        }
+        // seq 1 is both the oldest and has a real edit recorded — an eviction
+        // pass that only looked at age would drop it and silently revert the
+        // message to its original text for anyone who reloads.
+        m.insert(
+            1,
+            MsgEdit {
+                author: [1u8; 32],
+                text: Some("edited".into()),
+                deleted: false,
+            },
+        );
+        trim_edit_map(&mut m, 5);
+        assert!(
+            m.contains_key(&1),
+            "an edited message must survive trimming regardless of age"
+        );
+        assert_eq!(m.get(&1).unwrap().text.as_deref(), Some("edited"));
+        assert_eq!(m.len(), 6, "5 authorship-only survivors, plus the edit");
+    }
+
+    #[test]
+    fn a_deleted_message_is_never_evicted_either() {
+        let mut m: HashMap<u64, MsgEdit> = HashMap::new();
+        for seq in 1..=10u64 {
+            m.insert(seq, authorship_only([1u8; 32]));
+        }
+        m.insert(
+            1,
+            MsgEdit {
+                author: [1u8; 32],
+                text: None,
+                deleted: true,
+            },
+        );
+        trim_edit_map(&mut m, 5);
+        assert!(m.contains_key(&1), "a delete must survive trimming");
+        assert!(m.get(&1).unwrap().deleted);
+    }
+
+    #[test]
+    fn staying_under_the_cap_changes_nothing() {
+        let mut m: HashMap<u64, MsgEdit> = HashMap::new();
+        for seq in 1..=3u64 {
+            m.insert(seq, authorship_only([1u8; 32]));
+        }
+        trim_edit_map(&mut m, 5);
+        assert_eq!(m.len(), 3, "nothing evicted while under the cap");
+    }
+
+    #[test]
+    fn an_edit_heavy_channel_can_still_exceed_the_cap() {
+        // If every entry is a real edit/delete, there is nothing eligible to
+        // evict — trimming leaves the map over cap rather than reverting
+        // content. Documenting this as accepted scope, not a bug: it needs a
+        // channel where most history was edited or deleted, which is a much
+        // rarer shape than ordinary unedited traffic.
+        let mut m: HashMap<u64, MsgEdit> = HashMap::new();
+        for seq in 1..=10u64 {
+            m.insert(
+                seq,
+                MsgEdit {
+                    author: [1u8; 32],
+                    text: Some(format!("edit {seq}")),
+                    deleted: false,
+                },
+            );
+        }
+        trim_edit_map(&mut m, 5);
+        assert_eq!(m.len(), 10, "no eligible entries, so none are evicted");
     }
 }

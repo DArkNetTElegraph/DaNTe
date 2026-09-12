@@ -12,7 +12,6 @@ description = "MLS (RFC 9420) groups for DaNTe channels and group calls — a th
 thiserror.workspace = true
 openmls = "0.9"
 openmls_rust_crypto = "0.6"
-openmls_traits = "0.6"
 openmls_basic_credential = "0.6"
 tls_codec = { version = "0.4.2", features = ["std", "derive"] }
 

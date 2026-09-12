@@ -27,7 +27,6 @@ dante-core.workspace = true
 dante-crypto.workspace = true
 dante-identity.workspace = true
 dante-ledger.workspace = true
-dante-dm.workspace = true
 anyhow.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

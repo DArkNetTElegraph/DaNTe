@@ -1374,6 +1374,7 @@ const api = {
   groupCallLeave(channel) { return this.post("/api/groupcall/leave", { channel }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
   setNickname(server, member, nickname) { return this.post("/api/nickname", { server, member, nickname }); },
+  requestNickname(server, nickname) { return this.post("/api/nickname/request", { server, nickname }); },
   inviteRespond(channel, accept) { return this.post("/api/invite/" + (accept ? "accept" : "decline"), { channel }); },
   policy(root)            { return this.get("/api/policy?server=" + encodeURIComponent(root)); },
   sendTyping(to)          { return fetch("/api/typing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to }) }).catch(() => {}); },
@@ -2768,7 +2769,8 @@ function renderMembers() {
     wrap.appendChild(label);
     for (const fp of members) {
       const isMe = fp === store.me.fingerprint;
-      const label = isMe ? (store.me.username || "you")
+      const label = isMe
+        ? (nicknameOf(root, fp) || store.me.username || "you")
         : (petname(fp) || (root && nicknameOf(root, fp)) || username(fp) || short(fp));
       const row = el("div", "member-row" + (isMe ? " you" : ""));
       const av = avatar(label, fp, "avatar clickable");
@@ -2788,6 +2790,11 @@ function renderMembers() {
         const nb = actBtn("edit", "Set nickname", "kick");
         nb.onclick = () => nicknameFlow(root, fp);
         row.appendChild(nb);
+      }
+      if (inChannel && isMe) {
+        const mb = actBtn("edit", "Set my nickname", "kick");
+        mb.onclick = () => myNicknameFlow(root);
+        row.appendChild(mb);
       }
       const isOwner = root && store.policies[root] && store.policies[root].owner === fp;
       // A member with kick/manage power is staff — only the owner may kick staff.
@@ -3322,6 +3329,18 @@ async function nicknameFlow(root, fp) {
   if (nn === null) return;
   try { await api.setNickname(root, fp, nn); }
   catch (e) { ui.sys("nickname update failed: " + e.message); return; }
+  await refreshPolicies();
+}
+
+// Any member may ask the host to set their **own** nickname; the host applies
+// it. (`nicknameFlow` above is the host editing someone else.)
+async function myNicknameFlow(root) {
+  const me = store.me.fingerprint;
+  const cur = nicknameOf(root, me) || "";
+  const nn = await ui.ask("Your nickname on this server (blank clears it):", cur);
+  if (nn === null) return;
+  try { await api.requestNickname(root, nn); }
+  catch (e) { ui.sys("nickname request failed: " + e.message); return; }
   await refreshPolicies();
 }
 
@@ -4700,6 +4719,16 @@ function openSettings() {
   api.get("/api/state").then(s => {
     nwSec.appendChild(Object.assign(el("div", "set-mono"),
       { textContent: "Relays: " + ((s.relays || []).join(", ") || "—") }));
+    nwSec.appendChild(Object.assign(el("div", "set-mono"), {
+      textContent: s.also_relay_listen
+        ? "Also relaying for others: on (" + s.also_relay_listen + ")"
+        : "Also relaying for others: off",
+    }));
+    if (!s.also_relay_listen) {
+      nwSec.appendChild(Object.assign(el("div", "set-hint"), {
+        textContent: "Restart with --also-relay to let other people's clients connect through you too — no separate relay to run.",
+      }));
+    }
   }).catch(() => {});
   const p2pLine = el("div", "set-mono");
   p2pLine.textContent = "Peer-to-peer: …";

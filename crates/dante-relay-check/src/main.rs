@@ -83,6 +83,26 @@ struct RelayEntry {
     #[serde(default)]
     #[allow(dead_code)]
     contact: Option<String>,
+    /// `"dedicated"` (a homelab box, VPS, or anything meant to stay up) or
+    /// `"user"` (someone's regular `dante serve --also-relay`, online only
+    /// while they happen to be chatting). Defaults to `"dedicated"` — the
+    /// established meaning of a registry entry before this field existed.
+    /// Purely descriptive: the check itself doesn't treat the two
+    /// differently, but the page groups by it so an intermittent "user" relay
+    /// going offline overnight doesn't read the same as a VPS actually down.
+    /// See relays/README.md.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// `RelayEntry::kind`, defaulted and normalised to one of `"dedicated"` /
+/// `"user"` — an unrecognised value falls back to `"dedicated"` rather than
+/// failing the whole check run over one PR's typo.
+fn relay_kind(entry: &RelayEntry) -> String {
+    match entry.kind.as_deref() {
+        Some("user") => "user".to_string(),
+        _ => "dedicated".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +125,12 @@ struct RelayStatus {
     /// hop's worth, even at depth > 1, so the page can show the actual
     /// federation edge without walking a full path.
     discovered_via: Option<String>,
+    /// `"dedicated"` / `"user"` for a registry entry (see `RelayEntry::kind`),
+    /// or `"federated"` for anything found only by crawling a listed relay's
+    /// reported peers — it was never registered with a kind of its own, so
+    /// there is nothing to report beyond "some relay this one federates
+    /// with".
+    kind: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +138,12 @@ struct StatusDoc {
     checked_at_unix_ms: u64,
     online_count: usize,
     total_count: usize,
+    /// Registry entries with `kind = "dedicated"` (or no `kind` at all).
+    dedicated_count: usize,
+    /// Registry entries with `kind = "user"`.
+    user_count: usize,
+    /// Entries found only via federation crawl, not directly registered.
+    federated_count: usize,
     relays: Vec<RelayStatus>,
 }
 
@@ -121,6 +153,7 @@ struct Pending {
     addr: String,
     discovered_via: Option<String>,
     depth: u32,
+    kind: String,
 }
 
 #[tokio::main]
@@ -176,6 +209,7 @@ async fn main() -> Result<()> {
             addr: entry.addr.clone(),
             discovered_via: None,
             depth: 0,
+            kind: relay_kind(entry),
         });
     }
 
@@ -204,6 +238,7 @@ async fn main() -> Result<()> {
             online,
             latency_ms: latency,
             discovered_via: item.discovered_via.clone(),
+            kind: item.kind.clone(),
         });
 
         if online && item.depth < MAX_DEPTH {
@@ -221,6 +256,7 @@ async fn main() -> Result<()> {
                         addr: peer_addr,
                         discovered_via: Some(item.name.clone()),
                         depth: item.depth + 1,
+                        kind: "federated".to_string(),
                     });
                 }
             }
@@ -228,6 +264,9 @@ async fn main() -> Result<()> {
     }
 
     let online_count = relays.iter().filter(|r| r.online).count();
+    let dedicated_count = relays.iter().filter(|r| r.kind == "dedicated").count();
+    let user_count = relays.iter().filter(|r| r.kind == "user").count();
+    let federated_count = relays.iter().filter(|r| r.kind == "federated").count();
     let doc = StatusDoc {
         checked_at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -235,6 +274,9 @@ async fn main() -> Result<()> {
             .as_millis() as u64,
         online_count,
         total_count: relays.len(),
+        dedicated_count,
+        user_count,
+        federated_count,
         relays,
     };
 
@@ -328,5 +370,33 @@ fn display_name_for(multiaddr: &str) -> String {
         multiaddr.to_string()
     } else {
         format!("{}…", &multiaddr[..40])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_defaults_to_dedicated_when_absent_or_unrecognised() {
+        let toml = r#"
+            [[relay]]
+            name = "a"
+            addr = "a.example:9944"
+
+            [[relay]]
+            name = "b"
+            addr = "b.example:9944"
+            kind = "user"
+
+            [[relay]]
+            name = "c"
+            addr = "c.example:9944"
+            kind = "typo-should-fall-back"
+        "#;
+        let reg: Registry = toml::from_str(toml).unwrap();
+        assert_eq!(relay_kind(&reg.relays[0]), "dedicated");
+        assert_eq!(relay_kind(&reg.relays[1]), "user");
+        assert_eq!(relay_kind(&reg.relays[2]), "dedicated");
     }
 }

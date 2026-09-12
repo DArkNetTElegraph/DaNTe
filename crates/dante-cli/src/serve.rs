@@ -219,6 +219,14 @@ enum Cmd {
         nickname: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Ask the host to set (non-empty `nickname`) or clear (empty) **our own**
+    /// nickname on a server. Any member may call this; the sender can only
+    /// ever name themselves.
+    RequestNickname {
+        server: String,
+        nickname: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Return the server's role policy as a ready JSON string.
     GetPolicy {
         server: [u8; 32],
@@ -577,6 +585,11 @@ pub struct Bootstrap {
     pub store_path: Option<PathBuf>,
     pub params: LedgerParams,
     pub pow: Difficulty,
+    /// Set when this client was started with `--also-relay`: the address it
+    /// listens on for other people's clients. Read-only display in the SPA's
+    /// Network settings — flipping it means restarting with/without the flag,
+    /// same as this client's other boot-time `--p2p`-style switches.
+    pub also_relay_listen: Option<String>,
     /// Where to report startup steps, if anyone is showing them.
     ///
     /// `Engine::connect` reports its own half; the rest of startup — the
@@ -2051,6 +2064,34 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::RequestNickname {
+            server,
+            nickname,
+            reply,
+        } => {
+            let r = match parse_fingerprint(&server) {
+                // `request_nickname` is channel-scoped because the engine
+                // resolves the server through a channel we belong to; any of
+                // our channels on that server will do.
+                Ok(root) => match engine
+                    .channels()
+                    .into_iter()
+                    .find(|c| c.server_root == root)
+                {
+                    Some(chan) => {
+                        let nick = (!nickname.is_empty()).then_some(nickname.as_str());
+                        engine
+                            .request_nickname(&chan.channel_id, nick, now_ms())
+                            .await
+                            .map(|_| "ok".into())
+                            .map_err(|e| e.to_string())
+                    }
+                    None => Err("not a member of any channel on that server".into()),
+                },
+                Err(_) => Err("bad server root".into()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::Discover {
             server,
             on,
@@ -2763,6 +2804,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 "fingerprint": fp,
                 "has_keystore": shared.boot.keystore_path.exists(),
                 "relays": relays,
+                "also_relay_listen": shared.boot.also_relay_listen,
             })
             .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
@@ -4177,6 +4219,25 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             dispatch(&mut stream, &shared, |reply| Cmd::SetNickname {
                 server: r.server,
                 member: r.member,
+                nickname: r.nickname,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/nickname/request") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                /// Empty clears the nickname.
+                #[serde(default)]
+                nickname: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::RequestNickname {
+                server: r.server,
                 nickname: r.nickname,
                 reply,
             })

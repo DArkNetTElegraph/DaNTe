@@ -995,6 +995,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
       <span class="spacer"></span>
       <button class="icon-btn" id="btn-mute" data-tip="Mute notifications" data-icon="bell" hidden></button>
       <button class="icon-btn" id="btn-call" data-tip="Start a voice call" data-icon="phone" hidden></button>
+      <button class="icon-btn" id="btn-groupcall" data-tip="Start a group call" data-icon="phone" hidden></button>
       <button class="icon-btn" id="btn-contact" data-tip="Save as contact" data-icon="star" hidden></button>
       <button class="icon-btn" id="btn-leave" data-tip="Leave channel" data-icon="log-out" hidden></button>
       <button class="icon-btn" id="btn-delchan" data-tip="Delete channel" data-icon="trash" hidden></button>
@@ -1010,6 +1011,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
       <input type="file" id="emoji-file" accept="image/png,image/jpeg" hidden>
     </header>
     <div id="callbar" hidden></div>
+    <div id="gcallbar" hidden></div>
     <div id="log"><div class="empty">Pick a channel or start a DM.</div></div>
     <div id="typing"></div>
     <div id="replybar" hidden></div>
@@ -1036,6 +1038,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 </div>
 
 <div id="call-toast" hidden></div>
+<div id="gcall-toast" hidden></div>
 
 <script nonce="__DANTE_CSP_NONCE__">
 "use strict";
@@ -1278,6 +1281,7 @@ const store = {
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
   voice: {},                          // channel id -> { joined, participants:[fp] }
+  groupCalls: {},                     // channel id -> { channel_name, joined, participants:[fp], invited_by }
 
   roleName(root, memberFp) {
     const p = this.policies[root];
@@ -1357,6 +1361,10 @@ const api = {
   voice()                { return this.get("/api/voice"); },
   voiceJoin(channel)     { return this.post("/api/voice/join", { channel }); },
   voiceLeave(channel)    { return this.post("/api/voice/leave", { channel }); },
+  groupCalls()           { return this.get("/api/groupcalls"); },
+  groupCallStart(channel) { return this.post("/api/groupcall/start", { channel }); },
+  groupCallJoin(channel)  { return this.post("/api/groupcall/join", { channel }); },
+  groupCallLeave(channel) { return this.post("/api/groupcall/leave", { channel }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
   inviteRespond(channel, accept) { return this.post("/api/invite/" + (accept ? "accept" : "decline"), { channel }); },
   policy(root)            { return this.get("/api/policy?server=" + encodeURIComponent(root)); },
@@ -1864,6 +1872,9 @@ function renderChat() {
   const callBtn = $("#btn-call");
   callBtn.hidden = true;
   $("#callbar").hidden = true;
+  const groupCallBtn = $("#btn-groupcall");
+  groupCallBtn.hidden = true;
+  $("#gcallbar").hidden = true;
   document.querySelector(".composer").hidden = false;
 
   if (!target) {
@@ -1903,6 +1914,15 @@ function renderChat() {
     emojiBtn.onclick = () => emojiFlow(store.rootOf(store.view.server));
     pinsBtn.hidden = false;
     pinsBtn.onclick = () => openPins(target);
+    const gc = groupCallFor(target.slice(1));
+    groupCallBtn.hidden = false;
+    groupCallBtn.classList.toggle("active", !!(gc && gc.joined));
+    groupCallBtn.title = gc && gc.joined ? "In a group call — open the bar to leave"
+      : gc ? "Join the group call" : "Start a group call";
+    groupCallBtn.onclick = () => {
+      if (gc && gc.joined) return;
+      groupCallAction(target.slice(1), gc ? "join" : "start");
+    };
     const root = store.rootOf(store.view.server);
     const iOwn = root && store.policies[root] && store.policies[root].owner === store.me.fingerprint;
     const chName = store.channelName(target.slice(1));
@@ -3611,6 +3631,63 @@ function renderCallToast() {
   toast.appendChild(dec);
 }
 
+function renderGroupCallBar() {
+  const bar = $("#gcallbar");
+  const t = curTarget();
+  const c = (t && t.startsWith("#")) ? groupCallFor(t.slice(1)) : null;
+  if (!c) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.className = c.joined ? "joined" : "";
+  bar.innerHTML = "";
+  bar.appendChild(el("span", "dot"));
+  const n = c.participants.length;
+  const label = c.joined
+    ? (n === 0 ? "In a group call — waiting for others" : "In a group call — " + n + " other" + (n === 1 ? "" : "s"))
+    : "Group call in progress";
+  const labEl = el("span");
+  labEl.innerHTML = svgIcon("phone") + " " + esc(label);
+  bar.appendChild(labEl);
+  bar.appendChild(el("span", "spacer"));
+  if (!c.joined) {
+    const join = el("button", "accept", "Join");
+    join.onclick = () => groupCallAction(c.channel, "join");
+    bar.appendChild(join);
+    return;
+  }
+  if (voiceRtc.channelId === c.channel && voiceRtc.localStream) {
+    const mic = el("button");
+    mic.innerHTML = svgIcon(micEnabled() ? "mic" : "mic-off") + (micEnabled() ? " Mute" : " Unmute");
+    mic.onclick = voiceToggleMic;
+    bar.appendChild(mic);
+  }
+  const leave = el("button", "hangup", "Leave");
+  leave.onclick = () => groupCallAction(c.channel, "leave");
+  bar.appendChild(leave);
+}
+
+function renderGroupCallToast() {
+  const toast = $("#gcall-toast");
+  // An invite/in-progress call for a channel that isn't the one currently open.
+  const t = curTarget();
+  const pending = Object.values(store.groupCalls).find(
+    c => !c.joined && "#" + c.channel !== t
+  );
+  if (!pending) { toast.hidden = true; return; }
+  toast.hidden = false;
+  toast.innerHTML = "";
+  const lbl = el("span");
+  const who = pending.invited_by ? dmLabel(pending.invited_by) || short(pending.invited_by) : "someone";
+  lbl.innerHTML = svgIcon("phone") + " Group call in " + esc(pending.channel_name || "a channel")
+    + " (" + esc(who) + ")";
+  toast.appendChild(lbl);
+  const acc = el("button", "accept", "Join");
+  acc.onclick = () => { selectTarget(store.view.server, "#" + pending.channel); groupCallAction(pending.channel, "join"); };
+  const dec = el("button", "decline", "Dismiss");
+  dec.onclick = () => { delete store.groupCalls[pending.channel]; renderGroupCallToast(); };
+  toast.appendChild(acc);
+  toast.appendChild(dec);
+}
+
 async function refreshVoice() {
   try {
     const v = await api.voice();
@@ -3621,6 +3698,54 @@ async function refreshVoice() {
     // Keep the mesh in step with who the relay says is in the room.
     if (voiceRtc.channelId) voiceSyncPeers();
   } catch (_) {}
+}
+
+/* ---------- ad-hoc group calls: the same real-audio mesh, started in an
+   ordinary channel rather than a dedicated voice channel. Membership rides
+   MLS (start/join/leave DMs), not a presence beacon, so the participant list
+   comes from /api/groupcalls instead of /api/voice — voiceSyncPeers() reads
+   whichever of the two has an entry for the connected channel. */
+async function refreshGroupCalls() {
+  try {
+    const rows = await api.groupCalls();
+    const map = {};
+    for (const r of rows) map[r.channel] = r;
+    if (JSON.stringify(map) !== JSON.stringify(store.groupCalls)) {
+      store.groupCalls = map;
+      renderGroupCallBar();
+      renderGroupCallToast();
+    }
+    if (voiceRtc.channelId) voiceSyncPeers();
+  } catch (_) {}
+}
+
+function groupCallFor(channelId) { return store.groupCalls[channelId] || null; }
+
+async function groupCallAction(channelId, action) {
+  try {
+    if (action === "leave") {
+      voiceRtcStop();
+      await api.groupCallLeave(channelId);
+    } else {
+      // Mic first — this is what pops the browser permission prompt.
+      await voiceRtcStart(channelId);
+      if (action === "start") await api.groupCallStart(channelId);
+      else await api.groupCallJoin(channelId);
+    }
+    await refreshGroupCalls();
+    render();
+    renderGroupCallBar();
+  } catch (e) {
+    voiceRtcStop();
+    try { await api.groupCallLeave(channelId); } catch (_) {}
+    const msg = (e && e.name === "NotAllowedError")
+      ? "Microphone permission denied — allow it in the browser to talk."
+      : (e && e.name === "NotFoundError")
+      ? "No microphone found."
+      : "group call: " + (e && e.message ? e.message : e);
+    ui.say(msg);
+    await refreshGroupCalls();
+  }
 }
 
 /* ---------- voice channels: real browser WebRTC audio -------------------
@@ -3862,10 +3987,13 @@ function voiceStopScreen() {
 }
 
 // Connect to everyone the relay says is present; drop anyone who left.
+// `cid` may be a dedicated voice channel (presence-driven, store.voice) or a
+// channel with an ad-hoc group call in progress (MLS-membership-driven,
+// store.groupCalls) — whichever has a live entry for it.
 function voiceSyncPeers() {
   const cid = voiceRtc.channelId;
   if (!cid) return;
-  const room = store.voice[cid] || { participants: [] };
+  const room = store.voice[cid] || store.groupCalls[cid] || { participants: [] };
   const me = store.me.fingerprint;
   const present = new Set((room.participants || []).filter(fp => fp !== me && short(fp) !== short(me)));
   for (const fp of present) {
@@ -4903,6 +5031,7 @@ async function init() {
   refreshInvites();
   refreshCalls();
   refreshVoice();
+  refreshGroupCalls();
   setInterval(poll, 3000);
   setInterval(pollTyping, 1200);
   setInterval(refreshChannels, 5000);
@@ -4914,6 +5043,7 @@ async function init() {
   setInterval(refreshInvites, 6000);
   setInterval(refreshCalls, 1200);
   setInterval(refreshVoice, 1500);
+  setInterval(refreshGroupCalls, 1500);
 }
 paintIcons();
 init();

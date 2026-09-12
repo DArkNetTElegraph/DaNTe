@@ -20,8 +20,7 @@ cd fuzz
 cargo +nightly fuzz run proto_record        # or any target below
 ```
 
-Targets: `proto_record`, `proto_envelope`, `dm_packet`, `net_wire`,
-`group_state`.
+Targets: `proto_record`, `proto_envelope`, `dm_packet`, `net_wire`.
 
 The targets call the same decoder API as the `proptest` suites in each crate
 (`src/proptests.rs`); those run on stable in CI and cover the same surface with

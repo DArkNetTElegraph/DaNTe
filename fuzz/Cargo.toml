@@ -19,7 +19,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 dante-proto = { path = "../crates/dante-proto" }
 dante-dm = { path = "../crates/dante-dm" }
-dante-group = { path = "../crates/dante-group" }
 dante-net = { path = "../crates/dante-net" }
 
 [[bin]]
@@ -46,13 +45,6 @@ bench = false
 [[bin]]
 name = "net_wire"
 path = "fuzz_targets/net_wire.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "group_state"
-path = "fuzz_targets/group_state.rs"
 test = false
 doc = false
 bench = false

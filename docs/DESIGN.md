@@ -37,8 +37,8 @@ achievable with no project-run infrastructure.
   group-call media key, channel typing-signal key), `Member::{export, import}`
   (whole-member byte blob for DaNTe's encrypted local state). Workspace MSRV is
   1.91 (OpenMLS's floor); one build-time advisory (`RUSTSEC-2026-0173`,
-  unmaintained proc-macro) is allow-listed in `deny.toml`. `dante-group` (the
-  old sender-keys ratchet) is retired — kept only for its fuzz target.
+  unmaintained proc-macro) is allow-listed in `deny.toml`. The old
+  sender-keys ratchet crate has been removed; channels are MLS end to end.
 - **Channels *(done — MLS)*:** each channel is an MLS group; the server host is
   the sole committer. Membership commits (add / remove) travel in the channel's
   relay log, tagged and interleaved with the encrypted messages, so every
@@ -797,7 +797,7 @@ infrastructure. Reached. ---**
   both peers with a shared epoch, so the transform is genuinely running rather
   than silently no-op'd.
 - **Still to build:** the group-call SFU itself. (Channels and group calls
-  both use MLS now; the sender-keys crate `dante-group` is retired.)
+  both use MLS now; the pre-MLS sender-keys ratchet has been removed.)
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).
 - SFU role in the server relay above ~5 participants; full mesh below (mesh done).
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

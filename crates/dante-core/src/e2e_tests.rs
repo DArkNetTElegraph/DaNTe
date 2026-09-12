@@ -3327,3 +3327,48 @@ async fn channel_reactions_survive_a_restart() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `dante serve --also-relay` embeds exactly `dante_relay::run` in-process
+/// alongside a client Engine — unlike every other test in this file, which
+/// builds a `RelayHandler` by hand via `spawn_relay()`. This drives a real
+/// announce + DM round trip through that embedding path, so a regression in
+/// the run() extraction (crates/dante-relay/src/run.rs) that only breaks the
+/// embedded case, and not the standalone `dante-relay` binary, still fails a
+/// test.
+#[tokio::test]
+async fn also_relay_embedding_accepts_real_clients() {
+    // Grab a free port, then hand its address (not the listener itself) to
+    // `run()` — it binds by address, not by an already-open socket.
+    let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let relay = addr.to_string();
+
+    let cfg = dante_relay::RunConfig {
+        listen: relay.clone(),
+        min_pow_bits: Some(8),
+        ..Default::default()
+    };
+    tokio::spawn(dante_relay::run(cfg));
+    // Give the listener a moment to bind before dialing it.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let now = now_ms();
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    host.announce("host", now).await.unwrap();
+    alice.announce("alice", now).await.unwrap();
+    host.publish_prekeys().await.unwrap();
+    alice.publish_prekeys().await.unwrap();
+    assert!(host.sync(now).await.unwrap() >= 1);
+    assert!(alice.sync(now).await.unwrap() >= 1);
+
+    host.send_dm(&alice_id, "hello over an embedded relay", now)
+        .await
+        .unwrap();
+    let got = alice.receive(now).await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text, "hello over an embedded relay");
+}

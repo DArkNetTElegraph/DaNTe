@@ -4,5 +4,8 @@
 //! The [`dante-relay`](../dante_relay/index.html) binary is a thin wrapper over
 //! [`state::RelayHandler`].
 
+pub mod run;
 pub mod state;
 pub mod turn_server;
+
+pub use run::{run, RunConfig, DEFAULT_LISTEN};

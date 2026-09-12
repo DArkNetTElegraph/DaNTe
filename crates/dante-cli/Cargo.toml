@@ -18,9 +18,10 @@ path = "src/main.rs"
 
 [features]
 default = ["p2p"]
-# libp2p transport + DHT, forwarded to dante-core. On by default; build with
-# `--no-default-features` for a relay-only client with no libp2p tree.
-p2p = ["dante-core/p2p"]
+# libp2p transport + DHT, forwarded to dante-core and dante-relay. On by
+# default; build with `--no-default-features` for a relay-only client with no
+# libp2p tree.
+p2p = ["dante-core/p2p", "dante-relay/p2p"]
 
 [dependencies]
 dante-core.workspace = true
@@ -28,6 +29,10 @@ dante-crypto.workspace = true
 dante-identity.workspace = true
 dante-ledger.workspace = true
 dante-dm.workspace = true
+# `--also-relay`: embeds the same relay node the `dante-relay` binary runs,
+# so a desktop user can opt in to being a relay for others without a second
+# process. See dante_relay::run.
+dante-relay = { path = "../dante-relay", version = "0.0.1" }
 anyhow.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

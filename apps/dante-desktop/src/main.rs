@@ -130,6 +130,8 @@ async fn prepare(progress: dante_core::BootProgress) -> Result<Prepared> {
             store_path,
             params,
             pow,
+            // Not offered from the desktop shell yet — no UI for it there.
+            also_relay_listen: None,
             progress: Some(progress),
         },
     })

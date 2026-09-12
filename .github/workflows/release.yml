@@ -68,3 +68,103 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             dist/dante dist/dante-relay dist/SHA256SUMS dist/SHA256SUMS.bundle
+
+  desktop-bundle:
+    name: desktop bundle (${{ matrix.os }})
+    # The release must already exist (created above) before a bundle can be
+    # attached to it.
+    needs: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    env:
+      # See the identical comment in ci.yml: audiopus_sys's vendored libopus
+      # needs this under CMake 4. Only matters where there is no system
+      # libopus (Windows; macOS skips it below by installing one).
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      # Same package list as the `desktop shell` CI job in ci.yml — kept
+      # identical on purpose so a passing CI run is a reliable predictor of a
+      # working release build.
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libopus-dev \
+            libasound2-dev
+
+      - name: System libraries (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config opus
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/dante-desktop
+          key: release-desktop-${{ matrix.os }}
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version '^2' --locked
+
+      # icons/icon.png is the only tracked icon (see apps/dante-desktop's
+      # .gitignore) — every other size, plus the macOS .icns and Windows .ico
+      # variants the bundler wants, are generated, not committed.
+      - name: Generate the platform icon set
+        working-directory: apps/dante-desktop
+        run: cargo tauri icon icons/icon.png
+
+      # Unsigned by default: with no code-signing secrets configured, this
+      # produces a real, installable bundle for each platform, but macOS
+      # Gatekeeper and Windows SmartScreen will warn on first launch. See
+      # apps/dante-desktop/README.md's "Release" section for what signing
+      # would need and why it isn't wired up yet.
+      - name: Build the bundle
+        working-directory: apps/dante-desktop
+        run: cargo tauri build
+
+      - name: Upload the run's artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dante-desktop-${{ github.ref_name }}-${{ matrix.os }}
+          path: |
+            apps/dante-desktop/target/release/bundle/**/*.dmg
+            apps/dante-desktop/target/release/bundle/**/*.app.tar.gz
+            apps/dante-desktop/target/release/bundle/**/*.msi
+            apps/dante-desktop/target/release/bundle/**/*.exe
+            apps/dante-desktop/target/release/bundle/**/*.deb
+            apps/dante-desktop/target/release/bundle/**/*.rpm
+            apps/dante-desktop/target/release/bundle/**/*.AppImage
+          if-no-files-found: warn
+
+      - name: Attach the bundle to the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          files=(apps/dante-desktop/target/release/bundle/**/*.dmg
+                 apps/dante-desktop/target/release/bundle/**/*.msi
+                 apps/dante-desktop/target/release/bundle/**/*.exe
+                 apps/dante-desktop/target/release/bundle/**/*.deb
+                 apps/dante-desktop/target/release/bundle/**/*.rpm
+                 apps/dante-desktop/target/release/bundle/**/*.AppImage)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no desktop bundle files were produced for ${{ matrix.os }}" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber

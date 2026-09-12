@@ -106,7 +106,7 @@ this exact source, by anyone following the recipe — including you.
 
 ## Verify the signature
 
-The checksum file is signed with [cosign] in keyless mode. The signature is
+The checksum file is signed with [cosign][] in keyless mode. The signature is
 tied to the `Release` workflow in this repository at the tag, not to a private
 key that could be stolen or lost.
 

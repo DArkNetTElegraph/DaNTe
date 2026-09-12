@@ -13,7 +13,7 @@
 set -eu
 
 out="${1:-dist}"
-root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 : "${CARGO_HOME:=$HOME/.cargo}"
 : "${CARGO_TARGET_DIR:=$root/target}"
 export CARGO_HOME CARGO_TARGET_DIR

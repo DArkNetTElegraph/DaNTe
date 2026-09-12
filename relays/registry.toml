@@ -1,7 +1,9 @@
-# The opt-in relay directory. This file is the only input to the status
-# page — nothing scans or discovers relays automatically. If your relay
-# isn't listed here, it isn't checked and isn't counted, no matter how it's
-# actually configured.
+# The opt-in relay directory. This file is the only seed for the status
+# page — nothing scans for relays on its own. From a listed relay, the
+# checker does follow its reported federation peers outward too (see
+# relays/README.md), so a relay you never listed yourself can still end up
+# published if some other relay in its federation names it; use [[exclude]]
+# below if that's not something you want.
 #
 # To list yours: add a [[relay]] block below and open a PR. See
 # relays/README.md for what's required and exactly what gets checked before
@@ -15,3 +17,10 @@
 # # Not published anywhere — only read by a maintainer if this relay is down
 # # for a long stretch and worth a heads-up.
 # contact = "you@example.org"
+
+# Opt out of being published via someone else's federation listing, without
+# needing to control the relay that named you. Matches on the libp2p peer id
+# (the part after the last /p2p/ in a discovered multiaddr), which survives
+# an IP/port change; see relays/README.md.
+# [[exclude]]
+# addr = "12D3KooW..."

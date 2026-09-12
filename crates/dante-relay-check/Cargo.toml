@@ -14,7 +14,12 @@ name = "dante-relay-check"
 path = "src/main.rs"
 
 [dependencies]
-dante-net = { workspace = true }
+# The `p2p` feature is what lets this crate dial a discovered libp2p multiaddr
+# (a federation sibling nobody listed directly) rather than only the plain TCP
+# addresses in the registry.
+dante-net = { workspace = true, features = ["p2p"] }
+dante-p2p = { workspace = true }
+dante-crypto = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

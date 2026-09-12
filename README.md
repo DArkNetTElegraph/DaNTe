@@ -17,9 +17,9 @@ identities.
 > audio (three independent browser peers exchanging live RTP audio in a full
 > mesh — see [Partial / caveats](#partial--caveats)). Main gaps:
 > **the desktop shell has never been opened** and **cross-NAT voice is
-> unverified**, and the group-call **SFU has no browser/desktop integration**
-> (its media plane, relay signalling and engine client mode are built and
-> tested, but the shipped browser client is mesh-only, fine to ~8). Wire
+> unverified**, and the group-call **SFU is browser-only** (media plane,
+> relay signalling, engine mode and the SFrame-gated SPA path are built and
+> tested; the desktop shell deliberately does not offer it). Wire
 > formats still change without notice. See the
 > [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
@@ -173,12 +173,12 @@ above — it states precisely what is and is not protected.
   What is outstanding: the bundles are unsigned (macOS Gatekeeper and Windows
   SmartScreen both warn), which needs certificates this project does not have
   yet; and auto-update.
-- Browser/desktop wiring for the **group-call SFU**. The media plane, the
-  relay-hosted signalling and the `dante-core` client mode are built and proven
-  (`Engine::enable_sfu()`, real 3-peer/3-engine tests) — what is missing is SPA
-  negotiation, the desktop audio bridge's single-leg path, a participant-count
-  switch and SFU discovery, so the shipped browser client is still a full mesh
-  (fine to ~8). See [`docs/SFU.md`](docs/SFU.md).
+- Desktop support for the **group-call SFU**: the browser path is wired and
+  SFrame-gated (`--sfu`, roster threshold, headless-Chromium-verified), but the
+  desktop shell's native audio has no SFrame equivalent, so it is deliberately
+  not offered until one exists. Screen share over SFU and room-wide
+  capability negotiation are also still open. See
+  [`docs/SFU.md`](docs/SFU.md).
 - Tenor / Giphy GIF search.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
 - External security audit.

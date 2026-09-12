@@ -6,7 +6,8 @@
 //! dante chat   --keystore KEYSTORE --relay ADDR      # interactive terminal session
 //!              [--hint NAME] [--pow-bits N] [--sfu]
 //! dante serve  --keystore KEYSTORE --relay ADDR      # local web UI (JSON API + SPA)
-//!              [--http 127.0.0.1:8080] [--pow-bits N] [--sfu]
+//!              [--http 127.0.0.1:8080] [--pow-bits N]
+//!              [--sfu [--sfu-mesh-limit N]]
 //! dante bot    --keystore KEYSTORE --relay ADDR      # JSON-lines bridge on stdio
 //! dante revoke --keystore KEYSTORE --relay ADDR --yes   # publish a revocation
 //! ```
@@ -112,14 +113,22 @@ fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
 /// override or extend it.
 const DEFAULT_BOOTSTRAP: &[&str] = &[];
 
-fn parse_flags(mut it: impl Iterator<Item = String>) -> HashMap<String, String> {
+fn parse_flags(it: impl Iterator<Item = String>) -> HashMap<String, String> {
+    let mut it = it.peekable();
     let mut out = HashMap::new();
     while let Some(a) = it.next() {
         if let Some(name) = a.strip_prefix("--") {
             if let Some((k, v)) = name.split_once('=') {
                 out.insert(k.to_string(), v.to_string());
             } else {
-                out.insert(name.to_string(), it.next().unwrap_or_default());
+                // A bare `--flag` is boolean: consume the next token as its
+                // value only when it is not itself a flag. Otherwise
+                // `--sfu --state x` would eat `--state` and lose both.
+                let value = match it.peek() {
+                    Some(next) if !next.starts_with("--") => it.next().unwrap_or_default(),
+                    _ => String::new(),
+                };
+                out.insert(name.to_string(), value);
             }
         }
     }
@@ -259,6 +268,10 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         pow,
         also_relay_listen,
         sfu: flags.contains_key("sfu"),
+        sfu_mesh_limit: flags
+            .get("sfu-mesh-limit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8),
         // `serve` narrates startup on stderr; the structured sink is for the
         // desktop shell's boot screen.
         progress: None,
@@ -1866,4 +1879,28 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
 
 fn bail_soft(msg: &str) {
     println!("{msg}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_flags;
+
+    #[test]
+    fn boolean_flags_do_not_swallow_the_next_flag() {
+        let flags = parse_flags(["--sfu", "--state", "x"].map(String::from).into_iter());
+        assert_eq!(flags.get("sfu").map(String::as_str), Some(""));
+        assert_eq!(flags.get("state").map(String::as_str), Some("x"));
+
+        let flags = parse_flags(
+            ["--sfu-mesh-limit", "1", "--sfu"]
+                .map(String::from)
+                .into_iter(),
+        );
+        assert_eq!(flags.get("sfu-mesh-limit").map(String::as_str), Some("1"));
+        assert_eq!(flags.get("sfu").map(String::as_str), Some(""));
+
+        let flags = parse_flags(["--pow-bits=8", "--sfu"].map(String::from).into_iter());
+        assert_eq!(flags.get("pow-bits").map(String::as_str), Some("8"));
+        assert!(flags.contains_key("sfu"));
+    }
 }

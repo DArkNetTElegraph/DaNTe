@@ -2048,6 +2048,39 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Raw SFU signalling for a client that owns its own media stack: join (or
+    /// create) the room for `room` with a browser's SDP `offer`, returning the
+    /// assigned slot and the SFU's answer. `dante serve` proxies this to the
+    /// SPA's `RTCPeerConnection`; the engine's own leg
+    /// ([`Engine::enable_sfu`]) does not use it.
+    pub async fn sfu_offer(
+        &mut self,
+        room: &[u8; 32],
+        offer: &str,
+    ) -> Result<(u8, String), CoreError> {
+        Ok(sync::sfu_join(&mut self.client, room, offer).await?)
+    }
+
+    /// Raw SFU signalling: trickle one ICE candidate for our slot.
+    pub async fn sfu_ice(
+        &mut self,
+        room: &[u8; 32],
+        slot: u8,
+        candidate: &str,
+    ) -> Result<(), CoreError> {
+        Ok(sync::sfu_ice(&mut self.client, room, slot, candidate).await?)
+    }
+
+    /// Raw SFU signalling: drain the SFU's candidates for our slot.
+    pub async fn sfu_pull(&mut self, room: &[u8; 32], slot: u8) -> Result<Vec<String>, CoreError> {
+        Ok(sync::sfu_pull(&mut self.client, room, slot).await?)
+    }
+
+    /// Raw SFU signalling: leave the room and free our slot.
+    pub async fn sfu_leave(&mut self, room: &[u8; 32], slot: u8) -> Result<(), CoreError> {
+        Ok(sync::sfu_leave(&mut self.client, room, slot).await?)
+    }
+
     // ---- Channel group calls (MLS-keyed, full-mesh media) -------------------
     //
     // A group call is an MLS group (for a shared, membership-bound key that

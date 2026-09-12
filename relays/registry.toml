@@ -1,0 +1,17 @@
+# The opt-in relay directory. This file is the only input to the status
+# page — nothing scans or discovers relays automatically. If your relay
+# isn't listed here, it isn't checked and isn't counted, no matter how it's
+# actually configured.
+#
+# To list yours: add a [[relay]] block below and open a PR. See
+# relays/README.md for what's required and exactly what gets checked before
+# your relay counts as "online".
+#
+# Entries are kept alphabetical by name to keep diffs small and reviewable.
+
+# [[relay]]
+# name = "example-community"
+# addr = "relay.example.org:9944"
+# # Not published anywhere — only read by a maintainer if this relay is down
+# # for a long stretch and worth a heads-up.
+# contact = "you@example.org"

@@ -39,7 +39,11 @@ identities.
 - **No infrastructure.** The project operates nothing. Relays are run by whoever
   creates a server, for their own community — as a Tor onion service needing no
   public IP, or on a public host. See
-  [`docs/RUNNING_A_RELAY.md`](docs/RUNNING_A_RELAY.md).
+  [`docs/RUNNING_A_RELAY.md`](docs/RUNNING_A_RELAY.md). Looking for one to
+  connect to rather than running your own? See
+  [Relay status](#relay-status) below — an opt-in directory, checked from a
+  real external vantage point so it reflects who is actually reachable, not
+  just who claims to be.
 
 Read [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before relying on any of the
 above — it states precisely what is and is not protected.
@@ -141,6 +145,24 @@ Nobody has run this yet — it is built on Linux, Windows and macOS in CI, and
 that is the whole of what is known about it. Expect rough edges and please
 report them.
 
+## Relay status
+
+An opt-in directory of public relays, checked on a schedule from a real
+external vantage point (GitHub's own infrastructure) using a genuine
+protocol round trip — not a ping, and not merely "is a socket open," which a
+relay behind an ISP with no public IPv4 (common on residential CGNAT) could
+never pass anyway. That is the actual "is this eligible to be a public
+node" test.
+
+**[View the status page →](https://darknettelegraph.github.io/DaNTe/)**
+
+Nothing here scans or discovers relays on its own — that would mean
+fingerprinting operators (Tor relay operators especially) who never agreed
+to be public. A relay is listed only because its operator added it via a
+PR to [`relays/registry.toml`](relays/registry.toml). See
+[`relays/README.md`](relays/README.md) to list yours, including what the
+check actually verifies before your relay counts as online.
+
 ## Repository layout
 
 | Path | What |
@@ -159,7 +181,9 @@ report them.
 | `crates/dante-audio` | Opus codec + cpal capture/playback for the desktop shell (detached) |
 | `crates/dante-group` | Retired sender-keys ratchet — kept only for its fuzz target |
 | `crates/dante-cli` | `dante` binary: `gen` / `fp` / `chat` / `serve` / `bot` / `revoke` + the browser SPA |
+| `crates/dante-relay-check` | Checks the opt-in relay directory (`relays/registry.toml`) and publishes the status page |
 | `apps/dante-desktop` | Tauri 2 desktop shell (detached workspace) |
+| `relays/` | The opt-in public relay directory + status page — see below |
 | `docs/` | `DESIGN.md`, `ARCHITECTURE.md`, `THREAT_MODEL.md`, `PROTOCOL.md` |
 
 ## Building

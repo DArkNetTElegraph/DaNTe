@@ -29,9 +29,9 @@ Driven by `dante-core` for every channel and every group call. Covered:
 
 The `dante-core` group-call state machine (KeyPackage fetch, Welcome / Commit
 over the channel log, media mesh) and the N-party audio path are in place. The
-one media gap left is browser mic capture for 1:1 / group calls in `dante serve`
-— voice channels have it; 1:1 and group calls need the desktop shell's
-`dante-audio` bridge.
+browser SPA carries real mic audio for 1:1 calls, ad-hoc group calls and voice
+channels (runtime-verified 2026-09-12), and the desktop shell bridges
+`dante-audio` for native capture / playback.
 
 ## Notes
 

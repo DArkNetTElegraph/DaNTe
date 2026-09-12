@@ -223,7 +223,7 @@ check actually verifies before your relay counts as online.
 | [`crates/dante-net`](crates/dante-net/README.md) | Relay client/server wire (framed TCP or libp2p), sealed-sender envelopes, mailbox, rate limiting, sync |
 | [`crates/dante-p2p`](crates/dante-p2p/README.md) | libp2p node: Kademlia, gossipsub, identify, ping, the `/dante/relay/1` protocol (default-on via the `p2p` feature; `--no-default-features` skips it) |
 | [`crates/dante-relay`](crates/dante-relay/README.md) | Relay node binary (mailbox, ledger replica, prekey/key-package dirs, blob store, per-channel log, TURN, federation) |
-| `crates/dante-relay-check` | Checks the opt-in relay directory (`relays/registry.toml`) and publishes the status page |
+| [`crates/dante-relay-check`](crates/dante-relay-check/README.md) | Checks the opt-in relay directory (`relays/registry.toml`) and publishes the status page |
 | [`crates/dante-mls`](crates/dante-mls/README.md) | OpenMLS 0.9 wrapper — one MLS group per channel / group call |
 | [`crates/dante-dm`](crates/dante-dm/README.md) | 1:1 DM sessions (X3DH + Double Ratchet), file transfer, `Content` payloads |
 | [`crates/dante-core`](crates/dante-core/README.md) | Orchestration engine consumed by every client |

@@ -779,7 +779,7 @@ infrastructure. Reached. ---**
   instead of your ghost leaf lingering while you rejoin fresh. The epoch
   advance from a `GroupCallCommit` now also marks the store dirty. e2e
   `a_group_call_survives_a_restart`.
-- **SFrame media layer *(done — browser-unverified, Chromium path)*:** an
+- **SFrame media layer *(done — browser-verified 2026-09-12, Chromium path)*:** an
   extra AES-GCM pass over each **Opus** frame in the SPA voice mesh, keyed off
   the channel's MLS `group_call_key`. `Engine::group_call_epoch` +
   `GET /api/voice/key?channel=` hand the browser the current 32-byte key and
@@ -793,7 +793,9 @@ infrastructure. Reached. ---**
   decoder. **No-op** where the browser lacks encoded transforms (non-Chromium)
   — DTLS-SRTP still applies. Its point is a future SFU that forwards media
   without decoding; there is no SFU yet. Video (screen share) is not wrapped.
-  No browser in the dev env, so this is written but not runtime-verified.
+  Runtime-verified: under headless Chromium `sframeActive()` returned true on
+  both peers with a shared epoch, so the transform is genuinely running rather
+  than silently no-op'd.
 - **Still to build:** the group-call SFU itself. (Channels and group calls
   both use MLS now; the sender-keys crate `dante-group` is retired.)
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).

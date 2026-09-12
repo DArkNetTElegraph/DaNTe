@@ -3307,7 +3307,8 @@ impl Engine {
     }
 
     /// Create (id `None`) or update a role on a server we host, then broadcast
-    /// the new policy. Returns the role id.
+    /// the new policy. `icon` is an optional custom-emoji shortcode of this
+    /// server to render next to the role's name. Returns the role id.
     #[allow(clippy::too_many_arguments)]
     pub async fn set_role(
         &mut self,
@@ -3317,6 +3318,7 @@ impl Engine {
         allow: u32,
         deny: u32,
         rank: u16,
+        icon: Option<&str>,
         now_ms: u64,
     ) -> Result<u16, CoreError> {
         let (mut roles_vec, assignments, emojis, stickers, sounds, nicknames, owner, version, root) =
@@ -3328,6 +3330,7 @@ impl Engine {
                 r.allow = allow;
                 r.deny = deny;
                 r.rank = rank;
+                r.icon = icon.map(str::to_owned);
             }
             None => roles_vec.push(crate::roles::Role {
                 id,
@@ -3335,6 +3338,7 @@ impl Engine {
                 allow,
                 deny,
                 rank,
+                icon: icon.map(str::to_owned),
             }),
         }
         self.commit_policy(
@@ -3943,6 +3947,19 @@ impl Engine {
         nicknames: Vec<([u8; 32], String)>,
         now_ms: u64,
     ) -> Result<(), CoreError> {
+        // Role icons reference this policy's own emoji list. Every mutation
+        // funnels through here, so a dangling icon can never be signed (every
+        // member's decode refuses one). Removing an emoji a role still points
+        // at therefore fails until that role's icon is cleared.
+        for role in &roles_vec {
+            if let Some(icon) = &role.icon {
+                if !roles::valid_emoji_name(icon) || !emojis.iter().any(|(n, _)| n == icon) {
+                    return Err(CoreError::Channel(
+                        "role icon must name a custom emoji on this server",
+                    ));
+                }
+            }
+        }
         let np = ServerPolicy::signed(
             root,
             owner,

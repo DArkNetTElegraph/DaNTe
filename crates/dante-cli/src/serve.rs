@@ -200,6 +200,8 @@ enum Cmd {
         allow: u32,
         deny: u32,
         rank: u16,
+        /// Optional custom-emoji shortcode to render next to the role name.
+        icon: Option<String>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     AssignRole {
@@ -1991,11 +1993,21 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             allow,
             deny,
             rank,
+            icon,
             reply,
         } => {
             let r = match parse_fingerprint(&server) {
                 Ok(root) => engine
-                    .set_role(&root, id, &name, allow, deny, rank, now_ms())
+                    .set_role(
+                        &root,
+                        id,
+                        &name,
+                        allow,
+                        deny,
+                        rank,
+                        icon.as_deref(),
+                        now_ms(),
+                    )
                     .await
                     .map(|rid| rid.to_string())
                     .map_err(|e| e.to_string()),
@@ -2141,6 +2153,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                             serde_json::json!({
                                 "id": r.id, "name": r.name,
                                 "allow": r.allow, "deny": r.deny, "rank": r.rank,
+                                "icon": r.icon,
                             })
                         })
                         .collect();
@@ -4108,6 +4121,8 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 deny: u32,
                 #[serde(default)]
                 rank: u16,
+                #[serde(default)]
+                icon: Option<String>,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
@@ -4119,6 +4134,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 allow: r.allow,
                 deny: r.deny,
                 rank: r.rank,
+                icon: r.icon.filter(|s| !s.is_empty()),
                 reply,
             })
             .await

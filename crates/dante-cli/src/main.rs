@@ -1554,7 +1554,7 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                             }
                         }
                         match engine
-                            .set_role(&sr, None, name, allow, deny, 10, now_ms())
+                            .set_role(&sr, None, name, allow, deny, 10, None, now_ms())
                             .await
                         {
                             Ok(id) => println!("role \"{name}\" -> id {id}"),

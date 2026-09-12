@@ -63,7 +63,7 @@ above — it states precisely what is and is not protected.
 | **1:1 DMs** | X3DH + Double Ratchet (FS + PCS), chunked encrypted file transfer, edit / delete, typing indicators, forwarding, block list, contacts / petnames, full-text search over local history |
 | **Servers & channels** | MLS group per channel (host is sole committer); create server / channel, direct invites + invite links, **server-level join password**, roles & permissions v1, member kick + inactivity auto-kick, channel history, delete server / channel, leave channel, rename channel, always-present `#general`, public **discovery** & join |
 | **In-channel** | Emoji reactions (unicode + custom), **categorised emoji picker**, edit / delete, replies, pinned messages, @mentions, message forwarding, per-conversation unread counts + mute, **custom per-server emoji / stickers / soundboards** |
-| **Voice** | **1:1 calls with real browser audio**, **ad-hoc group calls (in any channel) with real browser audio**, **persistent Discord-style voice channels with real browser audio**, **screen share**, optional **SFrame** media encryption under the group-call key, ≥ 64 kbps Opus floor, STUN / TURN plumbing |
+| **Voice** | **1:1 calls with real browser audio**, **ad-hoc group calls (in any channel) with real browser audio**, **persistent Discord-style voice channels with real browser audio**, **screen share (verified)**, optional **SFrame** media encryption under the group-call key (verified active), ≥ 64 kbps Opus floor, STUN / TURN plumbing |
 | **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `bot` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates, opt-in link previews; `dante bot` — a JSON-lines headless bridge; `apps/dante-desktop` — a Tauri 2 native window around the same service, with a live startup screen, system tray and OS notifications |
 | **P2P (on by default; `--no-default-features` for a lean TCP build)** | `dante-p2p` libp2p node (Kademlia + gossipsub + identify + ping); the relay wire over `/dante/relay/1`; **DHT relay discovery**, a redundant relay set with health scoring, **relay↔relay federation** (ledger, prekeys, mailbox, key packages, channel logs), rendezvous-hashed single-writer channel logs, relay-assisted bootstrap + `DANTE_BOOTSTRAP` |
 
@@ -76,8 +76,15 @@ above — it states precisely what is and is not protected.
   "connected"` — and `RTCPeerConnection.getStats()` showed real inbound RTP
   audio flowing both directions (~220 packets / ~18 KB each way in a few
   seconds). This is the first time this code path has been exercised by
-  anything. Screen share and the SFrame transform share the same
-  renegotiation path but haven't been separately exercised yet.
+  anything.
+- **Screen share and SFrame: runtime-verified (2026-09-12).** Same two-peer
+  setup: `voiceToggleScreen()` grabbed a fake `getDisplayMedia` capture
+  (Chromium's `--auto-select-desktop-capture-source` in headless mode) and
+  the remote peer's `RTCPeerConnection.getStats()` showed real inbound video
+  RTP (15 decoded frames within a second). Separately, `sframeActive()` came
+  back `true` on both peers with a shared epoch — Chromium's
+  `createEncodedStreams` is supported headless, so the AES-GCM transform
+  over each Opus frame is genuinely running, not silently no-op'd.
 - **Browser TURN.** The page gets the relay's TURN credentials from
   `/api/ice`, so cross-NAT calls can allocate a relay candidate — the above
   test ran same-host (host candidates only), so this still hasn't been

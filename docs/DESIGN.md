@@ -970,7 +970,13 @@ infrastructure. Reached. ---**
   consent prompt). Persists on `SIGTERM` / `Ctrl-C` and after any
   membership-changing event. A user writes a bot in any language as a loop over
   those JSON lines. WASM sandboxing / an in-process RPC socket can come later.
-- Custom profiles, per-server nicknames/avatars — stored in the relevant MLS group state.
+- **Per-server nicknames** *(done)* and **global profile (avatar + status/bio)**
+  *(done)*: a per-server nickname lives in that server's signed `ServerPolicy`
+  (a member requests their own via `/api/nickname/request`, the host applies
+  it). An avatar and a status/bio are deliberately **global, not per-server** —
+  a signed `IdentityProfile` record (kind 8) in the identity ledger, so they
+  show the same everywhere rather than needing MLS group state per server;
+  see `Engine::publish_avatar` / `publish_status`.
 - **Typing indicators.** Ephemeral "is typing" signals, never persisted and
   never written to the channel log. They ride a dedicated relay *signal* channel
   (`PostSignal` / `FetchSignals`): a topic-keyed buffer the relay holds for

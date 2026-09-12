@@ -77,12 +77,12 @@ above — it states precisely what is and is not protected.
   backlog a host hands a new member carries the `seq` too, so both restored and
   backfilled messages can be reacted to, pinned, replied to and edited.
 - **Desktop shell not runtime-verified.** The native layer (startup progress,
-  tray, notifications, the mic/speaker bridge) builds green in CI on both Linux
-  and Windows, but no one has yet opened the window: how it looks, whether the
-  tray behaves per-platform, and whether notifications fire at sensible moments
-  are all unconfirmed. A passing build says the code is well-formed, nothing
-  more. The dev environment has no GTK/webview stack, so this needs
-  a real desktop — see
+  tray, notifications, the mic/speaker bridge) builds green in CI on Linux,
+  Windows and macOS, but no one has yet opened the window: how it looks,
+  whether the tray behaves per-platform, and whether notifications fire at
+  sensible moments are all unconfirmed. A passing build says the code is
+  well-formed, nothing more. The dev environment has no GTK/webview stack, so
+  this needs a real desktop — see
   [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md).
 - **Multi-relay channel writes** converge via rendezvous hashing while every
   relay is up; a relay that flaps then recovers can briefly double-sequence one

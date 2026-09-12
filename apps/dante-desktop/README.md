@@ -56,6 +56,18 @@ explicitly from this directory.
   ```
   CI sets the same variable. It can go away once `audiopus_sys` ships a libopus
   that configures under CMake 4 unaided.
+
+  On **macOS** nothing needs installing for the webview or audio backend
+  either — WKWebView and CoreAudio both ship with the OS — but, as on
+  Windows, `audiopus_sys` has no system libopus to find on a fresh machine.
+  Installing one via Homebrew lets it link that instead of building the
+  vendored copy from source:
+  ```
+  brew install pkg-config opus
+  ```
+  CI does the same. Skip this and the build still works — it falls back to
+  the vendored CMake build, which needs the same
+  `CMAKE_POLICY_VERSION_MINIMUM` escape hatch as Windows.
 - Nothing else: `icons/icon.png` is committed (a 512x512 mesh mark). It is the
   *source* icon — `generate_context!` embeds it, so the crate will not compile
   without one. `cargo tauri icon icons/icon.png` regenerates the full platform

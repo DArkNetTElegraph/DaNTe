@@ -1,6 +1,6 @@
 # dante-mls
 
-MLS (RFC 9420) groups for DaNTe, a thin wrapper over [OpenMLS].
+MLS (RFC 9420) groups for DaNTe, a thin wrapper over [OpenMLS][].
 
 This is the building block for two things:
 

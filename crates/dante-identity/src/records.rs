@@ -29,6 +29,23 @@ pub const LIVENESS_BUCKET_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// Max bytes of a free-text `display_hint`.
 pub const DISPLAY_HINT_MAX: usize = 64;
 
+/// Max bytes of an [`IdentityProfile`] status/bio (UTF-8, no control
+/// characters).
+///
+/// Long enough for a couple of sentences, short enough that the record stays
+/// tiny on every replica and in gossip. Deliberately larger than a nickname
+/// (32) or `display_hint` (64) — a status is prose, not a handle — and no
+/// larger than a server `summary` (280).
+pub const STATUS_MAX: usize = 256;
+
+/// Whether `status` is a usable profile status: 1..=[`STATUS_MAX`] bytes and
+/// no control characters. It is rendered as plain text next to the username,
+/// so this keeps it from smuggling control sequences without otherwise
+/// restricting the text.
+pub fn valid_status(status: &str) -> bool {
+    !status.is_empty() && status.len() <= STATUS_MAX && status.chars().all(|c| !c.is_control())
+}
+
 const ANNOUNCE_POW_DOMAIN: &[u8] = b"dante/pow/identity-announce/v1";
 const LIVENESS_POW_DOMAIN: &[u8] = b"dante/pow/liveness/v1";
 const ROTATION_LINK_DOMAIN: &[u8] = b"dante/key-rotation/link/v1";
@@ -407,17 +424,26 @@ pub struct IdentityProfile {
     /// — so replicas and gossip stay small and clients fetch the bytes on
     /// demand from the content-addressed store.
     pub avatar_hash: Option<[u8; 32]>,
+    /// Free-text status/bio shown next to the username, or `None` to clear it.
+    /// Validated by [`valid_status`]; rendered as untrusted plain text.
+    pub status: Option<String>,
 }
 
 impl IdentityProfile {
-    /// Build a profile carrying `avatar_hash` (`None` clears the avatar).
-    pub fn new(avatar_hash: Option<[u8; 32]>) -> Self {
-        Self { avatar_hash }
+    /// Build a profile. `None` on either field clears it; a record always
+    /// carries the full profile, so a caller that only wants to change one
+    /// field passes the other one through unchanged (`dante-core`'s
+    /// `publish_avatar` / `publish_status` do exactly that).
+    pub fn new(avatar_hash: Option<[u8; 32]>, status: Option<String>) -> Self {
+        Self {
+            avatar_hash,
+            status,
+        }
     }
 
     /// Encode the body.
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::with_capacity(33);
+        let mut w = Writer::with_capacity(33 + 4 + self.status.as_ref().map_or(0, |s| s.len()));
         match &self.avatar_hash {
             Some(h) => {
                 w.bool(true).fixed(h);
@@ -426,10 +452,18 @@ impl IdentityProfile {
                 w.bool(false);
             }
         }
+        // Tail extension: the status is written only when present, so a
+        // status-less profile — including every avatar-only record from the
+        // first release — keeps the exact pre-status bytes. Presence is "there
+        // are bytes left"; see `decode`.
+        if let Some(s) = &self.status {
+            w.string(s);
+        }
         w.into_vec()
     }
 
-    /// Decode the body.
+    /// Decode the body. Tolerates both layouts: the pre-status one (body ends
+    /// after the avatar) and the current one (optional trailing status).
     pub fn decode(bytes: &[u8]) -> Result<Self, IdentityError> {
         let mut r = Reader::new(bytes);
         let avatar_hash = if r.bool()? {
@@ -437,8 +471,20 @@ impl IdentityProfile {
         } else {
             None
         };
+        let status = if r.remaining() > 0 {
+            let s = r.string()?;
+            if !valid_status(&s) {
+                return Err(IdentityError::BadStatus);
+            }
+            Some(s)
+        } else {
+            None
+        };
         r.finish()?;
-        Ok(Self { avatar_hash })
+        Ok(Self {
+            avatar_hash,
+            status,
+        })
     }
 
     /// Wrap in a signed record authored by `identity` at `created_ms`.
@@ -661,7 +707,7 @@ mod tests {
     #[test]
     fn identity_profile_roundtrips_and_is_authored_by_the_signer() {
         let id = Identity::generate(0);
-        let body = IdentityProfile::new(Some([7u8; 32]));
+        let body = IdentityProfile::new(Some([7u8; 32]), Some("building a mesh".into()));
         let rec = body.to_record(&id, 42);
         assert_eq!(rec.kind, RecordKind::IdentityProfile);
         assert_eq!(rec.author, id.sign_public().to_bytes());
@@ -673,13 +719,89 @@ mod tests {
         }
         assert_eq!(IdentityProfile::decode(&body.encode()).unwrap(), body);
 
-        // Clearing is an explicit "none", not a zero hash.
-        let clear = IdentityProfile::new(None);
+        // Each field can stand alone.
+        let status_only = IdentityProfile::new(None, Some("hi".into()));
+        assert_eq!(
+            IdentityProfile::decode(&status_only.encode()).unwrap(),
+            status_only
+        );
+        let avatar_only = IdentityProfile::new(Some([8u8; 32]), None);
+        assert_eq!(
+            IdentityProfile::decode(&avatar_only.encode()).unwrap(),
+            avatar_only
+        );
+
+        // Clearing is an explicit "none", and a status-less profile keeps the
+        // one-byte pre-status layout (a zero hash is a different thing).
+        let clear = IdentityProfile::new(None, None);
+        assert_eq!(clear.encode(), vec![0u8]);
         assert_eq!(IdentityProfile::decode(&clear.encode()).unwrap(), clear);
         assert_ne!(
             clear.encode(),
-            IdentityProfile::new(Some([0u8; 32])).encode()
+            IdentityProfile::new(Some([0u8; 32]), None).encode()
         );
+    }
+
+    #[test]
+    fn a_pre_status_kind_8_record_still_decodes() {
+        // Byte for byte what the avatar-only encoder wrote: `bool(true)` + the
+        // 32-byte hash, and `bool(false)` for no avatar. Built here by hand,
+        // not by re-encoding with the new code, so this pins the old layout.
+        let hash = [9u8; 32];
+        let mut avatar_only = Vec::with_capacity(33);
+        avatar_only.push(1);
+        avatar_only.extend_from_slice(&hash);
+
+        let decoded = IdentityProfile::decode(&avatar_only).unwrap();
+        assert_eq!(decoded.avatar_hash, Some(hash));
+        assert_eq!(decoded.status, None);
+
+        let none = IdentityProfile::decode(&[0u8]).unwrap();
+        assert_eq!(none.avatar_hash, None);
+        assert_eq!(none.status, None);
+        // A status-less profile re-encodes to the same old bytes.
+        assert_eq!(decoded.encode(), avatar_only);
+
+        // Through the envelope too: a manually sealed old body is a profile
+        // with no status.
+        let id = Identity::generate(0);
+        let rec = Record::seal_with(
+            RecordKind::IdentityProfile,
+            avatar_only,
+            id.sign_public().to_bytes(),
+            7,
+            |m| id.sign(m),
+        );
+        rec.verify_signature().unwrap();
+        match IdentityRecord::from_record(&rec).unwrap() {
+            IdentityRecord::Profile(p) => {
+                assert_eq!(p.avatar_hash, Some(hash));
+                assert_eq!(p.status, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn profile_status_is_validated_at_decode() {
+        for bad in ["", "line\nbreak", "bell\u{7}"] {
+            let p = IdentityProfile::new(None, Some(bad.into()));
+            assert!(matches!(
+                IdentityProfile::decode(&p.encode()),
+                Err(IdentityError::BadStatus)
+            ));
+        }
+        let long = "x".repeat(STATUS_MAX + 1);
+        let p = IdentityProfile::new(None, Some(long));
+        assert!(matches!(
+            IdentityProfile::decode(&p.encode()),
+            Err(IdentityError::BadStatus)
+        ));
+
+        assert!(valid_status("on a walk 🚶"));
+        assert!(!valid_status(""));
+        assert!(!valid_status("line\nbreak"));
+        assert!(valid_status(&"é".repeat(STATUS_MAX / 2)));
     }
 
     #[test]

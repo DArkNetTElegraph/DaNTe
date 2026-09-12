@@ -1,0 +1,70 @@
+name: Release
+
+# Release-time only: opt in by pushing a `v*` tag. There is deliberately no
+# `pull_request` or push-to-main trigger, so this workflow can neither slow
+# down nor break normal CI. It builds the Linux binaries with the same script
+# and pinned toolchain a user can run locally, publishes SHA256SUMS, and signs
+# it keyless with cosign (OIDC — tied to this workflow's identity, no managed
+# key). See docs/REPRODUCIBLE_BUILDS.md for the verification story.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # cosign keyless signing via OIDC
+
+jobs:
+  linux-x86_64:
+    name: build, checksum, sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-reproducible
+
+      # The exact command in docs/REPRODUCIBLE_BUILDS.md. If a user runs the
+      # same script at the same tag, they should get these bytes.
+      - name: Build reproducibly
+        run: scripts/repro-build.sh dist
+
+      - name: Verify the checksum file
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the checksums (keyless OIDC)
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.bundle dist/SHA256SUMS
+
+      # Also keep the artifacts on the run itself, so they survive a failed
+      # release step or a release being deleted later.
+      - name: Upload the run's artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dante-${{ github.ref_name }}-x86_64-unknown-linux-gnu
+          path: |
+            dist/dante
+            dist/dante-relay
+            dist/SHA256SUMS
+            dist/SHA256SUMS.bundle
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/dante dist/dante-relay dist/SHA256SUMS dist/SHA256SUMS.bundle

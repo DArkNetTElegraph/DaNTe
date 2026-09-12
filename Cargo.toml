@@ -8,7 +8,6 @@ members = [
     "crates/dante-net",
     "crates/dante-relay",
     "crates/dante-dm",
-    "crates/dante-group",
     "crates/dante-mls",
     "crates/dante-core",
     "crates/dante-cli",
@@ -30,7 +29,6 @@ default-members = [
     "crates/dante-net",
     "crates/dante-relay",
     "crates/dante-dm",
-    "crates/dante-group",
     "crates/dante-mls",
     "crates/dante-core",
     "crates/dante-cli",
@@ -56,7 +54,6 @@ dante-ledger = { path = "crates/dante-ledger", version = "0.0.1" }
 dante-proto = { path = "crates/dante-proto", version = "0.0.1" }
 dante-net = { path = "crates/dante-net", version = "0.0.1" }
 dante-dm = { path = "crates/dante-dm", version = "0.0.1" }
-dante-group = { path = "crates/dante-group", version = "0.0.1" }
 dante-mls = { path = "crates/dante-mls", version = "0.0.1" }
 dante-core = { path = "crates/dante-core", version = "0.0.1" }
 dante-voice = { path = "crates/dante-voice", version = "0.0.1" }

@@ -49,7 +49,6 @@ community-run relay nodes that provide store-and-forward for offline delivery.
 | `dante-relay` | bin | A relay node: sealed-sender mailbox store-and-forward with TTL, ledger replica, prekey + key-package directories, per-channel log, ephemeral signal buffer, per-IP rate limiting; optional in-process TURN; with `--p2p-listen`, relay↔relay federation over gossipsub. |
 | `dante-dm` | lib | 1:1 sessions: prekey bundle publication, X3DH, Double Ratchet, chunked encrypted file transfer. |
 | `dante-mls` | lib | Thin wrapper over `OpenMLS` 0.9 — one MLS group per channel and per group call; member export/import for persistence. |
-| `dante-group` | lib | **Legacy** sender-keys ratchet, superseded by `dante-mls`; retained only for its fuzz target, not a `dante-core` dependency. |
 | `dante-voice` | lib | 1:1 voice/media calls (`webrtc` sans-IO core) over DM signalling; DTLS-SRTP; Opus track; ≥64 kbps floor; ICE/TURN plumbing. |
 | `dante-audio` | lib | Opus codec + `cpal` mic/speaker glue. Detached (`[workspace]`, links libopus/ALSA); not in CI. |
 | `dante-core` | lib | Orchestration engine the UI consumes: wires identity + ledger + net (+ `dante-p2p`) + dm + mls + voice together; task-oriented async API + event stream. No UI concerns. |

@@ -22,7 +22,7 @@ the owning crates (`dante-identity`, `dante-ledger`).
 ## Used by
 
 Every crate that touches the wire: `dante-identity`, `dante-ledger`,
-`dante-dm`, `dante-group`, `dante-net`, `dante-relay`, `dante-core`, and the
+`dante-dm`, `dante-net`, `dante-relay`, `dante-core`, and the
 `fuzz` targets. Depends only on `dante-crypto`.
 
 ## Test

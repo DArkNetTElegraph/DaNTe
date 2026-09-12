@@ -5,7 +5,7 @@ MLS (RFC 9420) groups for DaNTe, a thin wrapper over [OpenMLS].
 This is the building block for two things:
 
 1. **Channels** — every server channel is one MLS group, replacing the retired
-   sender-keys ratchet in `dante-group`; the host is the sole committer.
+   sender-keys ratchet; the host is the sole committer.
 2. **Group calls** — every member can independently derive the same per-epoch
    media key (`Member::call_key`), and it rotates on every join/leave.
 

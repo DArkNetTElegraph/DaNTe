@@ -231,7 +231,6 @@ check actually verifies before your relay counts as online.
 | [`crates/dante-core`](crates/dante-core/README.md) | Orchestration engine consumed by every client |
 | [`crates/dante-voice`](crates/dante-voice/README.md) | WebRTC (webrtc-rs) call transport + Opus track tuning |
 | [`crates/dante-audio`](crates/dante-audio/README.md) | Opus codec + cpal capture/playback for the desktop shell (detached) |
-| [`crates/dante-group`](crates/dante-group/README.md) | Retired sender-keys ratchet — kept only for its fuzz target |
 | [`crates/dante-cli`](crates/dante-cli/README.md) | `dante` binary: `gen` / `fp` / `chat` / `serve` / `bot` / `revoke` + the browser SPA |
 | [`apps/dante-desktop`](apps/dante-desktop/README.md) | Tauri 2 desktop shell (detached workspace) |
 | [`relays/`](relays/README.md) | The opt-in public relay directory + status page — see below |

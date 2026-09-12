@@ -988,17 +988,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dante-group"
-version = "0.0.1"
-dependencies = [
- "dante-crypto",
- "dante-proto",
- "proptest",
- "thiserror 2.0.20",
- "zeroize",
-]
-
-[[package]]
 name = "dante-identity"
 version = "0.0.1"
 dependencies = [

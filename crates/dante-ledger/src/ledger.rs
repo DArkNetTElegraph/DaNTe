@@ -103,6 +103,9 @@ struct Chain {
     /// Current global avatar blob hash, or `None`. Set by the newest accepted
     /// `IdentityProfile` record.
     avatar_hash: Option<[u8; 32]>,
+    /// Current profile status/bio, or `None`. Set by the newest accepted
+    /// `IdentityProfile` record.
+    status: Option<String>,
     /// Newest accepted profile-record timestamp. Ordering guard: a profile
     /// record must be strictly newer than the last one, so a replay cannot
     /// roll an avatar back. Deliberately separate from `last_activity_ms` — a
@@ -281,6 +284,27 @@ impl<S: RecordStore> Ledger<S> {
             .collect()
     }
 
+    /// The current profile status/bio for the chain containing `idk`.
+    pub fn status(&self, idk: &[u8; 32]) -> Option<&str> {
+        self.chain_of(idk).and_then(|c| c.status.as_deref())
+    }
+
+    /// [`status`](Self::status) resolved from stable `IdentityId` bytes (a
+    /// fingerprint) instead of an `idk`.
+    pub fn status_by_id(&self, identity_id: &[u8; 32]) -> Option<&str> {
+        let &chain_id = self.id_to_chain.get(identity_id)?;
+        self.chains[chain_id].status.as_deref()
+    }
+
+    /// Every known identity that currently has a status, as
+    /// `(IdentityId bytes, text)`. For populating a client's status cache.
+    pub fn statuses(&self) -> Vec<([u8; 32], String)> {
+        self.id_to_chain
+            .iter()
+            .filter_map(|(id, &ci)| self.chains[ci].status.as_ref().map(|s| (*id, s.clone())))
+            .collect()
+    }
+
     /// The current X25519 agreement key for a live identity named by any `idk`
     /// in its chain.
     pub fn agreement_key(&self, idk: &[u8; 32]) -> Option<[u8; 32]> {
@@ -392,6 +416,7 @@ impl<S: RecordStore> Ledger<S> {
             revoked: false,
             display_hint: body.display_hint.clone(),
             avatar_hash: None,
+            status: None,
             profile_ms: 0,
         });
         self.idk_to_chain.insert(record.author, chain_id);
@@ -538,6 +563,7 @@ impl<S: RecordStore> Ledger<S> {
 
         let chain = &mut self.chains[chain_id];
         chain.avatar_hash = body.avatar_hash;
+        chain.status = body.status;
         chain.profile_ms = record.created_ms;
         Ok(self.push_record(record))
     }
@@ -679,7 +705,12 @@ mod tests {
     }
 
     fn profile(id: &Identity, avatar: Option<[u8; 32]>, t: u64) -> Record {
-        IdentityProfile::new(avatar).to_record(id, t)
+        IdentityProfile::new(avatar, None).to_record(id, t)
+    }
+
+    fn profile_with(id: &Identity, avatar: Option<[u8; 32]>, status: &str, t: u64) -> Record {
+        let status = (!status.is_empty()).then(|| status.to_owned());
+        IdentityProfile::new(avatar, status).to_record(id, t)
     }
 
     fn server_reg(root: &Identity, discoverable: bool, t: u64) -> Record {
@@ -753,6 +784,46 @@ mod tests {
         l.append(profile(&id, None, 4_000), 4_000).unwrap();
         assert_eq!(l.avatar_hash(&idk), None);
         assert!(l.avatars().is_empty());
+    }
+
+    #[test]
+    fn profile_status_and_avatar_are_independent_state() {
+        let mut l = ledger();
+        let id = Identity::generate(0);
+        l.append(announce(&id, 1_000), 1_000).unwrap();
+        let idk = id.sign_public().to_bytes();
+        let idb = *id.id().as_bytes();
+
+        // Status only: no avatar.
+        l.append(profile_with(&id, None, "on a walk", 2_000), 2_000)
+            .unwrap();
+        assert_eq!(l.status(&idk), Some("on a walk"));
+        assert_eq!(l.status_by_id(&idb), Some("on a walk"));
+        assert_eq!(l.statuses(), vec![(idb, "on a walk".into())]);
+        assert_eq!(l.avatar_hash(&idk), None);
+
+        // Avatar and status together.
+        l.append(
+            profile_with(&id, Some([4u8; 32]), "on a walk", 3_000),
+            3_000,
+        )
+        .unwrap();
+        assert_eq!(l.avatar_hash(&idk), Some([4u8; 32]));
+        assert_eq!(l.status(&idk), Some("on a walk"));
+
+        // A record is the full profile: the caller patches one field by
+        // carrying the other through (dante-core does this). Clearing the
+        // avatar leaves the status, and vice versa.
+        l.append(profile_with(&id, None, "still here", 4_000), 4_000)
+            .unwrap();
+        assert_eq!(l.avatar_hash(&idk), None);
+        assert_eq!(l.status(&idk), Some("still here"));
+
+        l.append(profile(&id, Some([5u8; 32]), 5_000), 5_000)
+            .unwrap();
+        assert_eq!(l.avatar_hash(&idk), Some([5u8; 32]));
+        assert_eq!(l.status(&idk), None);
+        assert!(l.statuses().is_empty());
     }
 
     #[test]

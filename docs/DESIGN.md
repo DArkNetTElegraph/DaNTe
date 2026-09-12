@@ -424,7 +424,8 @@ DaNTe/
   channel with a `respond()` handle (length-prefixed opaque-bytes codec, 16
   MiB frame cap). `dante-net`'s `Client` is now an enum over a TCP backend
   (unchanged) and a `P2pBackend` (`Client::connect_p2p(node, multiaddr)`).
-  `dante-relay --p2p-listen <multiaddr>` [`--p2p-seed HEX32`] serves inbound
+  `dante-relay --p2p-listen <multiaddr>` (with optional `--p2p-seed HEX32`)
+  serves inbound
   requests through the *same* `RelayHandler` as TCP, with a stable synthetic
   ULA-v6 pseudo-IP per peer so per-IP rate limiting still buckets by sender.
   `Engine::connect` treats a `relay_addr` starting with `/` as a multiaddr:

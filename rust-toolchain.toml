@@ -1,3 +1,8 @@
 [toolchain]
-channel = "stable"
+# Exact version, not `stable`. A floating channel resolves to whatever is
+# current when CI or a user builds — not reproducible across time, and it has
+# already broken the desktop shell once when a new stable added a clippy lint
+# (see the #36 commit). 1.98.1 is the stable the whole workspace is verified
+# against; bump it deliberately, in its own commit.
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]

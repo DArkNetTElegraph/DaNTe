@@ -171,7 +171,7 @@ above — it states precisely what is and is not protected.
 - Tenor / Giphy GIF search.
 - Custom profiles.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
-- Reproducible builds + signed releases; external security audit.
+- External security audit.
 
 ## Try it
 
@@ -283,9 +283,11 @@ check actually verifies before your relay counts as online.
 
 ## Building
 
-Requires a recent **stable** Rust toolchain (≥ 1.91 — the OpenMLS floor);
-[`rust-toolchain.toml`](rust-toolchain.toml) pins the channel and `rustup`
-installs it on first `cargo` invocation.
+Requires the **pinned** Rust toolchain — [`rust-toolchain.toml`](rust-toolchain.toml)
+fixes the exact version (currently 1.98.1, above the OpenMLS 1.91 floor) and
+`rustup` installs it on first `cargo` invocation. Bumping the pin is a
+deliberate commit: a floating `stable` already changed a clippy lint under the
+desktop shell once (#36).
 
 ### Install Rust
 
@@ -317,6 +319,15 @@ detachment cannot hide a break; to build it by hand, follow
 
 `cargo-deny` (license / advisory / source checks) runs in CI; install locally
 with `cargo install cargo-deny` and run `cargo deny check`.
+
+### Reproducible releases
+
+`dante` and `dante-relay` release binaries are built reproducibly for Linux
+x86_64 from a `v*` tag — exact pinned toolchain, `--locked` dependency set,
+path remapping, fixed release profile — and the checksum file is signed with
+cosign keyless OIDC. [`docs/REPRODUCIBLE_BUILDS.md`](docs/REPRODUCIBLE_BUILDS.md)
+walks through rebuilding a release yourself and verifying the signature.
+Windows/macOS and the detached desktop shell are not claimed reproducible.
 
 ## Purpose and disclaimer
 

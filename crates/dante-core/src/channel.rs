@@ -119,6 +119,16 @@ pub enum ChannelControl {
         /// Also add them to the server's ban list (blocks re-joining).
         ban: bool,
     },
+    /// A member asks the host to set (or, with an empty `nickname`, clear)
+    /// their **own** per-server display name. `channel_id` only identifies
+    /// which server; the host applies it to the sending member, never anyone
+    /// else.
+    NicknameRequest {
+        /// Any channel of the server whose policy is being changed.
+        channel_id: [u8; 32],
+        /// The requested display name, or empty to clear the current one.
+        nickname: String,
+    },
     /// A member tells the host it is leaving; the host commits its removal.
     Leave {
         /// The channel being left.
@@ -198,6 +208,12 @@ impl ChannelControl {
             } => {
                 w.u8(6).fixed(channel_id).fixed(member).bool(*ban);
             }
+            ChannelControl::NicknameRequest {
+                channel_id,
+                nickname,
+            } => {
+                w.u8(15).fixed(channel_id).string(nickname);
+            }
             ChannelControl::Leave { channel_id } => {
                 w.u8(7).fixed(channel_id);
             }
@@ -263,6 +279,10 @@ impl ChannelControl {
                 channel_id: r.fixed::<32>()?,
                 member: r.fixed::<32>()?,
                 ban: r.bool()?,
+            },
+            15 => ChannelControl::NicknameRequest {
+                channel_id: r.fixed::<32>()?,
+                nickname: r.string()?,
             },
             7 => ChannelControl::Leave {
                 channel_id: r.fixed::<32>()?,
@@ -501,6 +521,10 @@ mod tests {
                 channel_id: [4u8; 32],
                 member: [5u8; 32],
                 ban: true,
+            },
+            ChannelControl::NicknameRequest {
+                channel_id: [4u8; 32],
+                nickname: "Ali".into(),
             },
             ChannelControl::Leave {
                 channel_id: [8u8; 32],

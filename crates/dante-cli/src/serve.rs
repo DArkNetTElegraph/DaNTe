@@ -24,7 +24,8 @@
 //! - calls & voice: `/api/calls`, `/api/call`, `/api/call/accept`,
 //!   `/api/call/hangup`, `/api/call/signal`, `/api/call/audio`, `/api/ice`,
 //!   `/api/groupcalls`, `/api/groupcall/start|join|leave`, `/api/voice`,
-//!   `/api/voice/join|leave|signal`, `/api/voice/key`
+//!   `/api/voice/join|leave|signal`, `/api/voice/key`, and (SFU mode)
+//!   `/api/sfu/join|ice|leave`
 //!
 //! File bodies are capped at 9 MiB. Mutations reject cross-site /
 //! DNS-rebinding requests, and the SPA is served under a strict CSP.
@@ -390,6 +391,30 @@ enum Cmd {
     GroupCall {
         channel: String,
         action: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Raw SFU signalling for the SPA's own `RTCPeerConnection`. `SfuJoin`
+    /// replies with `{"slot":N,"answer":"..."}`, `SfuPull` with
+    /// `{"candidates":[...]}`; the other two reply `"ok"`.
+    SfuJoin {
+        channel: String,
+        offer: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    SfuIce {
+        channel: String,
+        slot: u8,
+        candidate: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    SfuPull {
+        channel: String,
+        slot: u8,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    SfuLeave {
+        channel: String,
+        slot: u8,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// The current per-epoch media key for a voice channel we're connected to,
@@ -2648,6 +2673,69 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::SfuJoin {
+            channel,
+            offer,
+            reply,
+        } => {
+            let r = match parse_fingerprint(channel.strip_prefix('#').unwrap_or(&channel)) {
+                Ok(room) => engine
+                    .sfu_offer(&room, &offer)
+                    .await
+                    .map(|(slot, answer)| {
+                        serde_json::json!({ "slot": slot, "answer": answer }).to_string()
+                    })
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::SfuIce {
+            channel,
+            slot,
+            candidate,
+            reply,
+        } => {
+            let r = match parse_fingerprint(channel.strip_prefix('#').unwrap_or(&channel)) {
+                Ok(room) => engine
+                    .sfu_ice(&room, slot, &candidate)
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::SfuPull {
+            channel,
+            slot,
+            reply,
+        } => {
+            let r = match parse_fingerprint(channel.strip_prefix('#').unwrap_or(&channel)) {
+                Ok(room) => engine
+                    .sfu_pull(&room, slot)
+                    .await
+                    .map(|candidates| serde_json::json!({ "candidates": candidates }).to_string())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
+        Cmd::SfuLeave {
+            channel,
+            slot,
+            reply,
+        } => {
+            let r = match parse_fingerprint(channel.strip_prefix('#').unwrap_or(&channel)) {
+                Ok(room) => engine
+                    .sfu_leave(&room, slot)
+                    .await
+                    .map(|_| "ok".into())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::AutoKick {
             server,
             days,
@@ -2868,6 +2956,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 "has_keystore": shared.boot.keystore_path.exists(),
                 "relays": relays,
                 "also_relay_listen": shared.boot.also_relay_listen,
+                "sfu": shared.boot.sfu,
             })
             .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
@@ -3915,6 +4004,113 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 reply,
             })
             .await
+        }
+
+        ("POST", "/api/sfu/join") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                offer: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::SfuJoin {
+                    channel: r.channel,
+                    offer: r.offer,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            match rx.await {
+                Ok(Ok(json)) => {
+                    respond(&mut stream, 200, "application/json", json.as_bytes()).await
+                }
+                Ok(Err(e)) => respond(&mut stream, 502, "text/plain", e.as_bytes()).await,
+                Err(_) => respond(&mut stream, 500, "text/plain", b"no reply").await,
+            }
+        }
+
+        ("POST", "/api/sfu/ice") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                slot: u8,
+                candidate: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::SfuIce {
+                channel: r.channel,
+                slot: r.slot,
+                candidate: r.candidate,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/sfu/leave") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                channel: String,
+                slot: u8,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::SfuLeave {
+                channel: r.channel,
+                slot: r.slot,
+                reply,
+            })
+            .await
+        }
+
+        ("GET", "/api/sfu/ice") => {
+            let channel = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("channel="))
+                .unwrap_or("");
+            let slot: u8 = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("slot="))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let body = match parse_fingerprint(channel) {
+                Ok(_) => {
+                    let (tx, rx) = oneshot::channel();
+                    if shared
+                        .cmd
+                        .send(Cmd::SfuPull {
+                            channel: channel.to_string(),
+                            slot,
+                            reply: tx,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+                    }
+                    match rx.await {
+                        Ok(Ok(json)) => json,
+                        Ok(Err(e)) => {
+                            return respond(&mut stream, 502, "text/plain", e.as_bytes()).await;
+                        }
+                        Err(_) => {
+                            return respond(&mut stream, 500, "text/plain", b"no reply").await
+                        }
+                    }
+                }
+                Err(_) => "{\"candidates\":[]}".to_string(),
+            };
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 
         ("GET", "/api/recv-file") => {

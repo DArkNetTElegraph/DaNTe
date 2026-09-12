@@ -1276,6 +1276,7 @@ const LS = {
 /* ---------- store ------------------------------------------------------- */
 const store = {
   me: { fingerprint: "", words: "", username: "" },
+  sfu: false,                         // group calls route via the relay SFU
   usernames: {},                      // fp -> self-asserted username (ledger)
   avatars: {},                        // fp -> global avatar blob hash (ledger)
   statuses: {},                       // fp -> global profile status/bio (ledger)
@@ -1388,6 +1389,11 @@ const api = {
   groupCallStart(channel) { return this.post("/api/groupcall/start", { channel }); },
   groupCallJoin(channel)  { return this.post("/api/groupcall/join", { channel }); },
   groupCallLeave(channel) { return this.post("/api/groupcall/leave", { channel }); },
+  // Relay-hosted SFU mode: raw signalling for this page's own PeerConnection.
+  sfuJoin(channel, offer)   { return this.post("/api/sfu/join", { channel, offer }); },
+  sfuIce(channel, slot, candidate) { return this.post("/api/sfu/ice", { channel, slot, candidate }); },
+  sfuCandidates(channel, slot) { return this.get("/api/sfu/ice?channel=" + encodeURIComponent(channel) + "&slot=" + slot); },
+  sfuLeave(channel, slot)   { return this.post("/api/sfu/leave", { channel, slot }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
   setNickname(server, member, nickname) { return this.post("/api/nickname", { server, member, nickname }); },
   requestNickname(server, nickname) { return this.post("/api/nickname/request", { server, nickname }); },
@@ -3859,6 +3865,9 @@ const voiceRtc = {
   micOn: true,
   iceServers: [],
   peers: new Map(),       // fingerprint -> { pc, audio, polite, pending, screenSenders, remoteScreen }
+  // Relay-hosted SFU mode: `{ pc, slot, timer, pending, audios }` for the one
+  // connection to the relay's SFU, instead of `peers`.
+  sfu: null,
   // SFrame layer: an extra AES-GCM pass over each Opus frame, keyed off the
   // channel's MLS group-call key. The mesh's DTLS-SRTP already protects the
   // audio hop-by-hop; this is what would let a future SFU forward the media
@@ -4008,10 +4017,15 @@ async function voiceRtcStart(channelId) {
     voiceRtc.iceServers = iceToRtc(await api.get("/api/ice"));
   } catch (_) { voiceRtc.iceServers = []; }
   sframeStart();
-  voiceSyncPeers();
+  if (store.sfu) {
+    await voiceSfuStart();
+  } else {
+    voiceSyncPeers();
+  }
 }
 
 function voiceRtcStop() {
+  if (voiceRtc.sfu) voiceSfuStop();
   sframeStop();
   stopMonitor(store.me.fingerprint);
   for (const fp of [...voiceRtc.peers.keys()]) {
@@ -4037,6 +4051,10 @@ function voiceToggleMic() { toggleMute(); render(); }
 // voicePeerConnect / voiceOnSignal renegotiates each peer transparently.
 async function voiceToggleScreen() {
   if (!voiceRtc.channelId) return;
+  if (store.sfu) {
+    ui.say("Screen share is not supported in SFU mode yet — the room carries audio only.");
+    return;
+  }
   if (voiceRtc.screenStream) { voiceStopScreen(); render(); return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
     ui.say("this browser can't share a screen (needs a secure context)");
@@ -4089,6 +4107,7 @@ function voiceStopScreen() {
 // channel with an ad-hoc group call in progress (MLS-membership-driven,
 // store.groupCalls) — whichever has a live entry for it.
 function voiceSyncPeers() {
+  if (voiceRtc.sfu) return;   // SFU mode: one leg to the relay, no peer mesh
   const cid = voiceRtc.channelId;
   if (!cid) return;
   const room = store.voice[cid] || store.groupCalls[cid] || { participants: [] };
@@ -4175,6 +4194,69 @@ async function voicePeerConnect(fp, initiator) {
 
 function voiceSignalSend(fp, kind, data) {
   api.post("/api/voice/signal", { channel: voiceRtc.channelId, to: fp, kind, data }).catch(() => {});
+}
+
+/* ---------- relay-hosted SFU mode ----------------------------------------
+   One PeerConnection to the relay, which forwards every participant's
+   (SFrame-encrypted) Opus frames. Used when `dante serve --sfu` is set; every
+   member of the call must use it. A browser can only receive m-lines its offer
+   carried, so the offer pre-allocates one receive slot per possible peer. */
+const SFU_RECV_SLOTS = 15;
+
+async function voiceSfuStart() {
+  const cid = voiceRtc.channelId;
+  if (!cid) return;
+  const pc = new RTCPeerConnection({ iceServers: voiceRtc.iceServers });
+  const sfu = { pc, slot: null, timer: null, pending: [], audios: [] };
+  voiceRtc.sfu = sfu;
+
+  for (const t of voiceRtc.localStream.getTracks()) pc.addTrack(t, voiceRtc.localStream);
+  for (let i = 0; i < SFU_RECV_SLOTS; i++) pc.addTransceiver("audio", { direction: "recvonly" });
+  for (const s of pc.getSenders()) sframeAttach(s, "enc");
+
+  pc.ontrack = e => {
+    if (e.track.kind !== "audio") return;
+    sframeAttach(e.receiver, "dec");
+    const a = new Audio();
+    a.autoplay = true;
+    a.muted = voiceCtl.deafened;
+    a.srcObject = e.streams[0] || new MediaStream([e.track]);
+    a.play().catch(() => {});
+    sfu.audios.push(a);
+  };
+  pc.onicecandidate = e => {
+    if (!e.candidate) return;
+    // The slot arrives with the answer; buffer trickle until then.
+    if (sfu.slot == null) sfu.pending.push(e.candidate.candidate);
+    else api.sfuIce(cid, sfu.slot, e.candidate.candidate).catch(() => {});
+  };
+
+  await pc.setLocalDescription(await pc.createOffer());
+  const r = await api.sfuJoin(cid, pc.localDescription.sdp);
+  sfu.slot = r.slot;
+  await pc.setRemoteDescription({ type: "answer", sdp: r.answer });
+  for (const cand of sfu.pending.splice(0)) api.sfuIce(cid, sfu.slot, cand).catch(() => {});
+  sfu.timer = setInterval(async () => {
+    if (!voiceRtc.sfu || voiceRtc.sfu.slot == null) return;
+    try {
+      const got = await api.sfuCandidates(cid, voiceRtc.sfu.slot);
+      for (const cand of (got.candidates || [])) {
+        try { await pc.addIceCandidate({ candidate: cand }); } catch (_) {}
+      }
+    } catch (_) {}
+  }, 300);
+}
+
+function voiceSfuStop() {
+  const sfu = voiceRtc.sfu;
+  if (!sfu) return;
+  if (sfu.timer) clearInterval(sfu.timer);
+  if (sfu.slot != null && voiceRtc.channelId) {
+    api.sfuLeave(voiceRtc.channelId, sfu.slot).catch(() => {});
+  }
+  for (const a of sfu.audios) { try { a.srcObject = null; } catch (_) {} }
+  try { sfu.pc.close(); } catch (_) {}
+  voiceRtc.sfu = null;
 }
 
 // Play a soundboard clip (own trigger or a relayed one). `hashHex` is the
@@ -5097,6 +5179,7 @@ async function init() {
   let state;
   try { state = await (await fetch("/api/state")).json(); }
   catch (_) { state = { ready: false, has_keystore: false }; }
+  store.sfu = !!state.sfu;
   if (!state.ready) { renderOnboard(state); return; }
 
   $("#app").dataset.members = LS.get("members", "shown");

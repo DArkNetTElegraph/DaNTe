@@ -926,7 +926,6 @@ dependencies = [
  "anyhow",
  "dante-core",
  "dante-crypto",
- "dante-dm",
  "dante-identity",
  "dante-ledger",
  "rustls",
@@ -1030,7 +1029,6 @@ dependencies = [
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
- "openmls_traits",
  "thiserror 2.0.20",
  "tls_codec 0.4.2",
 ]
@@ -1041,8 +1039,6 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "dante-crypto",
- "dante-identity",
- "dante-ledger",
  "dante-p2p",
  "dante-proto",
  "proptest",
@@ -1117,7 +1113,6 @@ dependencies = [
  "rtc-media",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
  "webrtc",
 ]
 

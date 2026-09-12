@@ -249,12 +249,15 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         _ => None,
     };
 
+    let also_relay_listen = maybe_also_relay(flags);
+
     let boot = serve::Bootstrap {
         relay,
         keystore_path,
         store_path,
         params,
         pow,
+        also_relay_listen,
         // `serve` narrates startup on stderr; the structured sink is for the
         // desktop shell's boot screen.
         progress: None,
@@ -337,6 +340,51 @@ async fn maybe_enable_p2p(_engine: &mut Engine, flags: &HashMap<String, String>)
     if flags.contains_key("p2p") || flags.contains_key("p2p-listen") {
         eprintln!("--p2p ignored: this binary was built without the `p2p` feature (rebuild with `--features p2p`)");
     }
+}
+
+/// `--also-relay`: spawn the same relay node the `dante-relay` binary runs,
+/// in-process, so this client is also a relay for others — no second
+/// program, no separate operator. Best-effort: a bind failure here is logged
+/// and does not take down the client's own UI/connection.
+/// Returns the relay's listen address if `--also-relay` was given, for
+/// display in the SPA's Network settings.
+fn maybe_also_relay(flags: &HashMap<String, String>) -> Option<String> {
+    if !flags.contains_key("also-relay") {
+        return None;
+    }
+    let listen = flags
+        .get("relay-listen")
+        .cloned()
+        .unwrap_or_else(|| dante_relay::DEFAULT_LISTEN.to_string());
+    #[cfg_attr(not(feature = "p2p"), allow(unused_mut))]
+    let mut cfg = dante_relay::RunConfig {
+        listen: listen.clone(),
+        ..Default::default()
+    };
+    #[cfg(feature = "p2p")]
+    {
+        cfg.p2p_bootstrap = bootstrap_list(flags);
+        cfg.p2p_listen = Some(
+            flags
+                .get("relay-p2p-listen")
+                .cloned()
+                .unwrap_or_else(|| "/ip4/0.0.0.0/tcp/0".to_string()),
+        );
+    }
+    #[cfg(not(feature = "p2p"))]
+    {
+        eprintln!(
+            "--also-relay: built without the `p2p` feature, so this relay won't federate \
+             or be discoverable via --relay dht (rebuild with --features p2p for that)"
+        );
+    }
+    eprintln!("also acting as a relay on {listen} (for others to connect to)");
+    tokio::spawn(async move {
+        if let Err(e) = dante_relay::run(cfg).await {
+            eprintln!("embedded relay stopped: {e}");
+        }
+    });
+    Some(listen)
 }
 
 async fn cmd_revoke(flags: &HashMap<String, String>) -> Result<()> {

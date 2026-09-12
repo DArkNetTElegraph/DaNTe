@@ -17,14 +17,26 @@ Add a block to [`registry.toml`](registry.toml) and open a PR:
 [[relay]]
 name = "example-community"
 addr = "relay.example.org:9944"
+kind = "dedicated"            # optional; "dedicated" (default) or "user" — see below
 contact = "you@example.org"   # optional; see below
 ```
 
 - `name` — whatever you want shown on the status page.
 - `addr` — `host:port`, the exact address you'd hand someone for
-  `dante serve --relay ...` or `dante-relay --listen ...`'s advertised port.
-  This has to be reachable from the public internet — see
-  [What gets checked](#what-gets-checked).
+  `dante serve --relay ...`, `dante-relay --listen ...`'s advertised port, or
+  a `dante serve --also-relay --relay-listen ...`'s address (see
+  [Every client can opt in as a relay](../README.md#every-client-can-opt-in-as-a-relay)
+  — listing works identically either way). This has to be reachable from the
+  public internet — see [What gets checked](#what-gets-checked).
+- `kind` (optional) — `"dedicated"` for a homelab box, VPS, or anything
+  meant to stay up (the default, and the only kind that existed before this
+  field), or `"user"` for someone's regular `dante serve --also-relay` that's
+  only online while they happen to be chatting. Purely descriptive: the check
+  treats both the same, but the page groups by it so a "user" relay going
+  offline overnight reads as ordinary, not as an outage. **If you're only
+  going to have `--also-relay` on sometimes, list it as `"user"`** — a
+  dedicated-looking entry that's actually intermittent just trains people to
+  ignore the "offline" dot.
 - `contact` (optional) — never published or shown on the page. Only read by
   a maintainer, only if your relay has been down long enough to be worth a
   heads-up.

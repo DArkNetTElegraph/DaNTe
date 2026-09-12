@@ -14,6 +14,10 @@
 # [[relay]]
 # name = "example-community"
 # addr = "relay.example.org:9944"
+# # "dedicated" (default) or "user" — a `dante serve --also-relay` that's only
+# # online while its operator happens to be chatting should say "user", so the
+# # status page doesn't read a normal offline stretch as an outage.
+# kind = "dedicated"
 # # Not published anywhere — only read by a maintainer if this relay is down
 # # for a long stretch and worth a heads-up.
 # contact = "you@example.org"

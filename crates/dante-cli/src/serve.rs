@@ -577,6 +577,11 @@ pub struct Bootstrap {
     pub store_path: Option<PathBuf>,
     pub params: LedgerParams,
     pub pow: Difficulty,
+    /// Set when this client was started with `--also-relay`: the address it
+    /// listens on for other people's clients. Read-only display in the SPA's
+    /// Network settings — flipping it means restarting with/without the flag,
+    /// same as this client's other boot-time `--p2p`-style switches.
+    pub also_relay_listen: Option<String>,
     /// Where to report startup steps, if anyone is showing them.
     ///
     /// `Engine::connect` reports its own half; the rest of startup — the
@@ -2763,6 +2768,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 "fingerprint": fp,
                 "has_keystore": shared.boot.keystore_path.exists(),
                 "relays": relays,
+                "also_relay_listen": shared.boot.also_relay_listen,
             })
             .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await

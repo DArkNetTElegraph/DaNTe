@@ -4700,6 +4700,16 @@ function openSettings() {
   api.get("/api/state").then(s => {
     nwSec.appendChild(Object.assign(el("div", "set-mono"),
       { textContent: "Relays: " + ((s.relays || []).join(", ") || "—") }));
+    nwSec.appendChild(Object.assign(el("div", "set-mono"), {
+      textContent: s.also_relay_listen
+        ? "Also relaying for others: on (" + s.also_relay_listen + ")"
+        : "Also relaying for others: off",
+    }));
+    if (!s.also_relay_listen) {
+      nwSec.appendChild(Object.assign(el("div", "set-hint"), {
+        textContent: "Restart with --also-relay to let other people's clients connect through you too — no separate relay to run.",
+      }));
+    }
   }).catch(() => {});
   const p2pLine = el("div", "set-mono");
   p2pLine.textContent = "Peer-to-peer: …";

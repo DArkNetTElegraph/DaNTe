@@ -218,6 +218,14 @@ enum Cmd {
         add: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Set (non-empty `nickname`) or clear (empty) a member's nickname on a
+    /// server. Host only.
+    SetNickname {
+        server: String,
+        member: String,
+        nickname: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Return the server's role policy as a ready JSON string.
     GetPolicy {
         server: [u8; 32],
@@ -2021,6 +2029,25 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             };
             let _ = reply.send(r);
         }
+        Cmd::SetNickname {
+            server,
+            member,
+            nickname,
+            reply,
+        } => {
+            let r = match (parse_fingerprint(&server), parse_fingerprint(&member)) {
+                (Ok(root), Ok(mid)) => {
+                    let nick = (!nickname.is_empty()).then_some(nickname.as_str());
+                    engine
+                        .set_member_nickname(&root, &mid, nick, now_ms())
+                        .await
+                        .map(|_| "ok".into())
+                        .map_err(|e| e.to_string())
+                }
+                _ => Err("bad server root or fingerprint".into()),
+            };
+            let _ = reply.send(r);
+        }
         Cmd::Discover {
             server,
             on,
@@ -2147,6 +2174,11 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         .iter()
                         .map(|(n, h)| serde_json::json!({ "name": n, "hash": to_hex(h) }))
                         .collect();
+                    let nicknames: serde_json::Map<String, serde_json::Value> = p
+                        .nicknames
+                        .iter()
+                        .map(|(m, n)| (id_b32(m), serde_json::Value::String(n.clone())))
+                        .collect();
                     serde_json::json!({
                         "version": p.version,
                         "owner": id_b32(&p.owner_id),
@@ -2155,6 +2187,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                         "emojis": emojis,
                         "stickers": stickers,
                         "sounds": sounds,
+                        "nicknames": nicknames,
                         "me_perms": engine.member_perms(&server, &me),
                     })
                     .to_string()
@@ -4117,6 +4150,27 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 member: r.member,
                 role_id: r.role_id,
                 add: r.add,
+                reply,
+            })
+            .await
+        }
+
+        ("POST", "/api/nickname") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                server: String,
+                member: String,
+                /// Empty clears the nickname.
+                #[serde(default)]
+                nickname: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            dispatch(&mut stream, &shared, |reply| Cmd::SetNickname {
+                server: r.server,
+                member: r.member,
+                nickname: r.nickname,
                 reply,
             })
             .await

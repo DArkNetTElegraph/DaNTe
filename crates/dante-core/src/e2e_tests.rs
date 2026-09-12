@@ -2905,6 +2905,65 @@ async fn server_soundboard_reaches_a_member() {
 }
 
 #[tokio::test]
+async fn host_set_nickname_reaches_a_member_host_only() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut host = engine(&relay).await;
+    let mut alice = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut host, &mut alice] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut host, &mut alice] {
+        e.sync(now).await.unwrap();
+    }
+
+    let server = host.create_server("lodge", now).await.unwrap();
+    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
+    macro_rules! settle {
+        () => {
+            for _ in 0..6 {
+                for e in [&mut host, &mut alice] {
+                    e.receive_all(now).await.unwrap();
+                }
+            }
+        };
+    }
+    settle!();
+
+    // A non-host (even one who can see the policy) cannot set a nickname.
+    assert!(alice
+        .set_member_nickname(&server, &alice_id, Some("Ali"), now)
+        .await
+        .is_err());
+    // A control character is refused.
+    assert!(host
+        .set_member_nickname(&server, &alice_id, Some("bad\nname"), now)
+        .await
+        .is_err());
+
+    host.set_member_nickname(&server, &alice_id, Some("Ali"), now)
+        .await
+        .unwrap();
+    settle!();
+    assert_eq!(
+        alice.member_nickname(&server, &alice_id),
+        Some("Ali".into())
+    );
+    assert_eq!(host.member_nickname(&server, &alice_id), Some("Ali".into()));
+
+    // Clearing it (None) removes the entry for everyone.
+    host.set_member_nickname(&server, &alice_id, None, now)
+        .await
+        .unwrap();
+    settle!();
+    assert_eq!(alice.member_nickname(&server, &alice_id), None);
+}
+
+#[tokio::test]
 async fn roles_muting_and_delegated_kick() {
     use crate::roles::PERM_KICK;
 

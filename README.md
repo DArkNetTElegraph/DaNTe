@@ -61,7 +61,7 @@ above — it states precisely what is and is not protected.
 | **Verifiable ledger** | Append-only RFC 6962 Merkle log, inclusion + consistency proofs, identity / rotation chains, server registry, deterministic 90-day evaporation GC |
 | **Relay + transport** | Client↔relay `Request`/`Response` wire over framed TCP **or** a libp2p `/dante/relay/1` stream; sealed-sender envelopes (day-rotating hint + size padding), mailbox store-and-forward, prekey + key-package directories, blob store, per-IP rate limiting, multi-relay failover, `dante-relay` binary with in-process zero-config TURN |
 | **1:1 DMs** | X3DH + Double Ratchet (FS + PCS), chunked encrypted file transfer, edit / delete, typing indicators, forwarding, block list, contacts / petnames, full-text search over local history |
-| **Servers & channels** | MLS group per channel (host is sole committer); create server / channel, direct invites + invite links, **server-level join password**, roles & permissions v1, member kick + inactivity auto-kick, channel history, delete server / channel, leave channel, rename channel, always-present `#general`, public **discovery** & join |
+| **Servers & channels** | MLS group per channel (host is sole committer); create server / channel, direct invites + invite links, **server-level join password**, roles & permissions v1, member kick + inactivity auto-kick, channel history, delete server / channel, leave channel, rename channel, always-present `#general`, public **discovery** & join, **host-set per-server nicknames** |
 | **In-channel** | Emoji reactions (unicode + custom), **categorised emoji picker**, edit / delete, replies, pinned messages, @mentions, message forwarding, per-conversation unread counts + mute, **custom per-server emoji / stickers / soundboards** |
 | **Voice** | **1:1 calls with real browser audio**, **ad-hoc group calls (in any channel) with real browser audio**, **persistent Discord-style voice channels with real browser audio**, **screen share (verified)**, optional **SFrame** media encryption under the group-call key (verified active), ≥ 64 kbps Opus floor, STUN / TURN plumbing |
 | **Clients** | `dante` CLI (`gen` / `fp` / `chat` / `serve` / `bot` / `revoke`); `dante serve` — a single-file browser app: onboarding, four-pane Discord-shaped shell, light / dark themes, right-click context menus, monochrome UI icons, SSE live updates, opt-in link previews; `dante bot` — a JSON-lines headless bridge; `apps/dante-desktop` — a Tauri 2 native window around the same service, with a live startup screen, system tray and OS notifications |
@@ -111,6 +111,18 @@ above — it states precisely what is and is not protected.
   because nothing set them up. Verified with three independent
   headless-Chromium peers in a full mesh: every one of the six directional
   legs reached `connected` with real inbound RTP audio.
+- **Per-server nicknames (2026-09-12): host-set only, no self-service yet.**
+  `ServerPolicy` gained a fourth signed tail list (`nicknames`, after roles,
+  emoji, stickers and sounds — same "count written whenever it or a later
+  list is non-empty" pattern that keeps old policies decoding). The host can
+  set or clear any member's nickname (a "Set nickname" action in the member
+  list); it overrides their username in that server's message authorship and
+  member list, never in DMs or other servers. There is no path yet for a
+  member to set their own — that needs a signed request-to-host flow (like
+  `KickRequest`), which this round didn't add. Verified live: two real
+  `dante serve` browser sessions, host sets a nickname, both the host's and
+  the member's own client render it in the channel message author label and
+  the member list.
 - **Restart gaps**: *(closed)* channel history persists each message's
   relay-log `seq` (plus `reply_to` / `forwarded_from`), and the plaintext
   backlog a host hands a new member carries the `seq` too, so both restored and
@@ -140,7 +152,9 @@ above — it states precisely what is and is not protected.
   platforms, but produces no distributable bundle for any of them yet.
 - A **group-call SFU** for large voice rooms (full mesh only now, fine to ~8).
 - Tenor / Giphy GIF search.
-- Custom profiles, per-server nicknames / avatars; emoji in roles.
+- Custom profiles / avatars; emoji in roles. Self-service nickname changes —
+  a member can only ask their server's host to change it for them today (see
+  [Partial / caveats](#partial--caveats)).
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
 - Reproducible builds + signed releases; external security audit; a
   `cargo-fuzz` corpus in CI.

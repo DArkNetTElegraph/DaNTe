@@ -52,6 +52,17 @@ pub const MAX_SERVER_EMOJIS: usize = 200;
 pub const MAX_SERVER_STICKERS: usize = 100;
 /// Max soundboard clips a single server may register.
 pub const MAX_SERVER_SOUNDS: usize = 50;
+/// Max bytes of a per-server nickname.
+pub const NICKNAME_MAX: usize = 32;
+
+/// Whether `name` is a usable per-server nickname: 1..=[`NICKNAME_MAX`] bytes,
+/// no control characters (a nickname is rendered as plain text throughout the
+/// UI — member lists, message authors — so this keeps it from being used to
+/// smuggle control sequences or visually spoof other text, without otherwise
+/// restricting the charset the way the ASCII-only emoji shortcode is).
+pub fn valid_nickname(name: &str) -> bool {
+    !name.is_empty() && name.len() <= NICKNAME_MAX && name.chars().all(|c| !c.is_control())
+}
 
 /// Whether `name` is a valid custom-emoji shortcode: 1..=[`EMOJI_NAME_MAX`]
 /// bytes of `[a-z0-9_]`. Enforced both when an emoji is set and when a received
@@ -125,6 +136,12 @@ pub struct ServerPolicy {
     /// Played into a voice channel, never a message. Name charset matches an
     /// emoji shortcode.
     pub sounds: Vec<(String, [u8; 32])>,
+    /// Per-server nicknames: `member -> display name on this server`, set by
+    /// the host (there is no self-service path yet — see
+    /// [`crate::Engine::set_member_nickname`]). Overrides the member's
+    /// ledger-carried username when rendering their name in this server's
+    /// member list and message authorship, but never their DMs elsewhere.
+    pub nicknames: Vec<([u8; 32], String)>,
     /// When it was issued (Unix ms).
     pub issued_ms: u64,
     /// `server_root` over `SHA-256(SIG_DOMAIN || body)`.
@@ -138,6 +155,7 @@ impl ServerPolicy {
             root,
             owner_id,
             1,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -158,6 +176,7 @@ impl ServerPolicy {
         emojis: Vec<(String, [u8; 32])>,
         stickers: Vec<(String, [u8; 32])>,
         sounds: Vec<(String, [u8; 32])>,
+        nicknames: Vec<([u8; 32], String)>,
         now_ms: u64,
     ) -> Self {
         let mut p = Self {
@@ -169,6 +188,7 @@ impl ServerPolicy {
             emojis,
             stickers,
             sounds,
+            nicknames,
             issued_ms: now_ms,
             sig: [0u8; SIG_LEN],
         };
@@ -194,6 +214,14 @@ impl ServerPolicy {
             .map(|(_, h)| *h)
     }
 
+    /// A member's nickname on this server, if the host has set one.
+    pub fn nickname_of(&self, member: &[u8; 32]) -> Option<&str> {
+        self.nicknames
+            .iter()
+            .find(|(m, _)| m == member)
+            .map(|(_, n)| n.as_str())
+    }
+
     fn body(&self) -> Vec<u8> {
         let mut w = Writer::new();
         w.fixed(&self.server_root)
@@ -213,26 +241,36 @@ impl ServerPolicy {
         }
         // Tail-appended so a policy signed before custom emoji existed still
         // verifies (its body ends after `assignments`, `emojis` is empty).
-        // The sticker and sound lists are further tails after that. Each list's
-        // count is written whenever it OR any later list is non-empty, so a
-        // reader always sees a count (possibly 0) before it needs the next
-        // section — that's how the sections stay unambiguous.
-        if !self.emojis.is_empty() || !self.stickers.is_empty() || !self.sounds.is_empty() {
+        // The sticker, sound and nickname lists are further tails after that.
+        // Each list's count is written whenever it OR any later list is
+        // non-empty, so a reader always sees a count (possibly 0) before it
+        // needs the next section — that's how the sections stay unambiguous.
+        if !self.emojis.is_empty()
+            || !self.stickers.is_empty()
+            || !self.sounds.is_empty()
+            || !self.nicknames.is_empty()
+        {
             w.u32(self.emojis.len() as u32);
             for (name, hash) in &self.emojis {
                 w.string(name).fixed(hash);
             }
         }
-        if !self.stickers.is_empty() || !self.sounds.is_empty() {
+        if !self.stickers.is_empty() || !self.sounds.is_empty() || !self.nicknames.is_empty() {
             w.u32(self.stickers.len() as u32);
             for (name, hash) in &self.stickers {
                 w.string(name).fixed(hash);
             }
         }
-        if !self.sounds.is_empty() {
+        if !self.sounds.is_empty() || !self.nicknames.is_empty() {
             w.u32(self.sounds.len() as u32);
             for (name, hash) in &self.sounds {
                 w.string(name).fixed(hash);
+            }
+        }
+        if !self.nicknames.is_empty() {
+            w.u32(self.nicknames.len() as u32);
+            for (member, nick) in &self.nicknames {
+                w.fixed(member).string(nick);
             }
         }
         w.into_vec()
@@ -351,6 +389,19 @@ impl ServerPolicy {
                 sounds.push((name, b.fixed::<32>()?));
             }
         }
+        let mut nicknames = Vec::new();
+        if b.remaining() > 0 {
+            let nn = bounded(&mut b)?;
+            nicknames.reserve(nn);
+            for _ in 0..nn {
+                let member = b.fixed::<32>()?;
+                let nick = b.string()?;
+                if !valid_nickname(&nick) {
+                    return Err(WireError::Invalid("nickname"));
+                }
+                nicknames.push((member, nick));
+            }
+        }
         b.finish()?;
         Ok(Self {
             server_root,
@@ -361,6 +412,7 @@ impl ServerPolicy {
             emojis,
             stickers,
             sounds,
+            nicknames,
             issued_ms,
             sig,
         })
@@ -435,6 +487,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             0,
         );
         p.verify().unwrap();
@@ -448,6 +501,7 @@ mod tests {
             6,
             p.roles.clone(),
             vec![(carol, vec![1])],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -475,6 +529,7 @@ mod tests {
             vec![],
             vec![],
             emojis.clone(),
+            vec![],
             vec![],
             vec![],
             0,
@@ -509,6 +564,7 @@ mod tests {
             vec![],
             stickers.clone(),
             vec![],
+            vec![],
             0,
         );
         p.verify().unwrap();
@@ -526,6 +582,7 @@ mod tests {
             vec![("blob".to_string(), [9u8; 32])],
             stickers,
             vec![],
+            vec![],
             0,
         );
         both.verify().unwrap();
@@ -540,6 +597,7 @@ mod tests {
             vec![],
             vec![],
             vec![(r#"x"><img src=x>"#.to_string(), [1u8; 32])],
+            vec![],
             vec![],
             0,
         );
@@ -564,6 +622,7 @@ mod tests {
             vec![],
             vec![],
             sounds.clone(),
+            vec![],
             0,
         );
         p.verify().unwrap();
@@ -580,6 +639,7 @@ mod tests {
             vec![("blob".to_string(), [9u8; 32])],
             vec![("wave".to_string(), [4u8; 32])],
             sounds,
+            vec![],
             0,
         );
         all.verify().unwrap();
@@ -595,6 +655,7 @@ mod tests {
             vec![],
             vec![],
             vec![(r#"<script>"#.to_string(), [1u8; 32])],
+            vec![],
             0,
         );
         assert!(matches!(
@@ -609,12 +670,87 @@ mod tests {
     }
 
     #[test]
+    fn nicknames_are_a_fourth_tail_after_sounds() {
+        let owner = [1u8; 32];
+        let alice = [7u8; 32];
+        let nicknames = vec![(alice, "Ali".to_string())];
+
+        // Only nicknames — the three earlier counts (0) must still be written.
+        let p = ServerPolicy::signed(
+            &root(),
+            owner,
+            3,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            nicknames.clone(),
+            0,
+        );
+        p.verify().unwrap();
+        assert_eq!(p.nickname_of(&alice), Some("Ali"));
+        assert_eq!(p.nickname_of(&[2u8; 32]), None);
+        assert_eq!(ServerPolicy::decode(&p.encode()).unwrap(), p);
+
+        // All four asset lists populated.
+        let all = ServerPolicy::signed(
+            &root(),
+            owner,
+            4,
+            vec![],
+            vec![],
+            vec![("blob".to_string(), [9u8; 32])],
+            vec![("wave".to_string(), [4u8; 32])],
+            vec![("airhorn".to_string(), [6u8; 32])],
+            nicknames,
+            0,
+        );
+        all.verify().unwrap();
+        assert_eq!(ServerPolicy::decode(&all.encode()).unwrap(), all);
+
+        // A nickname carrying a control character is refused at decode.
+        let evil = ServerPolicy::signed(
+            &root(),
+            owner,
+            5,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![(alice, "bad\nname".to_string())],
+            0,
+        );
+        assert!(matches!(
+            ServerPolicy::decode(&evil.encode()),
+            Err(WireError::Invalid("nickname"))
+        ));
+
+        // Pre-nickname policy still round-trips with all four lists empty.
+        let plain = ServerPolicy::genesis(&root(), owner, 0);
+        assert!(plain.nicknames.is_empty());
+        assert_eq!(ServerPolicy::decode(&plain.encode()).unwrap(), plain);
+    }
+
+    #[test]
     fn decode_rejects_a_malicious_emoji_shortcode() {
         // A (validly signed) policy whose shortcode carries markup must be
         // refused at decode, before it can reach a client's render sink.
         let owner = [1u8; 32];
         let evil = vec![(r#"x"><img src=x onerror=alert(1)>"#.to_string(), [9u8; 32])];
-        let p = ServerPolicy::signed(&root(), owner, 3, vec![], vec![], evil, vec![], vec![], 0);
+        let p = ServerPolicy::signed(
+            &root(),
+            owner,
+            3,
+            vec![],
+            vec![],
+            evil,
+            vec![],
+            vec![],
+            vec![],
+            0,
+        );
         // The signature is valid over the hostile bytes...
         p.verify().unwrap();
         // ...but decode refuses the shortcode.

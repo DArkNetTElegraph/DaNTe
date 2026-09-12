@@ -17,9 +17,9 @@ identities.
 > audio (three independent browser peers exchanging live RTP audio in a full
 > mesh — see [Partial / caveats](#partial--caveats)). Main gaps:
 > **the desktop shell has never been opened** and **cross-NAT voice is
-> unverified**, and the group-call **SFU has no client integration** (its
-> media plane and relay-hosted signalling are built and tested, but the
-> shipped client is mesh-only, fine to ~8). Wire
+> unverified**, and the group-call **SFU has no browser/desktop integration**
+> (its media plane, relay signalling and engine client mode are built and
+> tested, but the shipped browser client is mesh-only, fine to ~8). Wire
 > formats still change without notice. See the
 > [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
@@ -169,12 +169,12 @@ above — it states precisely what is and is not protected.
   outstanding is the release side: native application menus, auto-update, and
   signed/notarized installers — CI proves the code builds on all three
   platforms, but produces no distributable bundle for any of them yet.
-- Wiring the **group-call SFU** into `dante-core` and the SPA. The media
-  plane and the relay-hosted signalling are built and proven — DTLS-SRTP per
-  participant, opaque RTP forwarding, and `SfuJoin`/`SfuIce`/`SfuPull` over
-  the relay wire, each with a real 3-peer test — but there is no mesh/SFU
-  switch or UI yet and the relay feature is off by default, so the shipped
-  client is still a full mesh (fine to ~8). See [`docs/SFU.md`](docs/SFU.md).
+- Browser/desktop wiring for the **group-call SFU**. The media plane, the
+  relay-hosted signalling and the `dante-core` client mode are built and proven
+  (`Engine::enable_sfu()`, real 3-peer/3-engine tests) — what is missing is SPA
+  negotiation, the desktop audio bridge's single-leg path, a participant-count
+  switch and SFU discovery, so the shipped browser client is still a full mesh
+  (fine to ~8). See [`docs/SFU.md`](docs/SFU.md).
 - Tenor / Giphy GIF search.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
 - External security audit.

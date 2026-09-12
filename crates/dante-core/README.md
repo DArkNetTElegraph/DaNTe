@@ -36,7 +36,10 @@ default feature; `--no-default-features` gives a relay-only client.
   `send_call_audio` / `take_call_audio`, group calls
   (`start_group_call` / `join_group_call` / `leave_group_call` /
   `poll_group_calls`), and voice channels
-  (`join_voice_channel` / `send_voice_signal` / `poll_voice`)
+  (`join_voice_channel` / `send_voice_signal` / `poll_voice`). With
+  `enable_sfu()` a group call runs one leg through the relay-hosted SFU
+  instead of a full mesh: `send_group_audio` / `take_group_audio` /
+  `group_call_state`
 - contacts & safety: `add_contact`, `block` / `unblock`, `safety_number`,
   `set_verified`, `search`
 

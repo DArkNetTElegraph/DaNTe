@@ -799,12 +799,13 @@ infrastructure. Reached. ---**
   Runtime-verified: under headless Chromium `sframeActive()` returned true on
   both peers with a shared epoch, so the transform is genuinely running rather
   than silently no-op'd.
-- **Still to build:** wiring the group-call SFU into `dante-core` and the SPA
-  (the mesh/SFU switch and the client negotiation). The media plane
-  (`crates/dante-sfu`) and the relay-hosted signalling (`dante-relay` feature
-  `sfu`, off by default) are implemented and proven with real 3-peer tests;
-  see [`SFU.md`](SFU.md). Channels and group calls use MLS; the pre-MLS
-  sender-keys ratchet has been removed.
+- **Still to build:** browser/desktop wiring for the group-call SFU (SPA
+  negotiation, the desktop bridge's single-leg path, the participant-count
+  switch and SFU discovery). The media plane (`crates/dante-sfu`), the
+  relay-hosted signalling (`dante-relay` feature `sfu`, off by default) and
+  the engine client mode (`Engine::enable_sfu()`) are implemented and proven
+  with real multi-peer tests; see [`SFU.md`](SFU.md). Channels and group calls
+  use MLS; the pre-MLS sender-keys ratchet has been removed.
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).
 - SFU role in the server relay above ~5 participants; full mesh below (mesh done).
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

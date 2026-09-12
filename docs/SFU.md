@@ -1,13 +1,13 @@
 # Group-call SFU (selective forwarding unit)
 
-> **Status: media plane and relay-hosted signalling proven; client integration
-> not started.** [`crates/dante-sfu`](../crates/dante-sfu/README.md) terminates
-> real DTLS-SRTP PeerConnections and forwards RTP payloads opaquely, and
+> **Status: media plane, relay signalling and the `dante-core` client mode are
+> proven; browser/desktop wiring is not done.** [`crates/dante-sfu`](../crates/dante-sfu/README.md)
+> terminates real DTLS-SRTP PeerConnections and forwards RTP payloads opaquely;
 > `dante-relay`'s `sfu` feature (off by default) hosts rooms and carries
-> SDP/ICE over the existing relay wire — both proven by real three-peer tests.
-> Nothing wires this into `dante-core` or the SPA yet: the default client path
-> is still the full mesh. This document is the design the rest of that work
-> should follow.
+> SDP/ICE over the existing relay wire; and `Engine::enable_sfu()` gives an
+> engine one SFU leg instead of a mesh, verified by a three-engine e2e. The
+> shipped browser client and the desktop audio bridge still use the mesh. This
+> document is the design the rest of that work should follow.
 
 ## Why
 
@@ -74,10 +74,30 @@ uses — so possession of the channel id is the authorization, and the relay
 needs no new identity check. Media never travels this path: each participant
 holds a DTLS-SRTP connection to the SFU's own UDP endpoint.
 
-Still to do on the client side: `dante-core` has no SFU mode (it would own the
-threshold decision and drive these requests), the SPA does no negotiation, and
-no SFU endpoint is advertised to clients yet. The component is also
-feature-gated off in the relay binary, so a release build does not include it.
+Still to do on the client side: the SPA does no SFU negotiation, the desktop
+audio bridge still fans out per mesh leg (`/api/call/audio`), no SFU endpoint
+is advertised to clients, there is no participant-count threshold, and the
+mode must currently be chosen consistently by every member (mixed mode leaves
+the two sides with no shared media path). The relay feature is off in release
+builds.
+
+## Engine mode (`dante-core`)
+
+`Engine::enable_sfu()` (opt-in, not persisted) switches group calls to the
+relay-hosted SFU:
+
+- `reconcile_group_legs` opens **one** `Call::offer_for_sfu` leg per channel
+  and negotiates it over the relay wire instead of starting mesh legs;
+- `poll_group_calls` drives `SfuIce`/`SfuPull` and queues inbound frames;
+- `send_group_audio` / `take_group_audio` are the SFU equivalents of the
+  per-peer `send_call_audio` / `take_call_audio`;
+- `group_call_state` reports the single leg's connection state;
+- `leave_group_call` sends `SfuLeave` and closes the leg.
+
+`crates/dante-core/src/e2e_tests.rs::an_sfu_group_call_forwards_audio_between_three_engines`
+runs three real engines against the in-process relay (whose test build enables
+`sfu`), starts a group call, and asserts each engine hears the other two's
+distinct markers and never its own.
 
 ## Mesh vs SFU
 
@@ -128,6 +148,9 @@ an SFU or a TURN relay.
   exchange, but every bit of signalling — `SfuJoin` / `SfuIce` / `SfuPull` —
   goes over the relay's real wire to the relay-hosted room, proving the
   protocol path end to end.
+- `dante-core` e2e: three full engines with `enable_sfu()` start a group call
+  through the in-process relay and hear each other's markers via
+  `send_group_audio` / `take_group_audio`.
 
 See the crate README for the exact status list.
 

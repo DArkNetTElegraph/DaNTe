@@ -52,6 +52,11 @@ pub const DM_TTL_MS: u32 = 7 * 24 * 60 * 60 * 1000;
 /// Re-announce / re-prove liveness only if the last one is older than this.
 pub const REANNOUNCE_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// Receive slots this client advertises on its SFU leg (`room - 1` peers plus
+/// us). Larger than any room the relay runs is harmless — extra slots are
+/// simply silent.
+pub const SFU_RECV_SLOTS: usize = 15;
+
 /// Cap on persisted seen-envelope tags.
 const SEEN_CAP: usize = 5000;
 
@@ -373,6 +378,18 @@ pub(crate) struct GroupCall {
     mls: mls::Member,
 }
 
+/// This client's single media leg to a group call's SFU (instead of a full
+/// mesh), keyed by channel id. Ephemeral — a restart renegotiates.
+pub(crate) struct SfuLeg {
+    /// The one `dante-voice` call to the SFU; every other participant arrives
+    /// as RTP on this connection.
+    call: Call,
+    /// Slot the relay-hosted SFU assigned us.
+    slot: u8,
+    /// Last-seen connection state.
+    state: CallState,
+}
+
 /// A call state transition surfaced by [`Engine::poll_calls`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CallUpdate {
@@ -609,8 +626,20 @@ pub struct Engine {
     /// Last-seen connection state per active call.
     call_states: HashMap<[u8; 32], CallState>,
     /// Active channel group calls, keyed by `channel_id`. Ephemeral. The media
-    /// legs to each participant live in `calls` (a full mesh of 1:1 calls).
+    /// legs to each participant live in `calls` (a full mesh of 1:1 calls) —
+    /// unless [`Engine::enable_sfu`] switched this client to one SFU leg.
     group_calls: HashMap<[u8; 32], GroupCall>,
+    /// Route group-call media through the relay-hosted SFU rather than the
+    /// mesh. Opt-in at runtime; not persisted. Every member of a call must
+    /// agree — mixing modes leaves the two sides with no shared media path.
+    sfu_enabled: bool,
+    /// Live SFU legs, keyed by `channel_id`. Ephemeral.
+    sfu_legs: HashMap<[u8; 32], SfuLeg>,
+    /// Channels whose relay answered "sfu not supported" (or another
+    /// definitive refusal), so a poll loop does not retry every tick.
+    sfu_unavailable: HashSet<[u8; 32]>,
+    /// Opus frames received from each SFU leg, awaiting a decoder.
+    group_audio: HashMap<[u8; 32], std::collections::VecDeque<Vec<u8>>>,
     /// MLS KeyPackage private material we have published to the relay so peers
     /// can add us to their group calls, newest last. Ephemeral.
     mls_pending: Vec<mls::Pending>,
@@ -886,6 +915,10 @@ impl Engine {
             pending_call_offers: HashMap::new(),
             call_states: HashMap::new(),
             group_calls: HashMap::new(),
+            sfu_enabled: false,
+            sfu_legs: HashMap::new(),
+            sfu_unavailable: HashSet::new(),
+            group_audio: HashMap::new(),
             mls_pending: Vec::new(),
             pending_group_calls: HashMap::new(),
             voice_join_intent: HashSet::new(),
@@ -1966,6 +1999,55 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    // ---- SFU group-call mode -----------------------------------------------
+
+    /// Route group-call media through the SFU hosted by the connected relay
+    /// (the relay must be built with its `sfu` feature) instead of a full mesh:
+    /// one DTLS-SRTP leg with the relay instead of one per participant. Opt-in
+    /// and not persisted — call before starting or joining a call. Every member
+    /// of a call must use the same mode; mixed modes have no shared media path.
+    pub fn enable_sfu(&mut self) {
+        self.sfu_enabled = true;
+    }
+
+    /// Whether group-call media is routed through the SFU.
+    pub fn sfu_enabled(&self) -> bool {
+        self.sfu_enabled
+    }
+
+    /// The SFU leg's connection state for `channel_id`, if we have one.
+    pub fn group_call_state(&self, channel_id: &[u8; 32]) -> Option<CallState> {
+        self.sfu_legs.get(channel_id).map(|leg| leg.state)
+    }
+
+    /// Send one Opus frame (`ms` = its duration, e.g. 20) to the group call's
+    /// SFU, which forwards it to every other participant. A capture layer
+    /// (`dante-audio`) drives this in SFU mode instead of the per-leg
+    /// [`Engine::send_call_audio`].
+    pub async fn send_group_audio(
+        &self,
+        channel_id: &[u8; 32],
+        opus: &[u8],
+        ms: u32,
+    ) -> Result<(), CoreError> {
+        let leg = self
+            .sfu_legs
+            .get(channel_id)
+            .ok_or(CoreError::Voice("no SFU leg for that channel".into()))?;
+        leg.call.push_audio(opus, ms).await.map_err(voice_err)
+    }
+
+    /// Drain the Opus frames the SFU forwarded to us for `channel_id` since
+    /// the last call. Sources arrive interleaved (each participant's stream
+    /// keeps its own SSRC on the wire, but this API hands back payloads); feed
+    /// them to a decoder + speaker.
+    pub fn take_group_audio(&mut self, channel_id: &[u8; 32]) -> Vec<Vec<u8>> {
+        self.group_audio
+            .get_mut(channel_id)
+            .map(|q| q.drain(..).collect())
+            .unwrap_or_default()
+    }
+
     // ---- Channel group calls (MLS-keyed, full-mesh media) -------------------
     //
     // A group call is an MLS group (for a shared, membership-bound key that
@@ -2112,6 +2194,12 @@ impl Engine {
         let Some(gc) = self.group_calls.remove(channel_id) else {
             return Ok(());
         };
+        if let Some(leg) = self.sfu_legs.remove(channel_id) {
+            let _ = sync::sfu_leave(&mut self.client, channel_id, leg.slot).await;
+            leg.call.close().await;
+        }
+        self.group_audio.remove(channel_id);
+        self.sfu_unavailable.remove(channel_id);
         let me = self.my_member_id();
         let peers: Vec<[u8; 32]> = gc
             .mls
@@ -2140,6 +2228,10 @@ impl Engine {
     /// have one with. Glare-free: the lower identity id sends the offer, the
     /// higher one auto-accepts in [`Engine::receive_all`].
     async fn reconcile_group_legs(&mut self, channel_id: &[u8; 32], now_ms: u64) {
+        if self.sfu_enabled {
+            self.reconcile_sfu_leg(channel_id).await;
+            return;
+        }
         let me = self.my_member_id();
         let Some(gc) = self.group_calls.get(channel_id) else {
             return;
@@ -2153,6 +2245,82 @@ impl Engine {
             .collect();
         for t in targets {
             let _ = self.start_call(&t, now_ms).await;
+        }
+    }
+
+    /// Open this client's single leg to the group call's SFU room, once.
+    /// A relay without the `sfu` feature answers a refusal; remember that so a
+    /// poll loop does not retry every tick.
+    async fn reconcile_sfu_leg(&mut self, channel_id: &[u8; 32]) {
+        if self.sfu_legs.contains_key(channel_id)
+            || self.sfu_unavailable.contains(channel_id)
+            || !self.group_calls.contains_key(channel_id)
+        {
+            return;
+        }
+        let (call, offer) = match Call::offer_for_sfu(SFU_RECV_SLOTS, &self.ice_servers).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "sfu leg offer failed");
+                return;
+            }
+        };
+        match sync::sfu_join(&mut self.client, channel_id, &offer).await {
+            Ok((slot, answer)) => {
+                if let Err(e) = call.set_answer(&answer).await {
+                    tracing::debug!(error = %e, "sfu answer rejected");
+                    return;
+                }
+                self.sfu_legs.insert(
+                    *channel_id,
+                    SfuLeg {
+                        call,
+                        slot,
+                        state: CallState::New,
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "relay has no SFU; not retrying this channel");
+                self.sfu_unavailable.insert(*channel_id);
+            }
+        }
+    }
+
+    /// Drive every SFU leg: trickle our candidates up, pull the SFU's
+    /// candidates down, and queue inbound audio.
+    async fn poll_sfu_legs(&mut self) {
+        let ids: Vec<[u8; 32]> = self.sfu_legs.keys().copied().collect();
+        for id in ids {
+            let mut ice: Vec<String> = Vec::new();
+            if let Some(leg) = self.sfu_legs.get_mut(&id) {
+                while let Some(ev) = leg.call.try_event() {
+                    match ev {
+                        CallEvent::LocalIce(c) => ice.push(c),
+                        CallEvent::State(s) => leg.state = s,
+                        CallEvent::RemoteAudio(frame) => {
+                            let q = self.group_audio.entry(id).or_default();
+                            q.push_back(frame);
+                            while q.len() > 200 {
+                                q.pop_front();
+                            }
+                        }
+                        CallEvent::CtlOpen | CallEvent::Ctl(_) => {}
+                    }
+                }
+            }
+            let slot = self.sfu_legs.get(&id).map(|l| l.slot);
+            let Some(slot) = slot else { continue };
+            for candidate in ice {
+                let _ = sync::sfu_ice(&mut self.client, &id, slot, &candidate).await;
+            }
+            if let Ok(candidates) = sync::sfu_pull(&mut self.client, &id, slot).await {
+                if let Some(leg) = self.sfu_legs.get_mut(&id) {
+                    for c in candidates {
+                        let _ = leg.call.add_ice(&c).await;
+                    }
+                }
+            }
         }
     }
 
@@ -2421,6 +2589,9 @@ impl Engine {
         let ids: Vec<[u8; 32]> = self.group_calls.keys().copied().collect();
         for id in ids {
             self.reconcile_group_legs(&id, now_ms).await;
+        }
+        if self.sfu_enabled {
+            self.poll_sfu_legs().await;
         }
         Ok(())
     }
@@ -5721,13 +5892,15 @@ impl Engine {
                 Ok(Content::CallOffer(sdp)) => {
                     let id = idk_to_id(&from);
                     self.pending_call_offers.insert(id, sdp);
-                    if self.is_group_call_member(&id) {
+                    if self.is_group_call_member(&id) && !self.sfu_enabled {
                         // A media leg of a call we are already in — accept it
-                        // without prompting the user again.
+                        // without prompting the user again. In SFU mode there
+                        // are no peer legs; a mesh offer from a mixed-mode peer
+                        // cannot be joined and is dropped.
                         if let Err(e) = self.accept_call(&id, now_ms).await {
                             tracing::debug!(error = %e, "group-call leg auto-accept failed");
                         }
-                    } else {
+                    } else if !self.is_group_call_member(&id) {
                         out.push(Inbound::IncomingCall { from_idk: from });
                     }
                 }

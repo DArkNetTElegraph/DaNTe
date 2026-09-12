@@ -19,7 +19,7 @@ No phone number, email, payment or invite is involved.
 | `id` | `IdentityId = SHA-256(idk_pub)`, Crockford-base32 and 24-word BIP39 renderings, pairwise `safety_number` |
 | `keystore` | Argon2id + XChaCha20-Poly1305 sealed keystore ([`docs/PROTOCOL.md`](../../docs/PROTOCOL.md) §1.2) |
 | `backup` | passphrase-encrypted recovery blob (§1.3) |
-| `records` | `IdentityAnnounce`, `LivenessProof`, `KeyRotation`, `IdentityRevoke` bodies, their PoW / link challenges, and `Record` wrapping (§2.2) |
+| `records` | `IdentityAnnounce`, `LivenessProof`, `KeyRotation`, `IdentityRevoke`, `IdentityProfile` bodies, their PoW / link challenges, and `Record` wrapping (§2.2) |
 
 `Identity::p2p_node_seed()` derives the stable libp2p node key without leaking
 the identity key.

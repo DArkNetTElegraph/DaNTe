@@ -100,6 +100,14 @@ struct Chain {
     /// The self-asserted display name from the chain's `IdentityAnnounce`
     /// (`display_hint`). Non-unique, untrusted, empty if none was given.
     display_hint: String,
+    /// Current global avatar blob hash, or `None`. Set by the newest accepted
+    /// `IdentityProfile` record.
+    avatar_hash: Option<[u8; 32]>,
+    /// Newest accepted profile-record timestamp. Ordering guard: a profile
+    /// record must be strictly newer than the last one, so a replay cannot
+    /// roll an avatar back. Deliberately separate from `last_activity_ms` — a
+    /// profile update is cheap and must not keep an identity alive.
+    profile_ms: u64,
 }
 
 impl Chain {
@@ -251,6 +259,28 @@ impl<S: RecordStore> Ledger<S> {
             .collect()
     }
 
+    /// The current global avatar blob hash (SHA-256) for the chain containing
+    /// `idk`. `None` if unknown, never set, or cleared.
+    pub fn avatar_hash(&self, idk: &[u8; 32]) -> Option<[u8; 32]> {
+        self.chain_of(idk).and_then(|c| c.avatar_hash)
+    }
+
+    /// [`avatar_hash`](Self::avatar_hash) resolved from stable `IdentityId`
+    /// bytes (a fingerprint) instead of an `idk`.
+    pub fn avatar_hash_by_id(&self, identity_id: &[u8; 32]) -> Option<[u8; 32]> {
+        let &chain_id = self.id_to_chain.get(identity_id)?;
+        self.chains[chain_id].avatar_hash
+    }
+
+    /// Every known identity that currently has an avatar, as
+    /// `(IdentityId bytes, hash)`. For populating a client's avatar cache.
+    pub fn avatars(&self) -> Vec<([u8; 32], [u8; 32])> {
+        self.id_to_chain
+            .iter()
+            .filter_map(|(id, &ci)| self.chains[ci].avatar_hash.map(|h| (*id, h)))
+            .collect()
+    }
+
     /// The current X25519 agreement key for a live identity named by any `idk`
     /// in its chain.
     pub fn agreement_key(&self, idk: &[u8; 32]) -> Option<[u8; 32]> {
@@ -333,6 +363,7 @@ impl<S: RecordStore> Ledger<S> {
             RecordKind::ServerRegister => self.apply_server_register(record),
             RecordKind::ServerDelist => self.apply_server_delist(record),
             RecordKind::IdentityRevoke => self.apply_revoke(record),
+            RecordKind::IdentityProfile => self.apply_profile(record),
             RecordKind::Tombstone => unreachable!("handled above"),
         }
     }
@@ -360,6 +391,8 @@ impl<S: RecordStore> Ledger<S> {
             tombstoned: false,
             revoked: false,
             display_hint: body.display_hint.clone(),
+            avatar_hash: None,
+            profile_ms: 0,
         });
         self.idk_to_chain.insert(record.author, chain_id);
         self.id_to_chain
@@ -477,6 +510,38 @@ impl<S: RecordStore> Ledger<S> {
         Ok(self.push_record(record))
     }
 
+    fn apply_profile(&mut self, record: Record) -> Result<RecordId, LedgerError> {
+        let IdentityRecord::Profile(body) = IdentityRecord::from_record(&record)? else {
+            return Err(LedgerError::AuthorMismatch);
+        };
+
+        let &chain_id = self
+            .idk_to_chain
+            .get(&record.author)
+            .ok_or(LedgerError::UnknownIdentity)?;
+        let chain = &self.chains[chain_id];
+        if chain.tombstoned {
+            return Err(LedgerError::IdentityEvaporated);
+        }
+        if chain.revoked {
+            return Err(LedgerError::IdentityRevoked);
+        }
+        // Only the live chain tip may change its chain's public state.
+        if record.author != chain.tip_idk {
+            return Err(LedgerError::NotChainTip);
+        }
+        // Strictly newer than the last profile record: an old avatar can never
+        // be replayed over a newer one, whatever order records arrive in.
+        if record.created_ms <= chain.profile_ms {
+            return Err(LedgerError::NonMonotonic);
+        }
+
+        let chain = &mut self.chains[chain_id];
+        chain.avatar_hash = body.avatar_hash;
+        chain.profile_ms = record.created_ms;
+        Ok(self.push_record(record))
+    }
+
     fn apply_server_register(&mut self, record: Record) -> Result<RecordId, LedgerError> {
         let body = ServerRegister::decode(&record.body)?;
         if record.author != body.server_root {
@@ -573,7 +638,10 @@ impl<S: RecordStore> Ledger<S> {
 mod tests {
     use dante_crypto::pow::Difficulty;
     use dante_identity::{
-        records::{IdentityAnnounce, KeyRotation, LivenessProof},
+        records::{
+            IdentityAnnounce, IdentityProfile, IdentityRevoke, KeyRotation, LivenessProof,
+            RevokeReason,
+        },
         Identity,
     };
     use dante_proto::merkle;
@@ -608,6 +676,10 @@ mod tests {
 
     fn liveness(id: &Identity, t: u64) -> Record {
         LivenessProof::build(id, t, D).to_record(id, t)
+    }
+
+    fn profile(id: &Identity, avatar: Option<[u8; 32]>, t: u64) -> Record {
+        IdentityProfile::new(avatar).to_record(id, t)
     }
 
     fn server_reg(root: &Identity, discoverable: bool, t: u64) -> Record {
@@ -657,6 +729,100 @@ mod tests {
         l.append(announce(&plain, 2_000), 2_000).unwrap();
         assert_eq!(l.display_name(&plain.sign_public().to_bytes()), None);
         assert_eq!(l.usernames().len(), 1);
+    }
+
+    #[test]
+    fn profile_sets_updates_and_clears_the_avatar() {
+        let mut l = ledger();
+        let id = Identity::generate(0);
+        l.append(announce(&id, 1_000), 1_000).unwrap();
+
+        l.append(profile(&id, Some([1u8; 32]), 2_000), 2_000)
+            .unwrap();
+        let idk = id.sign_public().to_bytes();
+        assert_eq!(l.avatar_hash(&idk), Some([1u8; 32]));
+        assert_eq!(l.avatar_hash_by_id(id.id().as_bytes()), Some([1u8; 32]));
+        assert_eq!(l.avatars(), vec![(*id.id().as_bytes(), [1u8; 32])]);
+
+        // A newer profile replaces the avatar.
+        l.append(profile(&id, Some([2u8; 32]), 3_000), 3_000)
+            .unwrap();
+        assert_eq!(l.avatar_hash_by_id(id.id().as_bytes()), Some([2u8; 32]));
+
+        // Clearing removes it.
+        l.append(profile(&id, None, 4_000), 4_000).unwrap();
+        assert_eq!(l.avatar_hash(&idk), None);
+        assert!(l.avatars().is_empty());
+    }
+
+    #[test]
+    fn profile_replay_and_a_rotated_away_key_are_rejected() {
+        let mut l = ledger();
+        let id = Identity::generate(0);
+        l.append(announce(&id, 1_000), 1_000).unwrap();
+        l.append(profile(&id, Some([2u8; 32]), 3_000), 3_000)
+            .unwrap();
+
+        // Same timestamp is not strictly newer.
+        assert!(matches!(
+            l.append(profile(&id, Some([1u8; 32]), 3_000), 3_000),
+            Err(LedgerError::NonMonotonic)
+        ));
+        // A replay of an older record is refused, and the newer avatar stands.
+        assert!(matches!(
+            l.append(profile(&id, Some([1u8; 32]), 2_500), 2_500),
+            Err(LedgerError::NonMonotonic)
+        ));
+        assert_eq!(l.avatar_hash_by_id(id.id().as_bytes()), Some([2u8; 32]));
+
+        // After a rotation only the new tip may update the profile.
+        let new = Identity::generate(1);
+        l.append(KeyRotation::build(&id, &new).to_record(&new, 4_000), 4_000)
+            .unwrap();
+        assert!(matches!(
+            l.append(profile(&id, Some([3u8; 32]), 5_000), 5_000),
+            Err(LedgerError::NotChainTip)
+        ));
+        assert_eq!(l.avatar_hash_by_id(id.id().as_bytes()), Some([2u8; 32]));
+    }
+
+    #[test]
+    fn profile_does_not_refresh_activity() {
+        // A cheap, PoW-free profile update must not keep an identity from
+        // evaporating, or the TTL GC would be trivial to dodge.
+        let mut l = ledger();
+        let id = Identity::generate(0);
+        l.append(announce(&id, 1_000), 1_000).unwrap();
+        l.append(profile(&id, Some([1u8; 32]), 20_000), 20_000)
+            .unwrap();
+        assert_eq!(l.evaporate(20_000).len(), 1);
+        assert!(!l.is_live(&id.sign_public().to_bytes()));
+    }
+
+    #[test]
+    fn profile_after_revoke_or_evaporation_is_rejected() {
+        let mut l = ledger();
+        let a = Identity::generate(0);
+        let b = Identity::generate(1);
+        l.append(announce(&a, 1_000), 1_000).unwrap();
+        l.append(announce(&b, 1_000), 1_000).unwrap();
+
+        l.append(
+            IdentityRevoke::build(&a, RevokeReason::Retired).to_record(&a, 2_000),
+            2_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            l.append(profile(&a, Some([1u8; 32]), 3_000), 3_000),
+            Err(LedgerError::IdentityRevoked)
+        ));
+
+        // Params TTL is 10_000 (strictly greater to evaporate).
+        l.evaporate(12_000);
+        assert!(matches!(
+            l.append(profile(&b, Some([1u8; 32]), 13_000), 13_000),
+            Err(LedgerError::IdentityEvaporated)
+        ));
     }
 
     #[test]

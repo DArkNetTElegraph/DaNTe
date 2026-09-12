@@ -531,7 +531,9 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
   background: linear-gradient(145deg, color-mix(in srgb, var(--cornflower-blue) 42%, var(--bg-raised)), var(--bg-raised));
   color: var(--text);
   box-shadow: inset 0 0 0 1px var(--divider);
+  overflow: hidden;
 }
+.avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block; }
 
 /* ============================ chat ==================================== */
 #chat { background: var(--bg-chat); }
@@ -1066,9 +1068,21 @@ function avatarColor(seed) {
   const hue = (h % 360 + 137 * (h % 7)) % 360;   // scatter adjacent seeds apart
   return `hsl(${hue} 56% 46%)`;
 }
-// Build an avatar div: initials of `label`, coloured by `seed` (optional).
+// Build an avatar div: the identity's global avatar image when the ledger has
+// one, else initials of `label` coloured by `seed` (optional).
 function avatar(label, seed, cls) {
-  const av = el("div", cls || "avatar", initials(label));
+  const av = el("div", cls || "avatar");
+  const hash = seed && store.avatars[seed];
+  if (hash) {
+    const im = el("img");
+    im.src = "/api/emoji?hash=" + encodeURIComponent(hash);
+    im.alt = "";
+    // A vanished blob (TTL) falls back to the initials avatar.
+    im.onerror = () => { im.remove(); av.textContent = initials(label); };
+    av.appendChild(im);
+  } else {
+    av.textContent = initials(label);
+  }
   if (seed) {
     av.style.background = avatarColor(seed);
     av.style.color = "#fff";
@@ -1263,6 +1277,7 @@ const LS = {
 const store = {
   me: { fingerprint: "", words: "", username: "" },
   usernames: {},                      // fp -> self-asserted username (ledger)
+  avatars: {},                        // fp -> global avatar blob hash (ledger)
   channels: [],                       // [{id,name,server}]
   dms: LS.get("dms", []),             // [{fp}]
   messages: [],                       // flat inbox, each tagged with _target
@@ -3386,6 +3401,13 @@ async function refreshUsernames() {
   } catch (_) {}
 }
 
+async function refreshAvatars() {
+  try {
+    const a = await api.get("/api/avatars");
+    if (JSON.stringify(a) !== JSON.stringify(store.avatars)) { store.avatars = a; render(); }
+  } catch (_) {}
+}
+
 async function refreshInvites() {
   try {
     const inv = await api.get("/api/invites");
@@ -5106,6 +5128,7 @@ async function init() {
   refreshContacts();
   refreshBlocked();
   refreshUsernames();
+  refreshAvatars();
   refreshInvites();
   refreshCalls();
   refreshVoice();
@@ -5118,6 +5141,7 @@ async function init() {
   setInterval(refreshContacts, 8000);
   setInterval(refreshBlocked, 8000);
   setInterval(refreshUsernames, 10000);
+  setInterval(refreshAvatars, 10000);
   setInterval(refreshInvites, 6000);
   setInterval(refreshCalls, 1200);
   setInterval(refreshVoice, 1500);

@@ -96,9 +96,9 @@ Acceptance rules (all MUST pass):
 1. `sig` verifies under `author`.
 2. `created_ms` within skew bounds.
 3. kind-specific validation (2.2) passes.
-4. For kinds that supersede a prior record (liveness, key rotation), `created_ms`
-   is strictly greater than the newest accepted record of that kind for the same
-   subject.
+4. For kinds that supersede a prior record (liveness, key rotation, identity
+   profile), `created_ms` is strictly greater than the newest accepted record
+   of that kind for the same subject.
 
 ### 2.2 Record kinds
 
@@ -111,6 +111,7 @@ Acceptance rules (all MUST pass):
 | 5 | `ServerDelist` | `{ server_root: [u8;32] }` — signed by `server_root`; removes a prior `ServerRegister` from discovery. |
 | 6 | `Tombstone` | `{ subject: [u8;32], evaporated_ms: u64 }` — node-generated, never accepted through `append`; see §2.3. |
 | 7 | `IdentityRevoke` | `{ revoked_idk: [u8;32], reason: u8 }` — `revoked_idk` **must** equal `author`, which **must** be the current chain tip. `reason` is informational (`0` unspecified, `1` compromised, `2` superseded, `3` retired; unknown ⇒ `0`). Accepted only for a known, non-evaporated, non-revoked chain with a strictly-monotonic `created_ms`. Terminal: the chain then takes no further `LivenessProof` / `KeyRotation` / `IdentityRevoke`, resolves to no usable key (`idk_for_id` / `agreement_key` / `tip_key` → `None`, `is_live` → `false`), and any server it hosts is delisted. Irreversible — a revoked chain cannot re-announce (its `idk` is permanently bound). |
+| 8 | `IdentityProfile` | `{ avatar_hash: opt<[u8;32]> }` — mutable public identity state. `author` **must** be the current chain tip; `avatar_hash` is the SHA-256 of the global avatar image in the relay blob store, or absent to clear it. Accepted only for a known, non-evaporated, non-revoked chain whose newest accepted `IdentityProfile` has a strictly smaller `created_ms` (so an old avatar cannot be replayed over a newer one). Does **not** count as liveness activity — a PoW-free profile update cannot extend an identity's evaporation TTL. |
 
 `display_hint` / `name` / `summary` are **untrusted, non-unique** strings. They
 are never used for lookup or uniqueness — only `IdentityId` / `ServerId` are.

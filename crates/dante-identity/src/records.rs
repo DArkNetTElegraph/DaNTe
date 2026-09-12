@@ -1,6 +1,6 @@
 //! The identity-related ledger record **bodies** (`docs/PROTOCOL.md` §2.2):
 //! [`IdentityAnnounce`] (kind 1), [`LivenessProof`] (kind 2), [`KeyRotation`]
-//! (kind 3), [`IdentityRevoke`] (kind 7).
+//! (kind 3), [`IdentityRevoke`] (kind 7), [`IdentityProfile`] (kind 8).
 //!
 //! Each body has:
 //! - `encode` / `decode` over the [`dante_proto::enc`] codec,
@@ -389,6 +389,69 @@ impl IdentityRevoke {
     }
 }
 
+/// Body of a `kind = 8` record: mutable public identity state.
+///
+/// Currently one field — the global avatar. The record's `author`/`sig` are
+/// the **current chain tip** `idk`, the only key allowed to change its chain's
+/// profile; `dante-ledger` additionally requires a strictly increasing
+/// `created_ms` per chain, so an older profile record cannot be replayed over
+/// a newer one. There is deliberately no PoW: a profile change is a rare,
+/// user-driven action, and the ledger's rate limiter plus the tip/monotonic
+/// checks bound abuse without coupling it to liveness (see
+/// [`crate::records`] — it does not refresh activity, or an identity could
+/// dodge evaporation for free).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityProfile {
+    /// SHA-256 of the avatar image on the relay blob store, or `None` to
+    /// clear it. The image never rides the ledger — only this 32-byte pointer
+    /// — so replicas and gossip stay small and clients fetch the bytes on
+    /// demand from the content-addressed store.
+    pub avatar_hash: Option<[u8; 32]>,
+}
+
+impl IdentityProfile {
+    /// Build a profile carrying `avatar_hash` (`None` clears the avatar).
+    pub fn new(avatar_hash: Option<[u8; 32]>) -> Self {
+        Self { avatar_hash }
+    }
+
+    /// Encode the body.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(33);
+        match &self.avatar_hash {
+            Some(h) => {
+                w.bool(true).fixed(h);
+            }
+            None => {
+                w.bool(false);
+            }
+        }
+        w.into_vec()
+    }
+
+    /// Decode the body.
+    pub fn decode(bytes: &[u8]) -> Result<Self, IdentityError> {
+        let mut r = Reader::new(bytes);
+        let avatar_hash = if r.bool()? {
+            Some(r.fixed::<32>()?)
+        } else {
+            None
+        };
+        r.finish()?;
+        Ok(Self { avatar_hash })
+    }
+
+    /// Wrap in a signed record authored by `identity` at `created_ms`.
+    pub fn to_record(&self, identity: &Identity, created_ms: u64) -> Record {
+        seal(
+            identity,
+            RecordKind::IdentityProfile,
+            self.encode(),
+            created_ms,
+        )
+    }
+}
+
 /// A decoded identity-related record body, tagged by kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IdentityRecord {
@@ -400,6 +463,8 @@ pub enum IdentityRecord {
     KeyRotation(KeyRotation),
     /// A `kind = 7` body.
     Revoke(IdentityRevoke),
+    /// A `kind = 8` body.
+    Profile(IdentityProfile),
 }
 
 impl IdentityRecord {
@@ -411,6 +476,7 @@ impl IdentityRecord {
             RecordKind::LivenessProof => Self::Liveness(LivenessProof::decode(&record.body)?),
             RecordKind::KeyRotation => Self::KeyRotation(KeyRotation::decode(&record.body)?),
             RecordKind::IdentityRevoke => Self::Revoke(IdentityRevoke::decode(&record.body)?),
+            RecordKind::IdentityProfile => Self::Profile(IdentityProfile::decode(&record.body)?),
             _ => return Err(IdentityError::WrongRecordKind),
         })
     }
@@ -590,6 +656,30 @@ mod tests {
             _ => panic!("wrong variant"),
         }
         assert_eq!(IdentityRevoke::decode(&body.encode()).unwrap(), body);
+    }
+
+    #[test]
+    fn identity_profile_roundtrips_and_is_authored_by_the_signer() {
+        let id = Identity::generate(0);
+        let body = IdentityProfile::new(Some([7u8; 32]));
+        let rec = body.to_record(&id, 42);
+        assert_eq!(rec.kind, RecordKind::IdentityProfile);
+        assert_eq!(rec.author, id.sign_public().to_bytes());
+        rec.verify_signature().unwrap();
+
+        match IdentityRecord::from_record(&rec).unwrap() {
+            IdentityRecord::Profile(b) => assert_eq!(b, body),
+            _ => panic!("wrong variant"),
+        }
+        assert_eq!(IdentityProfile::decode(&body.encode()).unwrap(), body);
+
+        // Clearing is an explicit "none", not a zero hash.
+        let clear = IdentityProfile::new(None);
+        assert_eq!(IdentityProfile::decode(&clear.encode()).unwrap(), clear);
+        assert_ne!(
+            clear.encode(),
+            IdentityProfile::new(Some([0u8; 32])).encode()
+        );
     }
 
     #[test]

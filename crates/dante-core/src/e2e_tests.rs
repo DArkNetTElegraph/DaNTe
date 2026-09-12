@@ -3482,3 +3482,136 @@ async fn also_relay_embedding_accepts_real_clients() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].text, "hello over an embedded relay");
 }
+
+#[tokio::test]
+async fn avatar_publish_syncs_to_a_peer() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    // A minimal PNG header passes the image check; the bytes go to the relay
+    // blob store, the hash into the signed ledger record.
+    let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+    alice.publish_avatar(&png, now).await.unwrap();
+    assert_eq!(
+        alice.my_avatar_hash(),
+        None,
+        "our replica is a strict prefix until sync"
+    );
+
+    alice.sync(now).await.unwrap();
+    let hash = dante_crypto::hash::sha256(&png);
+    assert_eq!(alice.my_avatar_hash(), Some(hash));
+
+    // Bob, who never saw the image, learns the hash from the ledger and
+    // fetches the bytes from the content-addressed store on demand.
+    bob.sync(now).await.unwrap();
+    assert_eq!(bob.avatar_hash_of(&alice_id), Some(hash));
+    assert_eq!(
+        bob.fetch_blob(&hash).await.unwrap().as_deref(),
+        Some(png.as_slice())
+    );
+}
+
+#[tokio::test]
+async fn avatar_update_replaces_and_an_old_record_cannot_be_replayed() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    let mut bob = engine(&relay).await;
+    let alice_id = *alice.identity().id().as_bytes();
+
+    for e in [&mut alice, &mut bob] {
+        e.announce("", now).await.unwrap();
+        e.publish_prekeys().await.unwrap();
+    }
+    for e in [&mut alice, &mut bob] {
+        e.sync(now).await.unwrap();
+    }
+
+    let first = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xAA];
+    let second = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xBB];
+    alice.publish_avatar(&first, now).await.unwrap();
+    bob.sync(now).await.unwrap();
+    assert_eq!(
+        bob.avatar_hash_of(&alice_id),
+        Some(dante_crypto::hash::sha256(&first))
+    );
+
+    // A newer update replaces the avatar for everyone.
+    let later = now + 1_000;
+    alice.publish_avatar(&second, later).await.unwrap();
+    bob.sync(later).await.unwrap();
+    assert_eq!(
+        bob.avatar_hash_of(&alice_id),
+        Some(dante_crypto::hash::sha256(&second))
+    );
+
+    // Replaying the old image at an older timestamp is refused by the ledger's
+    // strictly-increasing per-chain profile clock, so a race cannot roll the
+    // avatar back.
+    assert!(alice.publish_avatar(&first, now + 500).await.is_err());
+    bob.sync(later).await.unwrap();
+    assert_eq!(
+        bob.avatar_hash_of(&alice_id),
+        Some(dante_crypto::hash::sha256(&second))
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_record_kind_is_rejected_not_fatal() {
+    let now = now_ms();
+    let relay = spawn_relay().await;
+    let mut alice = engine(&relay).await;
+    alice.announce("", now).await.unwrap();
+    alice.sync(now).await.unwrap();
+
+    // New code understands kind 8...
+    let profile = dante_identity::records::IdentityProfile::new(Some([1u8; 32]))
+        .to_record(alice.identity(), now + 1);
+    let good = profile.encode();
+    assert_eq!(
+        dante_proto::Record::decode(&good).unwrap().kind,
+        dante_proto::RecordKind::IdentityProfile
+    );
+
+    // ...while old code sees exactly what it sees for any future kind: the
+    // discriminant is rejected by the shared decoder, with no panic and no
+    // partially-read state. Tamper the kind byte (v: u16 || kind: u8).
+    let mut unknown = good.clone();
+    unknown[2] = 9;
+    assert!(matches!(
+        dante_proto::Record::decode(&unknown),
+        Err(dante_proto::enc::WireError::BadDiscriminant { .. })
+    ));
+
+    // The relay rejects the undecodable record and its log is untouched —
+    // the fail-safe path an old relay takes for a kind it does not know.
+    use dante_net::{
+        transport::Client,
+        wire::{Request, Response},
+    };
+    let mut client = Client::connect(&relay).await.unwrap();
+    let err = client
+        .request(&Request::SubmitRecord(unknown))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, dante_net::NetError::Peer(ref m) if m == "undecodable record"),
+        "unexpected rejection: {err:?}"
+    );
+    match client.request(&Request::GetTreeHead).await.unwrap() {
+        Response::TreeHead { size, .. } => assert_eq!(size, 1),
+        other => panic!("expected a tree head, got {other:?}"),
+    }
+}

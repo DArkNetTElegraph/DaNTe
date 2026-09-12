@@ -17,7 +17,7 @@ use dante_crypto::{
 use dante_dm::{Content, FileManifest, Packet, PreKeyBundle, PreKeySecrets, Session};
 use dante_identity::{
     id::IdentityId,
-    records::{IdentityAnnounce, IdentityRevoke, LivenessProof, RevokeReason},
+    records::{IdentityAnnounce, IdentityProfile, IdentityRevoke, LivenessProof, RevokeReason},
     Identity,
 };
 use dante_ledger::{
@@ -57,6 +57,9 @@ const CHANNEL_HISTORY_CAP: usize = 2000;
 
 /// One-time-prekey pool is refilled to this before each publish.
 const PREKEY_POOL_TARGET: usize = 50;
+
+/// Cap on a global avatar image accepted by [`Engine::publish_avatar`].
+const AVATAR_MAX_BYTES: usize = 256 * 1024;
 
 /// Domain separator for the human-comparable safety number of a DM pair.
 const SAFETY_NUMBER_DOMAIN: &[u8] = b"dante/safety-number/v1";
@@ -1413,6 +1416,24 @@ impl Engine {
         self.ledger.usernames()
     }
 
+    /// Another identity's current global avatar blob hash, by its `IdentityId`
+    /// bytes (fingerprint). Signed state from the ledger — fetch the image
+    /// itself with [`Engine::fetch_blob`].
+    pub fn avatar_hash_of(&self, identity_id: &[u8; 32]) -> Option<[u8; 32]> {
+        self.ledger.avatar_hash_by_id(identity_id)
+    }
+
+    /// Our own current global avatar blob hash, if the ledger has one.
+    pub fn my_avatar_hash(&self) -> Option<[u8; 32]> {
+        self.ledger.avatar_hash_by_id(&self.my_member_id())
+    }
+
+    /// Every identity whose current avatar we know, as
+    /// `(IdentityId bytes, blob hash)` — for a client's avatar cache.
+    pub fn known_avatars(&self) -> Vec<([u8; 32], [u8; 32])> {
+        self.ledger.avatars()
+    }
+
     /// Publish a fresh liveness proof.
     pub async fn prove_liveness(&mut self, now_ms: u64) -> Result<(), CoreError> {
         let rec = LivenessProof::build(&self.identity, now_ms, self.pow)
@@ -1434,6 +1455,41 @@ impl Engine {
         now_ms: u64,
     ) -> Result<(), CoreError> {
         let rec = IdentityRevoke::build(&self.identity, reason).to_record(&self.identity, now_ms);
+        sync::submit_record(&mut self.client, &rec).await?;
+        self.gossip_record(&rec).await;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Publish a new global avatar. The image goes to the relay blob store and
+    /// a signed `IdentityProfile` record (kind 8) pointing at its SHA-256 goes
+    /// to the ledger, so it shows up for every peer everywhere — unlike a
+    /// nickname, an avatar is not per-server. The local replica picks the
+    /// record up on the next [`Engine::sync`].
+    pub async fn publish_avatar(&mut self, image: &[u8], now_ms: u64) -> Result<(), CoreError> {
+        if image.is_empty() || image.len() > AVATAR_MAX_BYTES {
+            return Err(CoreError::Channel("avatar image must be 1 byte..=256 KiB"));
+        }
+        let is_png = image.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        let is_jpeg = image.starts_with(&[0xff, 0xd8, 0xff]);
+        if !is_png && !is_jpeg {
+            return Err(CoreError::Channel("avatar image must be a PNG or JPEG"));
+        }
+        sync::put_blob(&mut self.client, image).await?;
+        self.submit_profile(Some(sha256(image)), now_ms).await
+    }
+
+    /// Clear the global avatar (the blob itself is left to expire).
+    pub async fn clear_avatar(&mut self, now_ms: u64) -> Result<(), CoreError> {
+        self.submit_profile(None, now_ms).await
+    }
+
+    async fn submit_profile(
+        &mut self,
+        avatar_hash: Option<[u8; 32]>,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let rec = IdentityProfile::new(avatar_hash).to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
         self.gossip_record(&rec).await;
         self.dirty = true;

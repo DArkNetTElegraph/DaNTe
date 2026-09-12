@@ -12,9 +12,12 @@ identities.
 > browser client (`dante serve`). The libp2p transport (DHT relay discovery,
 > redundant relay set, relay federation) is **on by default**, and the Tauri
 > desktop shell has its native layer — live startup progress, tray, OS
-> notifications — built for Linux, Windows and macOS in CI. Main gaps:
-> **nothing in the voice/media path or the desktop shell has been run by a
-> human yet**, and there is no group-call SFU. Wire formats still change
+> notifications — built for Linux, Windows and macOS in CI. Voice-channel
+> audio has now been verified end to end (two real browser peers exchanging
+> live RTP audio — see [Partial / caveats](#partial--caveats)). Main gaps:
+> **the desktop shell has never been opened, cross-NAT voice is unverified,
+> and 1:1/group calls have no browser mic path** (only voice channels do),
+> and there is no group-call SFU. Wire formats still change
 > without notice. See the
 > [roadmap](#roadmap) and [`docs/DESIGN.md`](docs/DESIGN.md) for detail.
 
@@ -66,13 +69,19 @@ above — it states precisely what is and is not protected.
 
 ### Partial / caveats
 
-- **Media paths not runtime-verified.** Voice-channel audio, screen share and
-  the SFrame transform are written to the standard browser WebRTC patterns but
-  have never been exercised in a real browser (none in the dev env / CI). The
-  Rust relay/signalling halves have e2e tests; the browser halves do not.
-- **Browser TURN.** The page now gets the relay's TURN credentials from
-  `/api/ice`, so cross-NAT calls can allocate a relay candidate — but this has
-  only been exercised against a local relay, never between two real NATs.
+- **Voice-channel audio: runtime-verified (2026-09-12).** Two independent
+  headless-Chromium peers (fake mic devices, real `getUserMedia` +
+  `RTCPeerConnection`), driven through the actual `dante serve` UI against a
+  local relay, joined the same voice channel and reached `connectionState:
+  "connected"` — and `RTCPeerConnection.getStats()` showed real inbound RTP
+  audio flowing both directions (~220 packets / ~18 KB each way in a few
+  seconds). This is the first time this code path has been exercised by
+  anything. Screen share and the SFrame transform share the same
+  renegotiation path but haven't been separately exercised yet.
+- **Browser TURN.** The page gets the relay's TURN credentials from
+  `/api/ice`, so cross-NAT calls can allocate a relay candidate — the above
+  test ran same-host (host candidates only), so this still hasn't been
+  exercised across two real NATs.
 - **1:1 and group call audio**: the engine has the full WebRTC + Opus transport,
   but `dante serve` has no browser microphone path for these — only voice
   channels do. Real mic / speaker for 1:1 needs the desktop shell.

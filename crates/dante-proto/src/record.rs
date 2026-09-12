@@ -39,6 +39,9 @@ pub enum RecordKind {
     Tombstone,
     /// Explicit, permanent revocation of an identity by its own key.
     IdentityRevoke,
+    /// Mutable public identity state owned by the live chain tip (currently
+    /// the global avatar blob hash).
+    IdentityProfile,
 }
 
 impl RecordKind {
@@ -52,6 +55,7 @@ impl RecordKind {
             Self::ServerDelist => 5,
             Self::Tombstone => 6,
             Self::IdentityRevoke => 7,
+            Self::IdentityProfile => 8,
         }
     }
 
@@ -65,6 +69,7 @@ impl RecordKind {
             5 => Self::ServerDelist,
             6 => Self::Tombstone,
             7 => Self::IdentityRevoke,
+            8 => Self::IdentityProfile,
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "RecordKind",
@@ -199,11 +204,12 @@ mod tests {
             RecordKind::ServerDelist,
             RecordKind::Tombstone,
             RecordKind::IdentityRevoke,
+            RecordKind::IdentityProfile,
         ] {
             assert_eq!(RecordKind::from_u8(k.as_u8()).unwrap(), k);
         }
         assert!(RecordKind::from_u8(0).is_err());
-        assert!(RecordKind::from_u8(8).is_err());
+        assert!(RecordKind::from_u8(9).is_err());
     }
 
     #[test]

@@ -21,8 +21,9 @@ between signed tree heads.
 
 Acceptance rules in one place: announce once per identity, liveness strictly
 forward on a weekly bucket, rotations move the chain tip and never reuse a key,
-revocation kills the chain and delists owned servers, and over-TTL records
-evaporate deterministically to identical tombstones on every replica.
+revocation kills the chain and delists owned servers, profile updates are
+tip-only and strictly ordered, and over-TTL records evaporate deterministically
+to identical tombstones on every replica.
 
 ## Used by
 

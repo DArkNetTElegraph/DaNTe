@@ -23,7 +23,7 @@ default feature; `--no-default-features` gives a relay-only client.
 
 - lifecycle: `Engine::connect` / `connect_with_progress`, `persist`, `sync`,
   `announce`, `announce_if_stale`, `prove_liveness`, `revoke_identity`,
-  `publish_prekeys`
+  `publish_prekeys`, `publish_avatar` / `clear_avatar`, `avatar_hash_of`
 - DMs: `send_dm`, `edit_dm`, `delete_dm`, `send_file`, `send_typing_dm`,
   `receive`, `receive_all`, `take_dm_edits`
 - servers & channels: `create_server`, `create_channel`,

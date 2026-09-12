@@ -60,7 +60,7 @@ above — it states precisely what is and is not protected.
 
 | Area | Status |
 |---|---|
-| **Identity** | Ed25519 + X25519 keypairs, Argon2id keystore + recovery backup, Crockford-base32 / BIP39 fingerprints, safety-number verification, memory-hard registration PoW, liveness proofs, key rotation, **key revocation**, self-chosen **usernames** (non-unique, carried on the ledger) |
+| **Identity** | Ed25519 + X25519 keypairs, Argon2id keystore + recovery backup, Crockford-base32 / BIP39 fingerprints, safety-number verification, memory-hard registration PoW, liveness proofs, key rotation, **key revocation**, self-chosen **usernames** (non-unique, carried on the ledger), **global avatars** (image in the blob store, hash signed onto the ledger) |
 | **Verifiable ledger** | Append-only RFC 6962 Merkle log, inclusion + consistency proofs, identity / rotation chains, server registry, deterministic 90-day evaporation GC |
 | **Relay + transport** | Client↔relay `Request`/`Response` wire over framed TCP **or** a libp2p `/dante/relay/1` stream; sealed-sender envelopes (day-rotating hint + size padding), mailbox store-and-forward, prekey + key-package directories, blob store, per-IP rate limiting, multi-relay failover, `dante-relay` binary with in-process zero-config TURN |
 | **1:1 DMs** | X3DH + Double Ratchet (FS + PCS), chunked encrypted file transfer, edit / delete, typing indicators, forwarding, block list, contacts / petnames, full-text search over local history |
@@ -169,7 +169,7 @@ above — it states precisely what is and is not protected.
   platforms, but produces no distributable bundle for any of them yet.
 - A **group-call SFU** for large voice rooms (full mesh only now, fine to ~8).
 - Tenor / Giphy GIF search.
-- Custom profiles / avatars.
+- Custom profiles.
 - Seeding a real `DEFAULT_BOOTSTRAP` (needs a deployed network).
 - Reproducible builds + signed releases; external security audit.
 

@@ -5,8 +5,8 @@
 //! `GET` / `POST`, grouped roughly as:
 //!
 //! - identity / onboarding: `/api/me`, `/api/state`, `/api/onboard`,
-//!   `/api/resolve`, `/api/usernames`, `/api/revoke`, `/api/safety`,
-//!   `/api/verify`
+//!   `/api/resolve`, `/api/usernames`, `/api/avatars`, `/api/revoke`,
+//!   `/api/safety`, `/api/verify`
 //! - messaging: `/api/send`, `/api/edit`, `/api/dm/edit`, `/api/forward`,
 //!   `/api/file`, `/api/recv-file`, `/api/messages`, `/api/stream` (SSE),
 //!   `/api/typing`, `/api/react`, `/api/pin`, `/api/unfurl`, `/api/embeds`
@@ -249,6 +249,10 @@ enum Cmd {
     /// `{ "<fingerprint>": "<username>", ... }` for every identity we know a
     /// self-asserted username for.
     Usernames { reply: oneshot::Sender<String> },
+    /// `{ "<fingerprint>": "<blob hash hex>", ... }` for every identity with a
+    /// global avatar in our ledger replica. The image itself is fetched from
+    /// the existing blob proxy (`/api/emoji?hash=`).
+    Avatars { reply: oneshot::Sender<String> },
     /// Channel invites we've received and not answered, as a ready JSON array.
     PendingInvites { reply: oneshot::Sender<String> },
     React {
@@ -2152,6 +2156,14 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 .collect();
             let _ = reply.send(serde_json::Value::Object(map).to_string());
         }
+        Cmd::Avatars { reply } => {
+            let map: serde_json::Map<String, serde_json::Value> = engine
+                .known_avatars()
+                .into_iter()
+                .map(|(id, hash)| (id_b32(&id), serde_json::Value::String(to_hex(&hash))))
+                .collect();
+            let _ = reply.send(serde_json::Value::Object(map).to_string());
+        }
         Cmd::PendingInvites { reply } => {
             let list: Vec<_> = engine
                 .pending_channel_invites()
@@ -2757,6 +2769,17 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         ("GET", "/api/usernames") => {
             let (tx, rx) = oneshot::channel();
             if shared.cmd.send(Cmd::Usernames { reply: tx }).await.is_err() {
+                return respond(&mut stream, 503, "text/plain", b"engine down").await;
+            }
+            match rx.await {
+                Ok(body) => respond(&mut stream, 200, "application/json", body.as_bytes()).await,
+                Err(_) => respond(&mut stream, 503, "text/plain", b"engine down").await,
+            }
+        }
+
+        ("GET", "/api/avatars") => {
+            let (tx, rx) = oneshot::channel();
+            if shared.cmd.send(Cmd::Avatars { reply: tx }).await.is_err() {
                 return respond(&mut stream, 503, "text/plain", b"engine down").await;
             }
             match rx.await {

@@ -1094,6 +1094,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dante-sfu"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "dante-voice",
+ "rtc",
+ "thiserror 2.0.20",
+ "tokio",
+ "webrtc",
+]
+
+[[package]]
 name = "dante-voice"
 version = "0.0.1"
 dependencies = [

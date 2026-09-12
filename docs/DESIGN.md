@@ -267,7 +267,9 @@ no relay at all (the relay is still the store-and-forward node — but the
 wire over a `/dante/relay/1` libp2p stream, redundant fan-out/merge across
 the discovered relay set, ledger gossip + startup backfill that federates
 relay replicas, and gossip acceleration for channel logs — see Phase 3);
-the group-call SFU that the Phase 7 SFrame layer is for; desktop release
+the group-call SFU **integration** that the Phase 7 SFrame layer is for (the
+media-plane component exists and is proven — see [`SFU.md`](SFU.md)); desktop
+release
 packaging (native menus, auto-update, signed installers). Phase 8 (stickers,
 soundboards, opt-in URL embeds, headless bot bridge) is done. The Tauri
 native layer itself — startup progress, tray, OS notifications — landed,
@@ -796,8 +798,11 @@ infrastructure. Reached. ---**
   Runtime-verified: under headless Chromium `sframeActive()` returned true on
   both peers with a shared epoch, so the transform is genuinely running rather
   than silently no-op'd.
-- **Still to build:** the group-call SFU itself. (Channels and group calls
-  both use MLS now; the pre-MLS sender-keys ratchet has been removed.)
+- **Still to build:** wiring the group-call SFU into the relay and clients —
+  signalling, authorization and the mesh/SFU switch. The media-plane component
+  (`crates/dante-sfu`) is implemented and proven (real 3-peer RTP forwarding);
+  see [`SFU.md`](SFU.md). Channels and group calls use MLS; the pre-MLS
+  sender-keys ratchet has been removed.
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).
 - SFU role in the server relay above ~5 participants; full mesh below (mesh done).
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.

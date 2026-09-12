@@ -1098,7 +1098,9 @@ name = "dante-relay-check"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "dante-crypto",
  "dante-net",
+ "dante-p2p",
  "serde",
  "serde_json",
  "tokio",

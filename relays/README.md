@@ -37,6 +37,31 @@ check runs, which isn't wired up yet (see [`registry.toml`](registry.toml)'s
 comments and `crates/dante-relay-check`'s module docs). They will show as
 unchecked, not as offline, until that lands.
 
+## Federation discovery
+
+Listing one relay in a federated cluster is enough to surface the whole
+cluster: the checker asks a listed relay what other p2p peers it knows about
+(its own `--p2p-bootstrap` config, plus anything that's federated with it
+since), then verifies each one the same way — a real `Ping` round trip, never
+just repeating what a relay claims about its peers. This follows outward a
+bounded number of hops, so one PR can list a cluster instead of needing one
+entry per relay in it.
+
+That also means a relay can end up published here without its operator ever
+opening a PR — only because some *other* relay in the same federation named
+it. If that's your relay and you don't want it listed, add its libp2p peer id
+(or exact address) under `[[exclude]]` in [`registry.toml`](registry.toml):
+
+```toml
+[[exclude]]
+addr = "12D3KooW..."   # the peer id after the last /p2p/ in its multiaddr
+```
+
+An excluded relay is never checked, never published, and never crawled past
+— it's a hard stop, not just a hidden row. Matching on the peer id (rather
+than a specific IP/port) means the exclusion still holds if that relay's
+address changes later.
+
 ## What gets checked
 
 A scheduled job connects to `addr` and sends the same `Ping` request a real

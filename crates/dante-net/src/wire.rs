@@ -94,6 +94,41 @@ pub enum Request {
     /// Ask the relay for known libp2p bootstrap multiaddrs (operator-seeded
     /// plus recently self-reported by other clients).
     GetP2pPeers,
+    /// Join (or create) the SFU room for a channel, carrying this client's SDP
+    /// offer. Possession of `room` — the same 32-byte capability as the
+    /// channel log — is the authorization; the relay never learns a media key.
+    /// The reply is [`Response::SfuAnswer`].
+    SfuJoin {
+        /// The channel id acting as the room capability.
+        room: [u8; 32],
+        /// This participant's SDP offer.
+        offer: String,
+    },
+    /// Trickle one ICE candidate to the SFU for the slot [`Request::SfuJoin`]
+    /// assigned.
+    SfuIce {
+        /// The room.
+        room: [u8; 32],
+        /// Our slot.
+        slot: u8,
+        /// The candidate (empty at end-of-gathering).
+        candidate: String,
+    },
+    /// Drain the SFU's ICE candidates for our slot. The reply is
+    /// [`Response::SfuIce`].
+    SfuPull {
+        /// The room.
+        room: [u8; 32],
+        /// Our slot.
+        slot: u8,
+    },
+    /// Leave the room; the SFU closes our leg and frees the slot.
+    SfuLeave {
+        /// The room.
+        room: [u8; 32],
+        /// Our slot.
+        slot: u8,
+    },
 }
 
 /// One ICE server entry (STUN or TURN). `username` / `credential` are empty
@@ -145,6 +180,16 @@ pub enum Response {
     Posted(u64),
     /// Reply to [`Request::GetP2pPeers`]: libp2p bootstrap multiaddrs.
     P2pPeers(Vec<String>),
+    /// Reply to [`Request::SfuJoin`]: the slot assigned to this participant
+    /// and the SFU's SDP answer.
+    SfuAnswer {
+        /// Slot assigned to this participant.
+        slot: u8,
+        /// The SFU's SDP answer.
+        answer: String,
+    },
+    /// Reply to [`Request::SfuPull`]: the SFU's ICE candidates for us.
+    SfuIce(Vec<String>),
 }
 
 const REQ_PING: u8 = 0;
@@ -166,6 +211,10 @@ const REQ_PUBLISH_KEYPKG: u8 = 15;
 const REQ_GET_KEYPKG: u8 = 16;
 const REQ_ANNOUNCE_P2P: u8 = 17;
 const REQ_GET_P2P_PEERS: u8 = 18;
+const REQ_SFU_JOIN: u8 = 19;
+const REQ_SFU_ICE: u8 = 20;
+const REQ_SFU_PULL: u8 = 21;
+const REQ_SFU_LEAVE: u8 = 22;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -181,6 +230,8 @@ const RES_ICE: u8 = 10;
 const RES_KEYPKG: u8 = 11;
 const RES_POSTED: u8 = 12;
 const RES_P2P_PEERS: u8 = 13;
+const RES_SFU_ANSWER: u8 = 14;
+const RES_SFU_ICE: u8 = 15;
 
 /// Upper bound on how many elements a length-prefixed list decoder will
 /// pre-reserve. A count field is untrusted `u32` wire data and each element is
@@ -338,6 +389,22 @@ impl Request {
             Request::GetP2pPeers => {
                 w.u8(REQ_GET_P2P_PEERS);
             }
+            Request::SfuJoin { room, offer } => {
+                w.u8(REQ_SFU_JOIN).fixed(room).string(offer);
+            }
+            Request::SfuIce {
+                room,
+                slot,
+                candidate,
+            } => {
+                w.u8(REQ_SFU_ICE).fixed(room).u8(*slot).string(candidate);
+            }
+            Request::SfuPull { room, slot } => {
+                w.u8(REQ_SFU_PULL).fixed(room).u8(*slot);
+            }
+            Request::SfuLeave { room, slot } => {
+                w.u8(REQ_SFU_LEAVE).fixed(room).u8(*slot);
+            }
         }
         w.into_vec()
     }
@@ -382,6 +449,23 @@ impl Request {
             REQ_GET_KEYPKG => Request::GetKeyPackage(r.fixed::<32>()?),
             REQ_ANNOUNCE_P2P => Request::AnnounceP2p(read_str_list(&mut r)?),
             REQ_GET_P2P_PEERS => Request::GetP2pPeers,
+            REQ_SFU_JOIN => Request::SfuJoin {
+                room: r.fixed::<32>()?,
+                offer: r.string()?,
+            },
+            REQ_SFU_ICE => Request::SfuIce {
+                room: r.fixed::<32>()?,
+                slot: r.u8()?,
+                candidate: r.string()?,
+            },
+            REQ_SFU_PULL => Request::SfuPull {
+                room: r.fixed::<32>()?,
+                slot: r.u8()?,
+            },
+            REQ_SFU_LEAVE => Request::SfuLeave {
+                room: r.fixed::<32>()?,
+                slot: r.u8()?,
+            },
             REQ_FETCH => {
                 let n = r.u32()? as usize;
                 if n > r.remaining() {
@@ -429,6 +513,10 @@ impl Request {
             Request::GetKeyPackage(_) => "GetKeyPackage",
             Request::AnnounceP2p(_) => "AnnounceP2p",
             Request::GetP2pPeers => "GetP2pPeers",
+            Request::SfuJoin { .. } => "SfuJoin",
+            Request::SfuIce { .. } => "SfuIce",
+            Request::SfuPull { .. } => "SfuPull",
+            Request::SfuLeave { .. } => "SfuLeave",
         }
     }
 }
@@ -512,6 +600,13 @@ impl Response {
                 w.u8(RES_P2P_PEERS);
                 write_str_list(&mut w, addrs);
             }
+            Response::SfuAnswer { slot, answer } => {
+                w.u8(RES_SFU_ANSWER).u8(*slot).string(answer);
+            }
+            Response::SfuIce(candidates) => {
+                w.u8(RES_SFU_ICE);
+                write_str_list(&mut w, candidates);
+            }
         }
         w.into_vec()
     }
@@ -560,6 +655,11 @@ impl Response {
             }),
             RES_POSTED => Response::Posted(r.u64()?),
             RES_P2P_PEERS => Response::P2pPeers(read_str_list(&mut r)?),
+            RES_SFU_ANSWER => Response::SfuAnswer {
+                slot: r.u8()?,
+                answer: r.string()?,
+            },
+            RES_SFU_ICE => Response::SfuIce(read_str_list(&mut r)?),
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -623,6 +723,23 @@ mod tests {
         ]));
         rt_req(Request::AnnounceP2p(vec![]));
         rt_req(Request::GetP2pPeers);
+        rt_req(Request::SfuJoin {
+            room: [10u8; 32],
+            offer: "v=0\r\n".into(),
+        });
+        rt_req(Request::SfuIce {
+            room: [10u8; 32],
+            slot: 3,
+            candidate: "candidate:1 1 udp 1 127.0.0.1 1 typ host".into(),
+        });
+        rt_req(Request::SfuPull {
+            room: [10u8; 32],
+            slot: 3,
+        });
+        rt_req(Request::SfuLeave {
+            room: [10u8; 32],
+            slot: 3,
+        });
     }
 
     #[test]
@@ -649,6 +766,14 @@ mod tests {
             "/ip4/1.2.3.4/tcp/4001/p2p/z".into()
         ]));
         rt_res(Response::P2pPeers(vec![]));
+        rt_res(Response::SfuAnswer {
+            slot: 2,
+            answer: "v=0\r\n".into(),
+        });
+        rt_res(Response::SfuIce(vec![
+            "candidate:1 1 udp 1 127.0.0.1 1 typ host".into(),
+            String::new(),
+        ]));
         rt_res(Response::IceConfig(vec![
             IceCfg {
                 urls: vec!["stun:stun.example.org:3478".into()],

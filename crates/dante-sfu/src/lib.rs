@@ -270,6 +270,27 @@ impl Sfu {
         self.peers.iter().filter(|p| p.is_some()).count()
     }
 
+    /// Whether no participant occupies any slot.
+    pub fn is_empty(&self) -> bool {
+        self.peers.iter().all(Option::is_none)
+    }
+
+    /// Close and free `slot`. Any packet already being forwarded to it just
+    /// fails its write and is dropped.
+    pub async fn remove_peer(&mut self, slot: usize) -> Result<(), SfuError> {
+        let peer = self
+            .peers
+            .get_mut(slot)
+            .and_then(Option::take)
+            .ok_or(SfuError::NoSuchPeer(slot))?;
+        self.outgoing
+            .lock()
+            .expect("SFU outgoing map poisoned")
+            .remove(&slot);
+        peer.pc.close().await?;
+        Ok(())
+    }
+
     /// Admit the next participant. `offer_sdp` is the participant's offer;
     /// returns the slot it was given and the answer SDP to hand back. ICE
     /// candidates for it arrive on the [`Sfu::new`] event receiver.

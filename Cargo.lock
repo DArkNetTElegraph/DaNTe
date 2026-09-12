@@ -1072,6 +1072,8 @@ dependencies = [
  "dante-net",
  "dante-p2p",
  "dante-proto",
+ "dante-sfu",
+ "dante-voice",
  "tokio",
  "tracing",
  "tracing-subscriber",

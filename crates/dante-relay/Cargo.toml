@@ -18,6 +18,10 @@ default = ["p2p"]
 # federate the ledger with sibling relays. On by default; build with
 # `--no-default-features` for a TCP-only relay with no libp2p tree.
 p2p = ["dep:dante-p2p", "dante-net/p2p"]
+# Host the group-call SFU signalling (`SfuJoin`/`SfuIce`/`SfuPull`/`SfuLeave`).
+# Off by default: the media component is proven but the client integration is
+# not shipped, and this pulls the WebRTC tree into the relay binary.
+sfu = ["dep:dante-sfu"]
 
 [dependencies]
 dante-crypto.workspace = true
@@ -27,6 +31,7 @@ dante-ledger.workspace = true
 dante-net.workspace = true
 dante-dm.workspace = true
 dante-p2p = { workspace = true, optional = true }
+dante-sfu = { workspace = true, optional = true }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -36,6 +41,7 @@ turn = "0.17"
 webrtc-util = "0.17"
 
 [dev-dependencies]
+dante-voice = { path = "../dante-voice" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 
 [lints.rust]

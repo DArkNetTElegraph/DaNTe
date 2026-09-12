@@ -1,0 +1,65 @@
+name: Relay status
+
+# Checks every relay in relays/registry.toml and publishes a static status
+# page to the gh-pages branch (served via GitHub Pages). Nothing here scans
+# or discovers relays — the registry is the only input, and it is only ever
+# changed by a human PR. See relays/README.md.
+#
+# A relay being offline is expected, ordinary, published data — not a CI
+# failure. This workflow only fails (and only blocks nothing, since it never
+# gates a PR) if the registry itself is malformed or the check tool errors.
+
+on:
+  schedule:
+    # Every 30 minutes. Cheap: one TCP round trip per listed relay, run from
+    # GitHub's own infrastructure — a genuine external-reachability check,
+    # which is the whole point (see relays/README.md's "What gets checked").
+    - cron: "*/30 * * * *"
+  push:
+    branches: [main]
+    paths:
+      - "relays/registry.toml"
+      - "relays/site/**"
+      - "crates/dante-relay-check/**"
+      - ".github/workflows/relay-status.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-publish:
+    name: Check relays and publish the status page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # This job only needs dante-relay-check and its (small) dependency
+          # tree, not the workspace's heavier crates — a distinct cache key
+          # keeps it from fighting the main CI job's cache for space.
+          key: relay-check
+
+      - name: Build the checker
+        run: cargo build -p dante-relay-check
+
+      - name: Check every registered relay
+        run: |
+          mkdir -p _site
+          cp relays/site/index.html _site/index.html
+          ./target/debug/dante-relay-check relays/registry.toml _site/status.json
+          cat _site/status.json
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@4f9cc6602d3f66b9c108549d475ec49e8ef4d45e # v4.0.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: _site
+          publish_branch: gh-pages
+          # Every run replaces the page wholesale — status.json only ever
+          # reflects the most recent check, there is no history to preserve.
+          keep_files: false

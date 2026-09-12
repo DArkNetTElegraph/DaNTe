@@ -14,6 +14,7 @@ members = [
     "crates/dante-cli",
     "crates/dante-voice",
     "crates/dante-p2p",
+    "crates/dante-relay-check",
 ]
 # dante-p2p pulls the large libp2p tree and is only reachable through the
 # optional `p2p` feature of dante-core / dante-cli. Keep it out of the default
@@ -32,6 +33,7 @@ default-members = [
     "crates/dante-core",
     "crates/dante-cli",
     "crates/dante-voice",
+    "crates/dante-relay-check",
 ]
 
 [workspace.package]

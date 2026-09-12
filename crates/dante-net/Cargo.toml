@@ -17,8 +17,6 @@ p2p = ["dep:dante-p2p"]
 [dependencies]
 dante-crypto.workspace = true
 dante-proto.workspace = true
-dante-identity.workspace = true
-dante-ledger.workspace = true
 dante-p2p = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true

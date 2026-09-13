@@ -28,7 +28,11 @@ use dante_ledger::{
     Ledger, LedgerParams, MemoryStore,
 };
 use dante_mls::{self as mls};
-use dante_net::{sync, transport::Client, wire::keypkg_publish_challenge};
+use dante_net::{
+    sync,
+    transport::Client,
+    wire::{self, keypkg_publish_challenge},
+};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
 use dante_voice::{Call, CallEvent, CallState, IceServer};
 
@@ -591,6 +595,11 @@ pub struct Engine {
     /// `SEEN_CAP` drops the oldest tags rather than a random subset (`HashSet`
     /// iteration order is randomized per process).
     seen_envelopes_order: std::collections::VecDeque<[u8; 32]>,
+    /// Last `SetChannelRoster` version we sent per channel, ephemeral (not
+    /// persisted — restarting just resumes from wall-clock time, which the
+    /// relay's monotonic-version check tolerates fine; see
+    /// `push_channel_roster`).
+    channel_roster_version: HashMap<[u8; 32], u64>,
     history: Vec<HistoryEntry>,
     channel_history: Vec<ChannelHistoryEntry>,
     /// Channels the host removed us from since the last `take_evicted_channels`
@@ -918,6 +927,7 @@ impl Engine {
             hosted: HashMap::new(),
             seen_envelopes: HashSet::new(),
             seen_envelopes_order: std::collections::VecDeque::new(),
+            channel_roster_version: HashMap::new(),
             history: Vec::new(),
             channel_history: Vec::new(),
             evicted_channels: Vec::new(),
@@ -1637,12 +1647,72 @@ impl Engine {
         channel_id: &[u8; 32],
         frame: &[u8],
     ) -> Result<u64, CoreError> {
-        let seq = sync::post_to_channel(&mut self.client, channel_id, frame).await?;
+        let me = self.my_member_id();
+        let sig = self
+            .identity
+            .sign(&wire::post_to_channel_challenge(channel_id, &me, frame));
+        let seq = sync::post_to_channel(&mut self.client, channel_id, frame, &me, sig).await?;
         #[cfg(feature = "p2p")]
         if let Some(p2p) = &self.p2p {
             p2p.publish_channel(channel_id, seq, frame).await;
         }
         Ok(seq)
+    }
+
+    /// Tell the relay who currently belongs to `channel_id`, so it can gate
+    /// [`Engine::post_channel_frame`] — knowing `channel_id` (a shared
+    /// 32-byte value) is no longer enough to write to it, the poster must
+    /// actually be in this list. Host-only (a no-op if we don't host this
+    /// channel's server); call after any change to `ch.roster` (add, remove,
+    /// or creation).
+    ///
+    /// Returns the `Result` rather than swallowing it: at channel creation
+    /// this is the very first roster the relay ever sees for `channel_id`, so
+    /// a silently-lost push here would leave the channel permanently
+    /// unpostable (relay refuses everyone — "no registered membership" — with
+    /// no later mutation ever expected to fix it). Callers past creation, for
+    /// whom the channel already has *some* roster, may still choose to treat
+    /// a failure as best-effort.
+    async fn push_channel_roster(
+        &mut self,
+        channel_id: &[u8; 32],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let Some(server_root) = self.channels.get(channel_id).map(|c| c.info.server_root) else {
+            return Ok(());
+        };
+        let Some(h) = self.hosted.get(&server_root) else {
+            return Ok(()); // not our server to police
+        };
+        let root = h.root.clone();
+        let members: Vec<[u8; 32]> = self
+            .channels
+            .get(channel_id)
+            .map(|c| c.roster.iter().copied().collect())
+            .unwrap_or_default();
+        // The relay requires a strictly increasing version per channel to
+        // reject a replayed stale roster (e.g. one from before a kick).
+        // Wall-clock ms is monotonic across restarts (unlike an in-memory
+        // counter, which would reset to 0 and get refused by a relay that
+        // already has a higher version stored); bumping past our own last
+        // value covers the rare case of two pushes landing in the same ms.
+        let last = self.channel_roster_version.get(channel_id).copied();
+        let version = now_ms.max(last.unwrap_or(0) + 1);
+        self.channel_roster_version.insert(*channel_id, version);
+        let root_pub = root.public().to_bytes();
+        let sig = root.sign(&wire::channel_roster_challenge(
+            channel_id, &root_pub, version, &members,
+        ));
+        sync::set_channel_roster(
+            &mut self.client,
+            channel_id,
+            &root_pub,
+            version,
+            members,
+            sig,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Test hook: pretend a `(seq, frame)` for `channel_id` arrived over
@@ -2859,7 +2929,7 @@ impl Engine {
     /// `password`, if given, content-protects the channel: every relay-log
     /// frame is wrapped in an outer AEAD keyed by `Argon2id(password)`, so the
     /// `channel_id` alone (e.g. leaked to a relay) does not grant read access.
-    pub fn create_channel(
+    pub async fn create_channel(
         &mut self,
         server_root: &[u8; 32],
         name: &str,
@@ -2867,21 +2937,23 @@ impl Engine {
         password: Option<&str>,
     ) -> Result<[u8; 32], CoreError> {
         self.create_channel_inner(server_root, name, private, password, false)
+            .await
     }
 
     /// Create a **voice** channel: members join a persistent group call keyed by
     /// the channel id ([`join_voice_channel`](Engine::join_voice_channel))
     /// instead of exchanging text.
-    pub fn create_voice_channel(
+    pub async fn create_voice_channel(
         &mut self,
         server_root: &[u8; 32],
         name: &str,
         private: bool,
     ) -> Result<[u8; 32], CoreError> {
         self.create_channel_inner(server_root, name, private, None, true)
+            .await
     }
 
-    fn create_channel_inner(
+    async fn create_channel_inner(
         &mut self,
         server_root: &[u8; 32],
         name: &str,
@@ -2929,6 +3001,19 @@ impl Engine {
             .channels
             .push(channel_id);
         self.dirty = true;
+        // The very first roster the relay ever sees for this channel_id — if
+        // this is lost, no client (including us) could ever post here, so
+        // unlike later roster pushes this one is not best-effort.
+        //
+        // create_channel_inner (unlike the mutation paths below) has no
+        // caller-supplied `now_ms` to reuse, and this is purely a monotonic
+        // anti-replay counter seed, not app logic — a real wall-clock read
+        // here doesn't affect anything test-deterministic.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.push_channel_roster(&channel_id, now).await?;
         Ok(channel_id)
     }
 
@@ -3089,6 +3174,10 @@ impl Engine {
                 ch.log_key,
             )
         };
+        // Best-effort: the channel already has some roster registered (this
+        // isn't its first ever), so a transient failure here just means the
+        // new member's post might briefly be refused until the next push.
+        let _ = self.push_channel_roster(channel_id, now_ms).await;
 
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_COMMIT, &commit);
         self.post_channel_frame(channel_id, &frame).await?;
@@ -3349,6 +3438,13 @@ impl Engine {
             hs.commit
         };
         self.dirty = true;
+        // Not best-effort: this is what actually stops the removed member
+        // from posting. MLS removal above already stops them from *reading*
+        // regardless, but leaving the old roster in place at the relay would
+        // let them keep writing until some unrelated later push happens to
+        // refresh it — silently reopening exactly the gap this feature
+        // closes.
+        self.push_channel_roster(channel_id, now_ms).await?;
 
         let frame = self.wrap_channel_frame(channel_id, channel::FRAME_COMMIT, &commit);
         self.post_channel_frame(channel_id, &frame).await?;

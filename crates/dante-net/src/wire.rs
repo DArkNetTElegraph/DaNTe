@@ -43,11 +43,46 @@ pub enum Request {
     /// Append an (opaque, E2E-encrypted) message to a channel's log. The blob
     /// is a `dante-core` channel frame (an MLS application message or Commit);
     /// the relay never decrypts it.
+    ///
+    /// `identity` is the poster's own identity id; `sig` is their signature
+    /// over [`post_to_channel_challenge`], checked against the ledger's
+    /// current signing key for `identity`. The relay also requires `identity`
+    /// to appear in the channel's current roster (see
+    /// [`Request::SetChannelRoster`]) — knowing `channel_id` alone is no
+    /// longer enough to write to it.
     PostToChannel {
         /// The channel id (a shared 32-byte capability).
         channel_id: [u8; 32],
         /// The opaque channel-log frame.
         blob: Vec<u8>,
+        /// The poster's identity id.
+        identity: [u8; 32],
+        /// `identity`'s signature over [`post_to_channel_challenge`].
+        sig: [u8; 64],
+    },
+    /// Replace the relay's record of who currently belongs to `channel_id`.
+    /// Sent by the channel's host every time membership changes (a member is
+    /// added or removed) — the roster is a full replacement each time, not a
+    /// delta. `sig` is `server_root`'s own Ed25519 signature over
+    /// [`channel_roster_challenge`] — self-verifying, no ledger lookup
+    /// needed, the same trust anchor that already signs `ServerPolicy`. The
+    /// first `SetChannelRoster` for a given `channel_id` binds it to
+    /// `server_root`; a later one naming a different `server_root` for the
+    /// same `channel_id` is refused. `version` must strictly increase each
+    /// time, so a stale roster (e.g. replaying one from before a kick) can't
+    /// be replayed to re-admit a removed member.
+    SetChannelRoster {
+        /// The channel this roster applies to.
+        channel_id: [u8; 32],
+        /// The channel's server's root key — the signer, and (on first use)
+        /// what `channel_id` becomes permanently bound to.
+        server_root: [u8; 32],
+        /// Strictly increasing per `channel_id`.
+        version: u64,
+        /// The full current membership, replacing whatever was stored.
+        members: Vec<[u8; 32]>,
+        /// `server_root`'s signature over [`channel_roster_challenge`].
+        sig: [u8; 64],
     },
     /// Read a channel's log from `since_seq` (exclusive).
     FetchChannel {
@@ -243,6 +278,7 @@ const REQ_SFU_ICE: u8 = 20;
 const REQ_SFU_PULL: u8 = 21;
 const REQ_SFU_LEAVE: u8 = 22;
 const REQ_UNFURL: u8 = 23;
+const REQ_SET_CHANNEL_ROSTER: u8 = 24;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -359,6 +395,63 @@ fn read_blob_list(r: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, WireError> {
     Ok(out)
 }
 
+fn write_id_list(w: &mut Writer, ids: &[[u8; 32]]) {
+    w.u32(ids.len() as u32);
+    for id in ids {
+        w.fixed(id);
+    }
+}
+
+fn read_id_list(r: &mut Reader<'_>) -> Result<Vec<[u8; 32]>, WireError> {
+    let n = r.u32()? as usize;
+    if n > r.remaining() {
+        return Err(WireError::LengthTooLarge(n as u64));
+    }
+    let mut out = Vec::with_capacity(n.min(LIST_PREALLOC_CAP));
+    for _ in 0..n {
+        out.push(r.fixed::<32>()?);
+    }
+    Ok(out)
+}
+
+/// Domain-separated so a signature minted for this can't be replayed as a
+/// signature over anything else `identity` signs.
+const POST_TO_CHANNEL_DOMAIN: &[u8] = b"dante/relay-write/post-to-channel/v1";
+
+/// The bytes [`Request::PostToChannel`]'s `sig` covers: `channel_id`,
+/// `identity`, and the frame itself, so a signature can't be replayed onto a
+/// different channel, a different poster, or a different frame.
+pub fn post_to_channel_challenge(
+    channel_id: &[u8; 32],
+    identity: &[u8; 32],
+    blob: &[u8],
+) -> [u8; 32] {
+    let mut w = Writer::new();
+    w.fixed(channel_id).fixed(identity).bytes(blob);
+    dante_crypto::hash::sha256_parts(&[POST_TO_CHANNEL_DOMAIN, &w.into_vec()])
+}
+
+/// Domain-separated so a signature minted for this can't be replayed as a
+/// signature over anything else `server_root` signs (it also signs
+/// `ServerPolicy` and `ServerRegister`).
+const CHANNEL_ROSTER_DOMAIN: &[u8] = b"dante/relay-write/channel-roster/v1";
+
+/// The bytes [`Request::SetChannelRoster`]'s `sig` covers: `channel_id`,
+/// `server_root`, `version`, and the full member list, so a signature can't
+/// be replayed onto a different channel, a different server, or an older
+/// (e.g. pre-kick) membership snapshot.
+pub fn channel_roster_challenge(
+    channel_id: &[u8; 32],
+    server_root: &[u8; 32],
+    version: u64,
+    members: &[[u8; 32]],
+) -> [u8; 32] {
+    let mut w = Writer::new();
+    w.fixed(channel_id).fixed(server_root).u64(version);
+    write_id_list(&mut w, members);
+    dante_crypto::hash::sha256_parts(&[CHANNEL_ROSTER_DOMAIN, &w.into_vec()])
+}
+
 impl Request {
     /// Canonical encoding.
     pub fn encode(&self) -> Vec<u8> {
@@ -398,8 +491,31 @@ impl Request {
             Request::GetBlob(hash) => {
                 w.u8(REQ_GET_BLOB).fixed(hash);
             }
-            Request::PostToChannel { channel_id, blob } => {
-                w.u8(REQ_POST_CHANNEL).fixed(channel_id).bytes(blob);
+            Request::PostToChannel {
+                channel_id,
+                blob,
+                identity,
+                sig,
+            } => {
+                w.u8(REQ_POST_CHANNEL)
+                    .fixed(channel_id)
+                    .bytes(blob)
+                    .fixed(identity)
+                    .fixed(sig);
+            }
+            Request::SetChannelRoster {
+                channel_id,
+                server_root,
+                version,
+                members,
+                sig,
+            } => {
+                w.u8(REQ_SET_CHANNEL_ROSTER)
+                    .fixed(channel_id)
+                    .fixed(server_root)
+                    .u64(*version);
+                write_id_list(&mut w, members);
+                w.fixed(sig);
             }
             Request::FetchChannel {
                 channel_id,
@@ -478,6 +594,15 @@ impl Request {
             REQ_POST_CHANNEL => Request::PostToChannel {
                 channel_id: r.fixed::<32>()?,
                 blob: r.bytes()?.to_vec(),
+                identity: r.fixed::<32>()?,
+                sig: r.fixed::<64>()?,
+            },
+            REQ_SET_CHANNEL_ROSTER => Request::SetChannelRoster {
+                channel_id: r.fixed::<32>()?,
+                server_root: r.fixed::<32>()?,
+                version: r.u64()?,
+                members: read_id_list(&mut r)?,
+                sig: r.fixed::<64>()?,
             },
             REQ_FETCH_CHANNEL => Request::FetchChannel {
                 channel_id: r.fixed::<32>()?,
@@ -556,6 +681,7 @@ impl Request {
             Request::PutBlob(_) => "PutBlob",
             Request::GetBlob(_) => "GetBlob",
             Request::PostToChannel { .. } => "PostToChannel",
+            Request::SetChannelRoster { .. } => "SetChannelRoster",
             Request::FetchChannel { .. } => "FetchChannel",
             Request::PostSignal { .. } => "PostSignal",
             Request::FetchSignals { .. } => "FetchSignals",
@@ -774,6 +900,22 @@ mod tests {
         rt_req(Request::PostToChannel {
             channel_id: [3u8; 32],
             blob: vec![1, 2],
+            identity: [11u8; 32],
+            sig: [12u8; 64],
+        });
+        rt_req(Request::SetChannelRoster {
+            channel_id: [3u8; 32],
+            server_root: [13u8; 32],
+            version: 1,
+            members: vec![[11u8; 32], [14u8; 32]],
+            sig: [15u8; 64],
+        });
+        rt_req(Request::SetChannelRoster {
+            channel_id: [3u8; 32],
+            server_root: [13u8; 32],
+            version: 2,
+            members: vec![],
+            sig: [15u8; 64],
         });
         rt_req(Request::FetchChannel {
             channel_id: [4u8; 32],

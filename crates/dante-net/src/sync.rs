@@ -152,16 +152,25 @@ pub async fn get_blob(client: &mut Client, hash: &[u8; 32]) -> Result<Option<Vec
 }
 
 /// Append an encoded channel message to a channel's relay log. Returns the
-/// relay-log `seq` the message was assigned.
+/// relay-log `seq` the message was assigned. `sig` must be `identity`'s own
+/// signature over
+/// [`crate::wire::post_to_channel_challenge`]`(channel_id, identity, blob)` —
+/// the relay checks it against the ledger's current signing key for
+/// `identity`, and also requires `identity` to be in the channel's current
+/// roster (see [`set_channel_roster`]).
 pub async fn post_to_channel(
     client: &mut Client,
     channel_id: &[u8; 32],
     blob: &[u8],
+    identity: &[u8; 32],
+    sig: [u8; 64],
 ) -> Result<u64, NetError> {
     match client
         .request(&Request::PostToChannel {
             channel_id: *channel_id,
             blob: blob.to_vec(),
+            identity: *identity,
+            sig,
         })
         .await?
     {
@@ -169,6 +178,34 @@ pub async fn post_to_channel(
         // Tolerate an older relay that still answers `Ok`.
         Response::Ok => Ok(0),
         other => Err(NetError::Peer(format!("PostToChannel: {other:?}"))),
+    }
+}
+
+/// Replace the relay's record of who currently belongs to `channel_id`. Sent
+/// by the channel's host every time membership changes; `sig` must be
+/// `server_root`'s own signature over
+/// [`crate::wire::channel_roster_challenge`]`(channel_id, server_root,
+/// version, &members)`.
+pub async fn set_channel_roster(
+    client: &mut Client,
+    channel_id: &[u8; 32],
+    server_root: &[u8; 32],
+    version: u64,
+    members: Vec<[u8; 32]>,
+    sig: [u8; 64],
+) -> Result<(), NetError> {
+    match client
+        .request(&Request::SetChannelRoster {
+            channel_id: *channel_id,
+            server_root: *server_root,
+            version,
+            members,
+            sig,
+        })
+        .await?
+    {
+        Response::Ok => Ok(()),
+        other => Err(NetError::Peer(format!("SetChannelRoster: {other:?}"))),
     }
 }
 

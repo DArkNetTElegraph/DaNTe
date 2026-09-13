@@ -1861,6 +1861,7 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 // removed or converted — the always-there default.
                 engine
                     .create_channel(&root, "general", true, None)
+                    .await
                     .map_err(|e| e.to_string())?;
                 if !password.is_empty() {
                     engine
@@ -1881,10 +1882,12 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let r = match parse_fingerprint(&server) {
                 Ok(root) if voice => engine
                     .create_voice_channel(&root, &name, true)
+                    .await
                     .map(|id| id_b32(&id))
                     .map_err(|e| e.to_string()),
                 Ok(root) => engine
                     .create_channel(&root, &name, true, None)
+                    .await
                     .map(|id| id_b32(&id))
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),

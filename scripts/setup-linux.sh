@@ -8,7 +8,7 @@
 # apps/dante-desktop/README.md ("Prerequisites") — read those if you'd rather
 # do it by hand, or if this script refuses your distro.
 #
-# Usage: scripts/setup-linux.sh [OPTIONS]
+# Usage: bash scripts/setup-linux.sh [OPTIONS]
 set -euo pipefail
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -25,7 +25,7 @@ die()  { printf '%s==>%s %s\n' "$c_err" "$c_off" "$1" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: scripts/setup-linux.sh [OPTIONS]
+Usage: bash scripts/setup-linux.sh [OPTIONS]
 
   --cli          Build & run the CLI + `dante serve` web UI. Default when
                  the terminal isn't interactive (e.g. piped from curl); asked

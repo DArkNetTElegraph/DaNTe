@@ -87,7 +87,16 @@ pub async fn search(provider: &Provider, query: &str) -> Result<Vec<GifResult>, 
         ),
     };
     let deadline = Instant::now() + SEARCH_BUDGET;
-    let (_, body, _) = fetch(&url, deadline, MAX_SEARCH_BODY, Some("application/json")).await?;
+    // The search URL is one we built ourselves from the provider's own fixed
+    // API host, not client-supplied — no host allowlist needed on this call.
+    let (_, body, _) = fetch(
+        &url,
+        deadline,
+        MAX_SEARCH_BODY,
+        Some("application/json"),
+        None,
+    )
+    .await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(match provider {
         Provider::Tenor(_) => parse_tenor(&json),
@@ -167,13 +176,16 @@ fn allowed_host(url: &str) -> bool {
 }
 
 /// Fetch a chosen result's full GIF bytes, ready to store as a blob. Rejects
-/// anything not on the CDN allowlist or over [`MAX_GIF_BYTES`].
+/// anything not on the CDN allowlist or over [`MAX_GIF_BYTES`] — the
+/// allowlist is enforced on every redirect hop, not just `url` itself, so a
+/// CDN host cannot hand the check off to an arbitrary one by redirecting.
 pub async fn fetch_gif(url: &str) -> Result<Vec<u8>, String> {
     if !allowed_host(url) {
         return Err("not a recognised GIF provider host".into());
     }
     let deadline = Instant::now() + FETCH_BUDGET;
-    let (_, body, content_type) = fetch(url, deadline, MAX_GIF_BYTES, None).await?;
+    let (_, body, content_type) =
+        fetch(url, deadline, MAX_GIF_BYTES, None, Some(allowed_host)).await?;
     if !content_type.starts_with("image/") {
         return Err(format!("unexpected content type: {content_type}"));
     }

@@ -4424,7 +4424,14 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             respond(&mut stream, 200, "application/json", b"{\"ok\":\"ok\"}").await
         }
 
-        ("GET", "/api/gifsearch/query") => {
+        // POST, not GET: a search sends the query text (and this machine's
+        // IP) to a third party, so it needs the same cross-origin/CSRF check
+        // every other state-**effecting** route gets (`request_is_local`
+        // exempts GET/HEAD as "not state-changing", which a bare `<img>` tag
+        // or a no-CORS fetch from any page could otherwise trigger silently
+        // whenever GIF search happens to be on) — same reasoning that made
+        // `/api/unfurl` a POST despite conceptually being a read too.
+        ("POST", "/api/gifsearch/query") => {
             let Some(provider) = &shared.gif_provider else {
                 return respond(
                     &mut stream,
@@ -4443,12 +4450,14 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 )
                 .await;
             }
-            let q = query
-                .split('&')
-                .find_map(|kv| kv.strip_prefix("q="))
-                .unwrap_or("");
-            let q = percent_decode(q);
-            match crate::gifsearch::search(provider, &q).await {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                q: String,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            match crate::gifsearch::search(provider, &r.q).await {
                 Ok(results) => {
                     let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
                     respond(&mut stream, 200, "application/json", json.as_bytes()).await

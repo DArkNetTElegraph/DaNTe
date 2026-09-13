@@ -952,15 +952,21 @@ infrastructure. Reached. ---**
   `crates/dante-cli/src/gifsearch.rs`. A search hits only the configured
   provider's own fixed API host (the query is the only client-controlled
   input); picking a result has `serve` fetch that one GIF (host-allowlisted
-  to the provider's CDN, size/time-capped, via the same SSRF-guarded HTTP
-  client `unfurl.rs` uses) and store it as a blob — `Engine::put_gif_blob`.
+  to the provider's CDN on every hop including a redirect, size/time-capped,
+  via the same SSRF-guarded HTTP client `unfurl.rs` uses) and store it as a
+  blob — `Engine::put_gif_blob`.
   Sent as an ordinary text message whose whole body is `gif:<sha256hex>` (no
   new `Content` kind, same convention as a sticker's `:name:` token, just
   without a per-server registration since a GIF pick is ad-hoc); the SPA
   renders that as a standalone image via `GET /api/gif?hash=`, and never
   re-contacts the provider on later views. `serve`: `GET /api/gifsearch`
-  (state) / `POST /api/gifsearch` (session toggle) / `GET
-  /api/gifsearch/query?q=` / `POST /api/gifsearch/pick`. SPA: a 🎬 composer
+  (state) / `POST /api/gifsearch` (session toggle) / `POST
+  /api/gifsearch/query` / `POST /api/gifsearch/pick` — `query` is a `POST`,
+  not the `GET` a search naturally suggests, because it has a real side
+  effect (contacting a third party with the query text); a `GET` would skip
+  the cross-origin check every state-**effecting** route gets, letting any
+  page silently trigger it via a bare `<img>` tag whenever the feature
+  happens to be on (same reasoning that made `/api/unfurl` a `POST`). SPA: a 🎬 composer
   button (shown only when available and opted in) opens a search box + result
   grid; a Settings toggle states the third-party-contact tradeoff before
   turning it on. See [`THREAT_MODEL.md`](THREAT_MODEL.md) §4.

@@ -62,7 +62,10 @@ distinct audio payload, all connected only to one `Sfu`:
   NACK/PLI propagation between legs (audio-only for now).
 - **Video / screen share**: forwards audio; video would take the same opaque
   path but is untested.
-- **Resource limits**: no cap on rooms, bandwidth or CPU.
+- **Resource limits**: a per-source bitrate cap drops packets a sender pushes
+  past its budget (protects other participants' fan-out from one flooding
+  sender), but there is no cap on rooms or CPU here — `dante-relay`'s `sfu`
+  feature caps concurrent rooms.
 - **SFrame-capability gating**: clients that cannot do SFrame would send
   plaintext Opus through an SFU — see the trust-boundary caveat in
   [`docs/SFU.md`](../../docs/SFU.md).

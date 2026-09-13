@@ -250,8 +250,8 @@ See the crate README for the exact status list.
   interceptors; it does not propagate NACK/PLI between legs. Audio at 64 kbps
   is tolerant, but this needs review before video/screen-share forwarding.
 - **Resource limits**: per-IP rate limiting, a room cap, offer/candidate size
-  limits and empty-room teardown are in; per-participant bitrate and fairness
-  are not.
+  limits, empty-room teardown and a per-source bitrate cap (drop, not queue,
+  past budget — see `dante-sfu`'s `SOURCE_BITRATE_CAP_BYTES_PER_SEC`) are in.
 - **Fallback behaviour** when an SFU dies mid-call (demote to mesh? drop the
   call?).
 - **Mixed-capability rooms over the limit** do not interconnect: a

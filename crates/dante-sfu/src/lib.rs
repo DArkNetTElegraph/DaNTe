@@ -28,7 +28,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use dante_net::ratelimit::TokenBucket;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
@@ -178,14 +180,40 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 
+/// Per-source forwarding budget: Opus at the FEC-heavy settings this SFU
+/// negotiates runs a little over 64 kbps, so this leaves generous headroom
+/// while still bounding what one participant (buggy, compromised, or
+/// deliberately abusive) can force the SFU to fan out to every other
+/// subscriber's downlink.
+const SOURCE_BITRATE_CAP_BYTES_PER_SEC: f64 = 32_000.0;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Forward every RTP packet received from `source` to each *other*
 /// subscriber's outgoing track for that source. Only the SSRC is rewritten;
 /// the payload (the SFrame ciphertext) is passed through byte for byte.
+///
+/// Packets beyond [`SOURCE_BITRATE_CAP_BYTES_PER_SEC`] for this source are
+/// dropped rather than forwarded: a single over-budget sender loses audio
+/// quality for itself, but never eats into another participant's fan-out.
 async fn forward_track(source: usize, track: Arc<dyn TrackRemote>, outgoing: OutgoingMap) {
+    let mut budget = TokenBucket::new(
+        SOURCE_BITRATE_CAP_BYTES_PER_SEC,
+        SOURCE_BITRATE_CAP_BYTES_PER_SEC,
+        now_ms(),
+    );
     while let Some(event) = track.poll().await {
         let TrackRemoteEvent::OnRtpPacket(mut pkt) = event else {
             continue;
         };
+        if !budget.try_take(now_ms(), pkt.payload.len() as f64) {
+            continue;
+        }
         pkt.header.ssrc = slot_ssrc(source);
 
         // Snapshot the destination tracks without holding a lock across an
@@ -382,5 +410,41 @@ impl Sfu {
         for peer in self.peers.iter().flatten() {
             let _ = peer.pc.close().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_bitrate_cap_admits_a_steady_sender_but_drops_a_flood() {
+        let mut budget = TokenBucket::new(
+            SOURCE_BITRATE_CAP_BYTES_PER_SEC,
+            SOURCE_BITRATE_CAP_BYTES_PER_SEC,
+            0,
+        );
+        // A steady sender at (just under) the cap, spread over a second in
+        // 20ms frames — the size a real Opus packet is — is never dropped.
+        let per_frame = (SOURCE_BITRATE_CAP_BYTES_PER_SEC / 50.0) * 0.9;
+        for tick in 1..=50u64 {
+            assert!(
+                budget.try_take(tick * 20, per_frame),
+                "frame {tick} should fit the budget"
+            );
+        }
+        // A sender blasting a whole second's budget in one packet gets some
+        // through and the rest dropped, not an unbounded burst forwarded.
+        let mut allowed = 0;
+        let mut dropped = 0;
+        for _ in 0..10 {
+            if budget.try_take(1_020, SOURCE_BITRATE_CAP_BYTES_PER_SEC) {
+                allowed += 1;
+            } else {
+                dropped += 1;
+            }
+        }
+        assert!(allowed <= 1, "at most one full-budget burst fits");
+        assert!(dropped > 0, "the flood is bounded, not forwarded in full");
     }
 }

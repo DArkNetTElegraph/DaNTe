@@ -44,8 +44,9 @@ With `--features sfu` the relay hosts group-call SFU rooms and serves
 negotiate one DTLS-SRTP connection each with the relay-side
 [`dante-sfu`](../dante-sfu/README.md), which forwards opaque RTP payloads.
 Authorization is possession of the 32-byte room id (the channel capability);
-the relay never holds a media key. Off by default because it pulls the WebRTC
-tree into the relay and the client integration is not shipped — see
+the relay never holds a media key. The browser SPA and the CLI/engine path
+both drive it (`dante serve --sfu`, `Engine::enable_sfu()`); off by default
+because it pulls the WebRTC dependency tree into the relay binary — see
 [`docs/SFU.md`](../../docs/SFU.md).
 
 ## Test

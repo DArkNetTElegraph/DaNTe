@@ -1,5 +1,16 @@
 use super::*;
 
+/// `key_package_identity` reads back exactly the identity a KeyPackage was
+/// published with — the check callers use to catch one published for a
+/// different identity than the peer it was fetched for.
+#[test]
+fn key_package_identity_reads_back_the_publisher() {
+    let alice = Member::create(b"alice", b"channel-1").unwrap();
+    let (_bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
+    assert_eq!(alice.key_package_identity(&bob_kp).unwrap(), b"bob");
+    assert_ne!(alice.key_package_identity(&bob_kp).unwrap(), b"alice");
+}
+
 /// Add two members to a founder's group; everyone lands in the same epoch with
 /// the same group-call key, and it rotates when a member leaves.
 #[test]

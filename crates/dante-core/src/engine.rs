@@ -2192,7 +2192,14 @@ impl Engine {
         let mut invited: Vec<[u8; 32]> = Vec::new();
         for m in &others {
             if let Ok(Some(bytes)) = sync::get_key_package(&mut self.client, m).await {
-                kps.push(mls::KeyPkg(bytes));
+                let kp = mls::KeyPkg(bytes);
+                // Nothing stops a client from publishing a KeyPackage whose
+                // credential names someone other than themselves; only add
+                // it under the roster slot it actually claims to be.
+                if mls_member.key_package_identity(&kp).ok().as_deref() != Some(m.as_slice()) {
+                    continue;
+                }
+                kps.push(kp);
                 invited.push(*m);
             }
         }
@@ -3049,13 +3056,26 @@ impl Engine {
             .ok_or(CoreError::Channel(
                 "that identity has no published MLS KeyPackage — they must connect first",
             ))?;
+        let kp = mls::KeyPkg(kp);
 
         let (commit, welcome, info, since_seq, server_root, log_key) = {
             let ch = self
                 .channels
                 .get_mut(channel_id)
                 .ok_or(CoreError::UnknownChannel)?;
-            let hs = ch.mls.add(&[mls::KeyPkg(kp)]).map_err(mls_err)?;
+            // The relay authenticates who is allowed to publish into a given
+            // identity's KeyPackage queue, but that says nothing about what
+            // credential the published KeyPackage itself names — nothing
+            // stops a client from publishing one crafted with someone else's
+            // identity bytes. Check it here, at the one place this KeyPackage
+            // is about to be trusted enough to add its holder to a group.
+            let credential = ch.mls.key_package_identity(&kp).map_err(mls_err)?;
+            if credential != peer_id.as_slice() {
+                return Err(CoreError::Channel(
+                    "fetched KeyPackage's credential doesn't match the identity it was fetched for",
+                ));
+            }
+            let hs = ch.mls.add(&[kp]).map_err(mls_err)?;
             let welcome = hs
                 .welcome
                 .ok_or_else(|| CoreError::Voice("MLS add produced no Welcome".into()))?;
@@ -6077,10 +6097,15 @@ impl Engine {
                         if let Ok(Some(kp)) =
                             sync::get_key_package(&mut self.client, &requester).await
                         {
-                            let hs = self
-                                .group_calls
-                                .get_mut(&channel_id)
-                                .and_then(|gc| gc.mls.add(&[mls::KeyPkg(kp)]).ok());
+                            let kp = mls::KeyPkg(kp);
+                            let hs = self.group_calls.get_mut(&channel_id).and_then(|gc| {
+                                if gc.mls.key_package_identity(&kp).ok().as_deref()
+                                    != Some(requester.as_slice())
+                                {
+                                    return None;
+                                }
+                                gc.mls.add(&[kp]).ok()
+                            });
                             if let Some(hs) = hs {
                                 if let Some(welcome) = hs.welcome {
                                     let _ = self

@@ -270,7 +270,14 @@ provide.
     it only adopts a gossiped KeyPackage when the local queue for that
     identity is empty and never overrides a locally-published one, but a
     malicious relay peer in the gossip mesh can still seed a first
-    KeyPackage for an identity that has never published one itself.
+    KeyPackage for an identity that has never published one itself. The
+    credential-on-use check below narrows this from an identity-forgery risk
+    to a narrower join-denial one: a forged gossip-seeded KeyPackage can
+    still occupy a victim's empty queue slot, but whoever tries to use it now
+    rejects it (credential mismatch) instead of adding the attacker under the
+    victim's name — so the residual harm is the victim's join attempt
+    failing, not impersonation. Signing gossip payloads (closing this
+    fully) is still a real follow-up, not attempted here.
   - **PostToChannel — still open.** The same unauthenticated-write pattern
     lets a removed channel member keep posting to (and, via oldest-first
     eviction past `MAX_CHANNEL_ENTRIES`, destroy the history of) a channel
@@ -280,19 +287,28 @@ provide.
     the prekey/KeyPackage fixes above, plus a fairness-aware eviction policy
     once writers are attributable.
 - **MLS `KeyPackage`s carry no binding to the DaNTe identity that published
-  them (found in the same audit, unresolved).** `dante-mls`'s
+  them (found in the same audit; the "check it on use" half is now fixed,
+  the deeper cryptographic binding is not).** `dante-mls`'s
   `publish_key_package` pairs caller-chosen credential bytes with a freshly
   generated, unrelated signature keypair; nothing signs the credential with
-  the publisher's `idk`, and the engine adds a fetched `KeyPackage` to a group
-  with no check that its credential equals the peer id it was fetched for.
-  This is now a narrower gap than before `PublishKeyPackages` required a
-  ledger-checked signature to publish at all (see above), but it is still
-  real insecure design, not just a hardening gap: a KeyPackage published
-  under a correctly-signed request can still carry a credential unrelated to
-  the signer. Impact is capped at join-denial plus a phantom roster
-  entry — the Welcome is still DM'd sealed to the real identity's
-  ledger-attested key, which an attacker cannot obtain — but the fix (sign
-  the credential with `idk`, check it on use) has not been attempted here.
+  the publisher's `idk`, so a client is still free to publish a KeyPackage
+  (under its own correctly-signed `PublishKeyPackages` request) whose
+  embedded credential names a different identity than the signer. What's
+  fixed: every place the engine is about to trust a fetched KeyPackage
+  enough to add its holder to a group (`mls_add_member`, `start_group_call`,
+  the `GroupCallJoinRequest` admit path) now calls `dante-mls`'s
+  `key_package_identity` and refuses the add if the embedded credential
+  doesn't match the peer id it was fetched for — closing the exploit path
+  the audit named ("the engine adds a fetched `KeyPackage` to a group with
+  no check that its credential equals the peer id it was fetched for") and
+  giving the still-open `ingest_gossiped_keypackage` gossip-bypass gap above
+  a real backstop: even a gossip-seeded KeyPackage with a forged credential
+  is now rejected at add-time rather than silently trusted. What's *not*
+  fixed: the credential still isn't cryptographically bound to `idk` at
+  publish time — a deeper, openmls-level protocol change (a custom
+  extension carrying an `idk` signature over the leaf key, verified by every
+  validator, not just DaNTe's own add path) that has not been attempted
+  here.
 
 ## 7. Cryptographic posture
 

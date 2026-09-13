@@ -137,13 +137,16 @@ provide.
    like clicking the link would. It sends no cookies, runs no JavaScript, caps
    size/time/redirects, and refuses any target that resolves to a non-public
    address (loopback, LAN, `169.254.169.254`, …) so a crafted link cannot turn
-   it into an SSRF probe. Enabling it also tells the relay nothing new. A
-   relay-side unfurler that hides the client IP is a possible future add, but
-   a real trust-model change, not a client tweak: it would mean the relay
-   itself makes outbound HTTP requests on a client's behalf — a new
-   capability an operator has to be willing to run, and a new thing for a
-   client to trust that operator with (which URLs it fetched, when). Not
-   attempted without that decision.
+   it into an SSRF probe. Enabling it also tells the relay nothing new.
+   **Decided: build a relay-side unfurler that hides the client IP.** It is a
+   real trust-model change, not a client tweak — the relay itself makes
+   outbound HTTP requests on a client's behalf, a new capability an operator
+   has to be willing to run, and a new thing for a client to trust that
+   operator with (which URLs it fetched, when). Following this project's own
+   pattern for every other capability that changes what a relay does or
+   sees (TURN, the `sfu` feature, GIF search) — **off by default, the
+   operator opts in explicitly** — not something a relay does just because
+   it can. Not yet built.
    **GIF search (Tenor/Giphy)** is the same posture: **opt-in and off by
    default**, and further gated on the operator having configured a provider
    API key at all (`TENOR_API_KEY` / `GIPHY_API_KEY`) — most relays and

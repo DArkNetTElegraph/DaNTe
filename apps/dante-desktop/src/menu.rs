@@ -10,7 +10,7 @@
 //! those — unlike the tray menu, which does need one for its own actions.
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{App, Manager};
+use tauri::App;
 
 /// Check for an update and log the result. Does not install one: the updater
 /// plugin is wired (see `apps/dante-desktop/Cargo.toml` and `tauri.conf.json`)

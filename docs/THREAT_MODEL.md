@@ -62,7 +62,7 @@ with no operator who can be compelled to surveil users**. Concretely:
 | Group (channel/voice) content confidentiality | A1, A2, A3, A5, A6, A8 | **Not** against A4 — a member-host is inside the group and sees plaintext by design. |
 | Group forward secrecy | A1–A3, A5, A6, A8; **partial** vs A7 | Channels and group calls each run one MLS group (RFC 9420); the MLS secret tree gives per-message forward secrecy. |
 | Group **post-compromise security** | A7 (after access ends) | MLS rekeys the whole group on every add / remove, and any member can force a rekey by committing an update — a compromised member's key stops being useful once the group next changes. |
-| Removed member loses access | A (the removed member) | The host commits an MLS remove; the group rekeys in O(log n) and the removed member is evicted (cannot process further messages). Re-admission works with a fresh KeyPackage. **Caveat (§6):** a removed member who still holds the (non-rotating) `channel_id` can still write to the channel's relay log, since that write is unauthenticated — they cannot read new content (MLS holds), but they can flood and, past the log's retention cap, evict genuine history. |
+| Removed member loses access | A (the removed member) | The host commits an MLS remove; the group rekeys in O(log n) and the removed member is evicted (cannot process further messages). Re-admission works with a fresh KeyPackage. The host also republishes the channel's relay-side roster (§6) with the member dropped, so they can no longer write to the log either — holding the (non-rotating) `channel_id` is no longer enough on its own. **Residual gap (§6):** the relay-to-relay gossip path for channel frames doesn't check this roster, so a malicious relay in the federation mesh (not an ordinary client) could still inject flooding/eviction frames that way. |
 | Group message authorship (insider forgery) | A4 / any member | MLS binds every application message to its sender's leaf signature key; another member cannot forge a message as someone else. Channel membership **commits** are additionally accepted only from the recorded host identity (`process_from`). |
 | Password-protected channel log | A3, and a leak of the `channel_id` capability | A channel created with a password wraps every relay-log frame in an outer XChaCha20-Poly1305 layer keyed by `Argon2id(password; server_root ‖ channel_id)`. A relay, or anyone who obtains only the `channel_id`, sees opaque blobs and cannot strip the wrapper. The wrapper key is static per `(channel, password)` and does not rotate with MLS epochs; a removed member still holds it but is MLS-evicted underneath, so cannot read the inner content. Never against A4 (a member has the password). Weaving the PSK into the MLS key schedule instead would add epoch rotation — a possible future hardening. |
 | Recipient authenticity | A2, A3, A6 | Only after out-of-band fingerprint / safety-number verification. Trust-on-first-use (TOFU) before that is vulnerable to A2/A6. |
@@ -243,8 +243,9 @@ provide.
   and a partition risk. Mitigate with many diverse addresses, DNS + in-repo
   distribution, and user-added peers.
 - **Relay directory writes are unauthenticated (found in a pre-alpha security
-  audit; `PublishPrekeys` and `PublishKeyPackages` are now fixed,
-  `PostToChannel` remains open).** `Request::PublishPrekeys`,
+  audit; all three of `PublishPrekeys`, `PublishKeyPackages`, and
+  `PostToChannel` are now fixed for the ordinary client-facing wire — see
+  each sub-bullet for what residual gaps remain).** `Request::PublishPrekeys`,
   `PublishKeyPackages`, and `PostToChannel` (`dante-relay/src/state.rs`) all
   originally derived the owning identity from attacker-supplied bytes with no
   signature check binding the writer to it.
@@ -278,14 +279,51 @@ provide.
     victim's name — so the residual harm is the victim's join attempt
     failing, not impersonation. Signing gossip payloads (closing this
     fully) is still a real follow-up, not attempted here.
-  - **PostToChannel — still open.** The same unauthenticated-write pattern
-    lets a removed channel member keep posting to (and, via oldest-first
-    eviction past `MAX_CHANNEL_ENTRIES`, destroy the history of) a channel
-    whose `channel_id` they still hold — directly weakening §4's "Removed
-    member loses access" row, which is stated there without this caveat.
-    Not yet fixed; needs the same kind of per-writer signature binding as
-    the prekey/KeyPackage fixes above, plus a fairness-aware eviction policy
-    once writers are attributable.
+  - **PostToChannel — fixed via a relay-side channel roster, not just a
+    signature.** A signature alone (`identity` + a per-post signature over
+    [`post_to_channel_challenge`], now required and checked against the
+    ledger the same way `PublishKeyPackages` is) proves *who* is posting but
+    not that they're *still a member* — the relay had no notion of channel
+    membership at all before this fix, so it couldn't tell a current member
+    from a removed one even once every poster was individually identifiable.
+    Closing it needed a second, new mechanism: `Request::SetChannelRoster`,
+    sent by the channel's host every time membership changes (an add or a
+    remove — a full replacement of the member set each time, not a delta),
+    signed by the channel's `server_root` key (the same key that already
+    signs `ServerPolicy`, self-verifying, no ledger lookup needed). A
+    channel's first `SetChannelRoster` permanently binds it to that
+    `server_root` — a different key can never overwrite it — and each
+    update's `version` must strictly increase, so an old roster (e.g. one
+    from before a kick) can't be replayed to reinstate a removed member.
+    `PostToChannel` now checks both: a valid signature from a real,
+    ledger-known identity, **and** that identity's presence in the channel's
+    current roster. Knowing `channel_id` — a bare 32-byte value, e.g. one
+    leaked outside the app — is no longer sufficient on its own to write to
+    it, closing the exact gap this section originally described. The engine
+    pushes a fresh roster from the single chokepoint every membership
+    mutation already goes through (`mls_add_member`, `remove_from_channel` —
+    the latter is what `kick_from_server`, `sweep_inactive_members`, and
+    voluntary `Leave` all call for every channel a member is removed from, so
+    a kick already means "removed from every channel roster on the server",
+    not just one), plus once at channel creation. The creation-time push is
+    the one case treated as non-best-effort (propagates its error) rather
+    than best-effort like the later ones — losing it would leave a brand-new
+    channel permanently unpostable by anyone, including its own host, since
+    no later mutation would ever be expected to re-send it.
+    **Residual gap, not closed by this fix:** `ingest_gossiped_channel_frame`
+    — the relay-to-relay federation path a channel frame can also arrive
+    over — still has no signature or roster check of its own; it trusts
+    whatever a sibling relay in the gossip mesh hands it for a `channel_id`.
+    A malicious relay operator in the mesh (a meaningfully higher bar than
+    "any client who knows channel_id", but not impossible) could still
+    inject frames that flood and evict real history via that path. Real
+    members' own MLS processing still rejects a forged frame as
+    unauthenticated ciphertext — it can't forge authorship of real content —
+    so the residual harm is limited to flooding/eviction, the same
+    denial-of-history shape this fix closes for ordinary clients, just via a
+    federation-trust vector instead. Signing gossip payloads (the same
+    follow-up already noted for the KeyPackages gossip path above) would
+    close this too; not attempted here.
 - **MLS `KeyPackage`s carry no binding to the DaNTe identity that published
   them (found in the same audit; the "check it on use" half is now fixed,
   the deeper cryptographic binding is not).** `dante-mls`'s

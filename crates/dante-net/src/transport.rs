@@ -587,7 +587,8 @@ mod p2p_client {
                 // Channel-log reads and writes: pin to one deterministic
                 // relay per channel so its `seq` has a single writer.
                 Request::PostToChannel { channel_id, .. }
-                | Request::FetchChannel { channel_id, .. } => FanOut::Channel(*channel_id),
+                | Request::FetchChannel { channel_id, .. }
+                | Request::SetChannelRoster { channel_id, .. } => FanOut::Channel(*channel_id),
                 // Single-use (key packages) or stateful/ephemeral — must stay
                 // pinned to one relay, but no cross-client agreement needed.
                 _ => FanOut::One,
@@ -869,6 +870,8 @@ mod tests {
             FanOut::of(&Request::PostToChannel {
                 channel_id: [7; 32],
                 blob: vec![1],
+                identity: [8; 32],
+                sig: [9; 64],
             }),
             FanOut::Channel(c) if c == [7; 32]
         ));

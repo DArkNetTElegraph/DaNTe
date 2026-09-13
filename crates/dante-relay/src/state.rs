@@ -9,7 +9,10 @@ use dante_net::{
     mailbox::Mailbox,
     ratelimit::KeyedRateLimiter,
     transport::RequestHandler,
-    wire::{keypkg_publish_challenge, IceCfg, Request, Response},
+    wire::{
+        channel_roster_challenge, keypkg_publish_challenge, post_to_channel_challenge, IceCfg,
+        Request, Response,
+    },
 };
 use dante_proto::{record::RecordKind, Envelope, Record};
 use tokio::sync::Mutex;
@@ -119,6 +122,11 @@ pub struct RelayState {
     /// `channel_id` -> the channel's append-only log. Opaque E2E channel
     /// messages; the relay never reads them.
     channels: std::collections::HashMap<[u8; 32], ChannelLog>,
+    /// `channel_id` -> `(server_root, version, current members)`, from the
+    /// channel host's [`Request::SetChannelRoster`] calls. Gates
+    /// [`Request::PostToChannel`]: knowing `channel_id` is no longer enough
+    /// to write to it, the poster must currently be in this set.
+    channel_rosters: std::collections::HashMap<[u8; 32], ChannelRoster>,
     /// Running total of channel-log blob bytes, bounded by [`CHANNEL_STORE_CAP`].
     channel_bytes: usize,
     /// `topic` -> ephemeral signals `(blob, deposited_ms)`. Typing indicators
@@ -205,6 +213,8 @@ const MAX_PREKEY_IDENTITIES: usize = 100_000;
 const MAX_KEYPKG_IDENTITIES: usize = 100_000;
 /// Cap on distinct channels the relay logs for.
 const MAX_CHANNELS: usize = 100_000;
+/// Largest membership list a single `SetChannelRoster` may carry.
+const MAX_CHANNEL_ROSTER_MEMBERS: usize = 50_000;
 /// Largest accepted single channel-log frame.
 const MAX_CHANNEL_BLOB_BYTES: usize = 1024 * 1024;
 /// Global budget across all channel logs. 128 MiB.
@@ -218,6 +228,8 @@ const MAX_CHANNEL_FETCH_BYTES: usize = 7 * 1024 * 1024;
 /// here: that makes this relay the channel's sequencer, and it then ignores
 /// gossiped frames (a relay that has only ever replicated stays a follower).
 type ChannelLog = (u64, bool, Vec<(u64, Vec<u8>, u64)>);
+/// `(server_root, version, current members)` — see `RelayState::channel_rosters`.
+type ChannelRoster = ([u8; 32], u64, std::collections::HashSet<[u8; 32]>);
 /// Cap on the pending channel re-broadcast / backfill queues.
 const CHANNEL_FED_QUEUE_CAP: usize = 4096;
 
@@ -232,6 +244,7 @@ impl RelayState {
             blobs: std::collections::HashMap::new(),
             blob_bytes: 0,
             channels: std::collections::HashMap::new(),
+            channel_rosters: std::collections::HashMap::new(),
             channel_bytes: 0,
             signals: std::collections::HashMap::new(),
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
@@ -787,12 +800,37 @@ impl RelayState {
                 Response::Blob(self.blobs.get(&hash).map(|(b, _)| b.clone()))
             }
 
-            Request::PostToChannel { channel_id, blob } => {
+            Request::PostToChannel {
+                channel_id,
+                blob,
+                identity,
+                sig,
+            } => {
                 if !self.deposit_rl.check(&ip, now, 1.0) {
                     return Response::Error("rate limited".into());
                 }
                 if blob.len() > MAX_CHANNEL_BLOB_BYTES {
                     return Response::Error("channel frame too large".into());
+                }
+                let Some(idk_pub) = self.ledger.idk_for_id(&identity) else {
+                    return Response::Error("unknown identity".into());
+                };
+                let challenge = post_to_channel_challenge(&channel_id, &identity, &blob);
+                if SignPublic::from_bytes(&idk_pub)
+                    .and_then(|k| k.verify(&challenge, &sig))
+                    .is_err()
+                {
+                    return Response::Error("bad signature".into());
+                }
+                // The channel's roster (from the host's SetChannelRoster) is
+                // the sole source of truth for who may write here — knowing
+                // channel_id is a shared 32-byte value, not proof of current
+                // membership, so it can no longer be all it takes to post.
+                let Some((_, _, members)) = self.channel_rosters.get(&channel_id) else {
+                    return Response::Error("channel has no registered membership".into());
+                };
+                if !members.contains(&identity) {
+                    return Response::Error("not a member of this channel".into());
                 }
                 if !self.channels.contains_key(&channel_id) && self.channels.len() >= MAX_CHANNELS {
                     return Response::Error("channel directory full".into());
@@ -822,6 +860,46 @@ impl RelayState {
                     self.channel_outbox.pop_front();
                 }
                 Response::Posted(seq)
+            }
+
+            Request::SetChannelRoster {
+                channel_id,
+                server_root,
+                version,
+                members,
+                sig,
+            } => {
+                if !self.record_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                if members.len() > MAX_CHANNEL_ROSTER_MEMBERS {
+                    return Response::Error("roster too large".into());
+                }
+                // A channel's first SetChannelRoster permanently binds it to
+                // whichever server_root signed it; every later update for the
+                // same channel_id must come from that same key, so one
+                // server's host can never overwrite another's roster.
+                if let Some((bound_root, cur_version, _)) = self.channel_rosters.get(&channel_id) {
+                    if *bound_root != server_root {
+                        return Response::Error("channel bound to a different server".into());
+                    }
+                    if version <= *cur_version {
+                        return Response::Error("stale roster version".into());
+                    }
+                }
+                let challenge =
+                    channel_roster_challenge(&channel_id, &server_root, version, &members);
+                if SignPublic::from_bytes(&server_root)
+                    .and_then(|k| k.verify(&challenge, &sig))
+                    .is_err()
+                {
+                    return Response::Error("bad signature".into());
+                }
+                self.channel_rosters.insert(
+                    channel_id,
+                    (server_root, version, members.into_iter().collect()),
+                );
+                Response::Ok
             }
 
             Request::FetchChannel {
@@ -995,7 +1073,7 @@ impl RequestHandler for RelayHandler {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use dante_crypto::pow::Difficulty;
+    use dante_crypto::{pow::Difficulty, sign::SignSecret};
     use dante_identity::{
         records::{IdentityAnnounce, LivenessProof},
         Identity,
@@ -1021,6 +1099,51 @@ mod tests {
             },
             Limits::default(),
         )
+    }
+
+    /// Announce `identity` to `s`'s ledger, so its `PostToChannel` posts can
+    /// pass the relay's ledger-signature check.
+    fn announce(s: &mut RelayState, identity: &Identity) {
+        let rec = IdentityAnnounce::build(identity, "", D).to_record(identity, 0);
+        assert_eq!(
+            s.handle(Request::SubmitRecord(rec.encode()), IP, 0),
+            Response::Ok
+        );
+    }
+
+    /// A `PostToChannel` request, correctly signed by `identity`.
+    fn post_to_channel(identity: &Identity, channel_id: [u8; 32], blob: Vec<u8>) -> Request {
+        let id = *identity.id().as_bytes();
+        let sig = identity.sign(&post_to_channel_challenge(&channel_id, &id, &blob));
+        Request::PostToChannel {
+            channel_id,
+            blob,
+            identity: id,
+            sig,
+        }
+    }
+
+    /// A `SetChannelRoster` request, correctly signed by `server_root`.
+    fn set_channel_roster(
+        server_root: &SignSecret,
+        channel_id: [u8; 32],
+        version: u64,
+        members: Vec<[u8; 32]>,
+    ) -> Request {
+        let root_pub = server_root.public().to_bytes();
+        let sig = server_root.sign(&channel_roster_challenge(
+            &channel_id,
+            &root_pub,
+            version,
+            &members,
+        ));
+        Request::SetChannelRoster {
+            channel_id,
+            server_root: root_pub,
+            version,
+            members,
+            sig,
+        }
     }
 
     #[test]
@@ -1083,12 +1206,20 @@ mod tests {
         // Relay A: a client posts here, so A sequences the channel and queues
         // the frame for re-broadcast.
         let mut a = state();
+        let poster = Identity::generate(0);
+        announce(&mut a, &poster);
+        let root = SignSecret::from_bytes(&[9u8; 32]);
         assert_eq!(
             a.handle(
-                Request::PostToChannel {
-                    channel_id: cid,
-                    blob: b"frame-1".to_vec(),
-                },
+                set_channel_roster(&root, cid, 1, vec![*poster.id().as_bytes()]),
+                IP,
+                1_000
+            ),
+            Response::Ok
+        );
+        assert_eq!(
+            a.handle(
+                post_to_channel(&poster, cid, b"frame-1".to_vec()),
                 IP,
                 1_000
             ),
@@ -1100,10 +1231,7 @@ mod tests {
         assert!(!a.ingest_gossiped_channel_frame(cid, 1, b"dup".to_vec(), 1_000));
         assert_eq!(
             a.handle(
-                Request::PostToChannel {
-                    channel_id: cid,
-                    blob: b"frame-2".to_vec(),
-                },
+                post_to_channel(&poster, cid, b"frame-2".to_vec()),
                 IP,
                 1_000
             ),
@@ -1576,12 +1704,15 @@ mod tests {
             ),
             Response::Error(_)
         ));
-        // An over-large channel frame is refused up front.
+        // An over-large channel frame is refused up front, before any
+        // identity/roster check even runs.
         assert!(matches!(
             s.handle(
                 Request::PostToChannel {
                     channel_id: [1u8; 32],
                     blob: vec![0u8; MAX_CHANNEL_BLOB_BYTES + 1],
+                    identity: [0u8; 32],
+                    sig: [0u8; 64],
                 },
                 IP,
                 0,
@@ -1594,16 +1725,20 @@ mod tests {
     fn channel_bytes_accounting_stays_consistent() {
         let mut s = state();
         let ch = [9u8; 32];
+        let poster = Identity::generate(0);
+        announce(&mut s, &poster);
+        let root = SignSecret::from_bytes(&[10u8; 32]);
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&root, ch, 1, vec![*poster.id().as_bytes()]),
+                IP,
+                1_000
+            ),
+            Response::Ok
+        );
         for _ in 0..3u64 {
             assert!(matches!(
-                s.handle(
-                    Request::PostToChannel {
-                        channel_id: ch,
-                        blob: vec![7u8; 1000],
-                    },
-                    IP,
-                    1_000,
-                ),
+                s.handle(post_to_channel(&poster, ch, vec![7u8; 1000]), IP, 1_000,),
                 Response::Posted(_)
             ));
         }
@@ -1621,6 +1756,128 @@ mod tests {
         // After the retention window, maintain resyncs it to zero.
         s.maintain(1_000 + BLOB_TTL_MS + 1);
         assert_eq!(s.channel_bytes, 0);
+    }
+
+    #[test]
+    fn post_to_channel_needs_a_registered_roster_containing_the_poster() {
+        let mut s = state();
+        let ch = [11u8; 32];
+        let member = Identity::generate(0);
+        let stranger = Identity::generate(1);
+        announce(&mut s, &member);
+        announce(&mut s, &stranger);
+
+        // No roster registered at all yet: even a real, announced identity
+        // is refused — knowing channel_id is not enough on its own.
+        assert_eq!(
+            s.handle(post_to_channel(&member, ch, b"hi".to_vec()), IP, 0),
+            Response::Error("channel has no registered membership".into())
+        );
+
+        let root = SignSecret::from_bytes(&[12u8; 32]);
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&root, ch, 1, vec![*member.id().as_bytes()]),
+                IP,
+                0
+            ),
+            Response::Ok
+        );
+
+        // The roster member can now post.
+        assert!(matches!(
+            s.handle(post_to_channel(&member, ch, b"hi".to_vec()), IP, 0),
+            Response::Posted(_)
+        ));
+
+        // A real, announced-but-never-invited identity — the "leaked
+        // channel_id off the internet" scenario — is refused even though
+        // they can prove who they are.
+        assert_eq!(
+            s.handle(post_to_channel(&stranger, ch, b"spam".to_vec()), IP, 0),
+            Response::Error("not a member of this channel".into())
+        );
+    }
+
+    #[test]
+    fn a_kicked_member_is_removed_from_the_roster_and_can_no_longer_post() {
+        let mut s = state();
+        let ch = [13u8; 32];
+        let member = Identity::generate(0);
+        announce(&mut s, &member);
+        let root = SignSecret::from_bytes(&[14u8; 32]);
+        let mid = *member.id().as_bytes();
+
+        assert_eq!(
+            s.handle(set_channel_roster(&root, ch, 1, vec![mid]), IP, 0),
+            Response::Ok
+        );
+        assert!(matches!(
+            s.handle(post_to_channel(&member, ch, b"hi".to_vec()), IP, 0),
+            Response::Posted(_)
+        ));
+
+        // Host kicks: republishes the roster with the member removed. Version
+        // must strictly increase.
+        assert_eq!(
+            s.handle(set_channel_roster(&root, ch, 2, vec![]), IP, 0),
+            Response::Ok
+        );
+        assert_eq!(
+            s.handle(post_to_channel(&member, ch, b"still here?".to_vec()), IP, 0),
+            Response::Error("not a member of this channel".into())
+        );
+    }
+
+    #[test]
+    fn a_channel_roster_cannot_be_hijacked_or_replayed() {
+        let mut s = state();
+        let ch = [15u8; 32];
+        let owner = SignSecret::from_bytes(&[16u8; 32]);
+        let attacker = SignSecret::from_bytes(&[17u8; 32]);
+        let victim = Identity::generate(0);
+        let atk_member = Identity::generate(1);
+        announce(&mut s, &victim);
+        announce(&mut s, &atk_member);
+
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&owner, ch, 1, vec![*victim.id().as_bytes()]),
+                IP,
+                0
+            ),
+            Response::Ok
+        );
+
+        // A different server_root can't overwrite an already-bound channel's
+        // roster (would let an attacker add themselves to someone else's
+        // channel).
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&attacker, ch, 2, vec![*atk_member.id().as_bytes()]),
+                IP,
+                0
+            ),
+            Response::Error("channel bound to a different server".into())
+        );
+
+        // Replaying (or reusing) an old/equal version from the real owner is
+        // refused too — this is exactly what would let a kicked member's
+        // stale membership be reinstated.
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&owner, ch, 1, vec![*victim.id().as_bytes()]),
+                IP,
+                0
+            ),
+            Response::Error("stale roster version".into())
+        );
+
+        // The real owner's genuinely-newer update still works.
+        assert_eq!(
+            s.handle(set_channel_roster(&owner, ch, 2, vec![]), IP, 0),
+            Response::Ok
+        );
     }
 
     #[test]

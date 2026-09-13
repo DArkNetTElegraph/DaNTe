@@ -1220,7 +1220,7 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 Some(name) => match engine.create_server(name, now_ms()).await {
                     Ok(root) => {
                         // Every server starts with an always-there #general.
-                        let _ = engine.create_channel(&root, "general", true, None);
+                        let _ = engine.create_channel(&root, "general", true, None).await;
                         println!(
                             "server \"{name}\" created with #general; root {}",
                             IdentityId::from_bytes(root).to_base32()
@@ -1234,7 +1234,7 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
                 (Some(sfp), Some(spec)) => match parse_fingerprint(sfp) {
                     Ok(root) => {
                         let name = spec.trim();
-                        match engine.create_channel(&root, name, true, None) {
+                        match engine.create_channel(&root, name, true, None).await {
                             Ok(id) => println!(
                                 "channel \"{name}\" -> #{}",
                                 IdentityId::from_bytes(id).to_base32()
@@ -1248,7 +1248,7 @@ async fn handle_line(engine: &mut Engine, target: &mut Option<Target>, line: &st
             },
             "vchannel" => match (a, b) {
                 (Some(sfp), Some(name)) => match parse_fingerprint(sfp) {
-                    Ok(root) => match engine.create_voice_channel(&root, name.trim(), true) {
+                    Ok(root) => match engine.create_voice_channel(&root, name.trim(), true).await {
                         Ok(id) => println!(
                             "\u{1f50a} voice channel \"{}\" -> #{}",
                             name.trim(),

@@ -378,7 +378,10 @@ async fn a_voice_channel_connects_members_and_tracks_presence() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let vchan = host.create_voice_channel(&server, "Lounge", true).unwrap();
+    let vchan = host
+        .create_voice_channel(&server, "Lounge", true)
+        .await
+        .unwrap();
     assert!(host
         .channels()
         .iter()
@@ -490,7 +493,10 @@ async fn a_group_call_shares_an_mls_key_that_rekeys_when_a_member_leaves() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
     for _ in 0..8 {
@@ -604,7 +610,10 @@ async fn a_group_call_survives_a_restart() {
         }
 
         let server = host.create_server("lodge", now).await.unwrap();
-        chan = host.create_channel(&server, "general", true, None).unwrap();
+        chan = host
+            .create_channel(&server, "general", true, None)
+            .await
+            .unwrap();
         invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
         for _ in 0..8 {
             for e in [&mut host, &mut alice] {
@@ -802,7 +811,10 @@ async fn channel_message_ids_survive_a_restart() {
         }
 
         let server = host.create_server("lodge", now).await.unwrap();
-        chan = host.create_channel(&server, "general", true, None).unwrap();
+        chan = host
+            .create_channel(&server, "general", true, None)
+            .await
+            .unwrap();
         invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
         for _ in 0..8 {
             for e in [&mut host, &mut alice] {
@@ -1081,7 +1093,10 @@ async fn host_and_member_exchange_channel_messages() {
 
     // Host builds a server + channel and invites Alice.
     let server = host.create_server("the lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
 
     // Alice receives the invite (a DM) -> joins, replies with her key bundle.
@@ -1138,7 +1153,10 @@ async fn a_direct_invite_only_adds_after_the_recipient_accepts() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
 
     // Host invites both. Nothing is added yet.
     host.invite_to_channel(&chan, &alice_id, now).await.unwrap();
@@ -1205,7 +1223,10 @@ async fn a_new_member_gets_a_backlog_of_recent_messages() {
     bob.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     let first_seq = host.send_channel(&chan, "first", now).await.unwrap();
     let second_seq = host.send_channel(&chan, "second", now).await.unwrap();
 
@@ -1260,6 +1281,7 @@ async fn a_password_protected_channel_wraps_the_relay_log() {
     let server = host.create_server("lodge", now).await.unwrap();
     let chan = host
         .create_channel(&server, "vault", true, Some("correct horse battery"))
+        .await
         .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
 
@@ -1315,7 +1337,10 @@ async fn a_channel_message_can_be_edited_and_deleted_by_its_author() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..6 {
         for e in [&mut host, &mut alice] {
@@ -1389,7 +1414,10 @@ async fn a_channel_reply_carries_its_target_seq() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..6 {
         for e in [&mut host, &mut alice] {
@@ -1580,7 +1608,10 @@ async fn a_channel_message_arrives_over_gossip_and_is_not_double_delivered() {
         e.sync(now).await.unwrap();
     }
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..6 {
         for e in [&mut host, &mut alice] {
@@ -1636,7 +1667,10 @@ async fn a_hostile_gossip_frame_cannot_suppress_the_real_message() {
         e.sync(now).await.unwrap();
     }
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..6 {
         for e in [&mut host, &mut alice] {
@@ -1746,7 +1780,10 @@ async fn a_message_can_be_forwarded_into_a_channel() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..6 {
         for e in [&mut host, &mut alice] {
@@ -1797,7 +1834,10 @@ async fn the_host_can_pin_and_unpin_a_channel_message() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..6 {
         for e in [&mut host, &mut alice] {
@@ -1863,7 +1903,10 @@ async fn three_channel_members_all_key_each_other() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
 
@@ -1933,7 +1976,10 @@ async fn channel_typing_signals_reach_members_without_burning_the_chain() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("the lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     alice.receive_all(now).await.unwrap();
     host.receive_all(now).await.unwrap();
@@ -2007,7 +2053,10 @@ async fn channel_history_survives_a_restart() {
         alice.sync(now).await.unwrap();
 
         let server = host.create_server("the lodge", now).await.unwrap();
-        chan = host.create_channel(&server, "general", true, None).unwrap();
+        chan = host
+            .create_channel(&server, "general", true, None)
+            .await
+            .unwrap();
         invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
         alice.receive_all(now).await.unwrap();
         host.receive_all(now).await.unwrap();
@@ -2138,7 +2187,10 @@ async fn invite_link_redeem_flow_with_use_limit() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
 
     // A one-use link.
     let link = host.create_invite_link(&chan, 3_600_000, 1, now).unwrap();
@@ -2220,7 +2272,10 @@ async fn host_removes_a_member_from_a_channel() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
     for _ in 0..8 {
@@ -2300,8 +2355,14 @@ async fn server_ban_removes_from_every_channel_and_blocks_return() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let a = host.create_channel(&server, "general", true, None).unwrap();
-    let b = host.create_channel(&server, "random", true, None).unwrap();
+    let a = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
+    let b = host
+        .create_channel(&server, "random", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut bob, &a, &bob_id, now).await;
     invite_accept(&mut host, &mut bob, &b, &bob_id, now).await;
     assert_eq!(bob.channels().len(), 2);
@@ -2374,7 +2435,10 @@ async fn inactivity_auto_kick() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..4 {
         host.receive_all(now).await.unwrap();
@@ -2435,8 +2499,14 @@ async fn host_deletes_a_channel_then_the_server() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let a = host.create_channel(&server, "general", true, None).unwrap();
-    let b = host.create_channel(&server, "random", true, None).unwrap();
+    let a = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
+    let b = host
+        .create_channel(&server, "random", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &a, &alice_id, now).await;
     invite_accept(&mut host, &mut alice, &b, &alice_id, now).await;
     macro_rules! settle {
@@ -2510,7 +2580,10 @@ async fn a_member_can_leave_a_channel() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
     macro_rules! settle {
@@ -2577,7 +2650,10 @@ async fn blocking_hides_dms_and_channel_messages() {
 
     // A shared channel.
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
     for _ in 0..6 {
         host.receive_all(now).await.unwrap();
@@ -2716,7 +2792,10 @@ async fn custom_server_emoji_reaches_a_member() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     macro_rules! settle {
         () => {
@@ -2781,7 +2860,10 @@ async fn server_stickers_reach_a_member_and_coexist_with_emoji() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     macro_rules! settle {
         () => {
@@ -2854,7 +2936,10 @@ async fn server_soundboard_reaches_a_member() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     macro_rules! settle {
         () => {
@@ -2921,7 +3006,10 @@ async fn host_set_nickname_reaches_a_member_host_only() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     macro_rules! settle {
         () => {
@@ -3025,7 +3113,10 @@ async fn member_requests_own_nickname_and_host_applies_it() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     macro_rules! settle {
         () => {
@@ -3085,7 +3176,10 @@ async fn roles_muting_and_delegated_kick() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
     macro_rules! settle {
@@ -3187,7 +3281,10 @@ async fn password_gated_invite_link() {
     joiner.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     host.set_join_password(&server, Some("hunter2"), None)
         .unwrap();
     assert!(host.has_join_password(&server));
@@ -3251,7 +3348,10 @@ async fn server_discovery_and_public_join() {
     joiner.sync(now).await.unwrap();
 
     let server = host.create_server("Cartographers", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
 
     // Not listed yet.
     joiner.sync(now).await.unwrap();
@@ -3315,7 +3415,10 @@ async fn channel_emoji_reactions() {
     alice.sync(now).await.unwrap();
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     for _ in 0..4 {
         host.receive_all(now).await.unwrap();
@@ -3389,7 +3492,10 @@ async fn channel_reactions_survive_a_restart() {
         alice.sync(now).await.unwrap();
 
         let server = host.create_server("lodge", now).await.unwrap();
-        chan = host.create_channel(&server, "general", true, None).unwrap();
+        chan = host
+            .create_channel(&server, "general", true, None)
+            .await
+            .unwrap();
         invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
         for _ in 0..4 {
             host.receive_all(now).await.unwrap();
@@ -3643,7 +3749,10 @@ async fn an_sfu_group_call_forwards_audio_between_three_engines() {
     }
 
     let server = host.create_server("lodge", now).await.unwrap();
-    let chan = host.create_channel(&server, "general", true, None).unwrap();
+    let chan = host
+        .create_channel(&server, "general", true, None)
+        .await
+        .unwrap();
     invite_accept(&mut host, &mut alice, &chan, &alice_id, now).await;
     invite_accept(&mut host, &mut bob, &chan, &bob_id, now).await;
     for _ in 0..8 {

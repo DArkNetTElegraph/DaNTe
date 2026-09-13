@@ -3678,17 +3678,26 @@ async fn an_sfu_group_call_forwards_audio_between_three_engines() {
 
     // Pump until every engine's single SFU leg is connected.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut all_up;
     loop {
         for e in [&mut host, &mut alice, &mut bob] {
             e.poll_group_calls(now).await.unwrap();
         }
-        let all_up = [&host, &alice, &bob]
+        all_up = [&host, &alice, &bob]
             .iter()
             .all(|e| e.group_call_state(&chan) == Some(CallState::Connected));
         if all_up || tokio::time::Instant::now() >= deadline {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(all_up, "every engine's SFU leg reached Connected");
+
+    // `active_group_call_channels` is what a caller (the CLI: main.rs's poll
+    // loop) has to use to find which channels to check `group_call_state`
+    // on at all -- nothing else enumerates them.
+    for e in [&host, &alice, &bob] {
+        assert_eq!(e.active_group_call_channels(), vec![chan]);
     }
 
     const MARKERS: [&[u8]; 3] = [b"sfu-engine-0", b"sfu-engine-1", b"sfu-engine-2"];
@@ -3736,6 +3745,12 @@ async fn an_sfu_group_call_forwards_audio_between_three_engines() {
             }
         }
     }
+
+    host.leave_group_call(&chan, now).await.unwrap();
+    assert!(
+        host.active_group_call_channels().is_empty(),
+        "left channels don't linger"
+    );
 }
 
 #[tokio::test]

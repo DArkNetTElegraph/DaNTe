@@ -3,12 +3,13 @@
 use std::net::IpAddr;
 
 use async_trait::async_trait;
+use dante_crypto::sign::SignPublic;
 use dante_ledger::{Ledger, LedgerParams, MemoryStore};
 use dante_net::{
     mailbox::Mailbox,
     ratelimit::KeyedRateLimiter,
     transport::RequestHandler,
-    wire::{IceCfg, Request, Response},
+    wire::{keypkg_publish_challenge, IceCfg, Request, Response},
 };
 use dante_proto::{record::RecordKind, Envelope, Record};
 use tokio::sync::Mutex;
@@ -698,6 +699,7 @@ impl RelayState {
             Request::PublishKeyPackages {
                 identity,
                 key_packages,
+                sig,
             } => {
                 // One rate-limit charge for the whole batch.
                 if !self.record_rl.check(&ip, now, 1.0) {
@@ -708,6 +710,22 @@ impl RelayState {
                     .any(|kp| kp.is_empty() || kp.len() > MAX_KEYPKG_BYTES)
                 {
                     return Response::Error("bad key package".into());
+                }
+                // The ledger — this relay's own tamper-evident identity
+                // directory — is the source of truth for which key is
+                // currently authoritative for `identity`; a claimed identity
+                // with no matching, valid signature is refused rather than
+                // silently accepted, so a KeyPackage queue can no longer be
+                // flooded or overwritten by anyone but its real owner.
+                let Some(idk_pub) = self.ledger.idk_for_id(&identity) else {
+                    return Response::Error("unknown identity".into());
+                };
+                let challenge = keypkg_publish_challenge(&identity, &key_packages);
+                if SignPublic::from_bytes(&idk_pub)
+                    .and_then(|k| k.verify(&challenge, &sig))
+                    .is_err()
+                {
+                    return Response::Error("bad signature".into());
                 }
                 if !self.key_packages.contains_key(&identity)
                     && self.key_packages.len() >= MAX_KEYPKG_IDENTITIES
@@ -1330,14 +1348,25 @@ mod tests {
 
     #[test]
     fn key_packages_are_handed_out_once_then_reused_as_last_resort() {
-        let mut s = state();
-        let id = [42u8; 32];
+        use dante_net::wire::keypkg_publish_challenge;
 
+        let mut s = state();
+        let identity = Identity::generate(0);
+        let id = *identity.id().as_bytes();
+        let rec = IdentityAnnounce::build(&identity, "", D).to_record(&identity, 0);
+        assert_eq!(
+            s.handle(Request::SubmitRecord(rec.encode()), IP, 0),
+            Response::Ok
+        );
+
+        let key_packages = vec![b"kp-a".to_vec(), b"kp-b".to_vec()];
+        let sig = identity.sign(&keypkg_publish_challenge(&id, &key_packages));
         assert_eq!(
             s.handle(
                 Request::PublishKeyPackages {
                     identity: id,
-                    key_packages: vec![b"kp-a".to_vec(), b"kp-b".to_vec()],
+                    key_packages,
+                    sig,
                 },
                 IP,
                 0
@@ -1361,6 +1390,76 @@ mod tests {
         assert_eq!(
             s.handle(Request::GetKeyPackage([0u8; 32]), IP, 0),
             Response::KeyPackage(None)
+        );
+    }
+
+    #[test]
+    fn publish_key_packages_needs_a_real_signature_from_the_claimed_identity() {
+        use dante_net::wire::keypkg_publish_challenge;
+
+        let mut s = state();
+        let identity = Identity::generate(0);
+        let id = *identity.id().as_bytes();
+        let rec = IdentityAnnounce::build(&identity, "", D).to_record(&identity, 0);
+        assert_eq!(
+            s.handle(Request::SubmitRecord(rec.encode()), IP, 0),
+            Response::Ok
+        );
+        let key_packages = vec![b"kp".to_vec()];
+
+        // No matching ledger identity at all.
+        let stranger = Identity::generate(0);
+        let sig = stranger.sign(&keypkg_publish_challenge(
+            stranger.id().as_bytes(),
+            &key_packages,
+        ));
+        assert_eq!(
+            s.handle(
+                Request::PublishKeyPackages {
+                    identity: *stranger.id().as_bytes(),
+                    key_packages: key_packages.clone(),
+                    sig,
+                },
+                IP,
+                0
+            ),
+            Response::Error("unknown identity".into())
+        );
+
+        // A real ledger identity, but signed by someone else's key —
+        // exactly the "publish under a victim's identity" attack this
+        // check exists to close.
+        let attacker = Identity::generate(0);
+        let forged_sig = attacker.sign(&keypkg_publish_challenge(&id, &key_packages));
+        assert_eq!(
+            s.handle(
+                Request::PublishKeyPackages {
+                    identity: id,
+                    key_packages: key_packages.clone(),
+                    sig: forged_sig,
+                },
+                IP,
+                0
+            ),
+            Response::Error("bad signature".into())
+        );
+
+        // A real identity, real signature, but over different content than
+        // what's actually being published (a stale signature replayed
+        // against a swapped-in batch) must also be refused.
+        let other_packages = vec![b"different-kp".to_vec()];
+        let sig_over_wrong_content = identity.sign(&keypkg_publish_challenge(&id, &other_packages));
+        assert_eq!(
+            s.handle(
+                Request::PublishKeyPackages {
+                    identity: id,
+                    key_packages,
+                    sig: sig_over_wrong_content,
+                },
+                IP,
+                0
+            ),
+            Response::Error("bad signature".into())
         );
     }
 

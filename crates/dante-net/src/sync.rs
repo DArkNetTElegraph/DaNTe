@@ -100,16 +100,22 @@ pub async fn get_prekeys(
 }
 
 /// Publish MLS `KeyPackage`s (opaque bytes) for `identity` so other members can
-/// add it to channels / group calls. Each is single-use.
+/// add it to channels / group calls. Each is single-use. `sig` must be
+/// `identity`'s own signature over
+/// [`crate::wire::keypkg_publish_challenge`]`(identity, &key_packages)` — the
+/// relay checks it against the ledger's current signing key for `identity`
+/// before accepting.
 pub async fn publish_key_packages(
     client: &mut Client,
     identity: &[u8; 32],
     key_packages: Vec<Vec<u8>>,
+    sig: [u8; 64],
 ) -> Result<(), NetError> {
     match client
         .request(&Request::PublishKeyPackages {
             identity: *identity,
             key_packages,
+            sig,
         })
         .await?
     {

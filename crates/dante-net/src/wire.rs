@@ -79,11 +79,19 @@ pub enum Request {
     /// call. Each KeyPackage is single-use; the relay keeps a bounded
     /// per-identity queue and hands them out one at a time (the last one is
     /// reusable as a fallback).
+    ///
+    /// `sig` is `identity`'s own signature over
+    /// [`keypkg_publish_challenge`] — the relay checks it against the
+    /// ledger's own current signing key for `identity` before accepting,
+    /// so this can no longer be published under someone else's identity
+    /// without their private key.
     PublishKeyPackages {
         /// The publisher's identity id.
         identity: [u8; 32],
         /// Encoded MLS `KeyPackage`s.
         key_packages: Vec<Vec<u8>>,
+        /// `identity`'s signature over [`keypkg_publish_challenge`].
+        sig: [u8; 64],
     },
     /// Take one published MLS `KeyPackage` for `identity`.
     GetKeyPackage([u8; 32]),
@@ -298,6 +306,21 @@ fn read_ice_list(r: &mut Reader<'_>) -> Result<Vec<IceCfg>, WireError> {
     Ok(out)
 }
 
+/// Domain-separated so a signature minted for this can't be replayed as a
+/// signature over anything else this identity signs.
+const KEYPKG_PUBLISH_DOMAIN: &[u8] = b"dante/relay-write/publish-key-packages/v1";
+
+/// The bytes [`Request::PublishKeyPackages`]'s `sig` covers: `identity` and
+/// every key package, each length-prefixed via [`Writer`] so the hash input
+/// stays unambiguous regardless of how many packages there are or their
+/// individual lengths.
+pub fn keypkg_publish_challenge(identity: &[u8; 32], key_packages: &[Vec<u8>]) -> [u8; 32] {
+    let mut w = Writer::new();
+    w.fixed(identity);
+    write_blob_list(&mut w, key_packages);
+    dante_crypto::hash::sha256_parts(&[KEYPKG_PUBLISH_DOMAIN, &w.into_vec()])
+}
+
 fn write_blob_list(w: &mut Writer, blobs: &[Vec<u8>]) {
     w.u32(blobs.len() as u32);
     for b in blobs {
@@ -396,9 +419,11 @@ impl Request {
             Request::PublishKeyPackages {
                 identity,
                 key_packages,
+                sig,
             } => {
                 w.u8(REQ_PUBLISH_KEYPKG).fixed(identity);
                 write_blob_list(&mut w, key_packages);
+                w.fixed(sig);
             }
             Request::GetKeyPackage(id) => {
                 w.u8(REQ_GET_KEYPKG).fixed(id);
@@ -469,6 +494,7 @@ impl Request {
             REQ_PUBLISH_KEYPKG => Request::PublishKeyPackages {
                 identity: r.fixed::<32>()?,
                 key_packages: read_blob_list(&mut r)?,
+                sig: r.fixed::<64>()?,
             },
             REQ_GET_KEYPKG => Request::GetKeyPackage(r.fixed::<32>()?),
             REQ_ANNOUNCE_P2P => Request::AnnounceP2p(read_str_list(&mut r)?),
@@ -762,6 +788,7 @@ mod tests {
         rt_req(Request::PublishKeyPackages {
             identity: [8u8; 32],
             key_packages: vec![vec![1, 2, 3, 4], vec![5, 6]],
+            sig: [7u8; 64],
         });
         rt_req(Request::GetKeyPackage([9u8; 32]));
         rt_req(Request::AnnounceP2p(vec![

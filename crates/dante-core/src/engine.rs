@@ -5794,6 +5794,15 @@ impl Engine {
             if bundle.idk_pub != peer_idk || bundle.identity_id != peer_id {
                 return Err(CoreError::BadPeerPrekeys);
             }
+            // `bundle.ik_pub` is the X25519 key this whole handshake seals to
+            // (`Envelope::seal_with(&peer_id, &peer_ik, ...)` below) — bind it
+            // to the ledger's own agreement key for this peer, the same way
+            // `idk_pub`/`identity_id` already are, rather than trusting
+            // whatever the bundle itself (self-consistently signed or not)
+            // happens to claim.
+            if bundle.ik_pub != peer_ik {
+                return Err(CoreError::BadPeerPrekeys);
+            }
             bundle.verify().map_err(|_| CoreError::BadPeerPrekeys)?;
             let (session, init) = Session::initiate(&self.identity, &bundle, &plaintext)?;
             self.sessions.insert(peer_idk, session);

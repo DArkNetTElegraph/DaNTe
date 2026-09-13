@@ -59,7 +59,7 @@ can be reacted to, pinned, replied to and edited.
 ## Test
 
 ```sh
-cargo test -p dante-core                 # 44 in-process-relay e2e tests
+cargo test -p dante-core                 # 60 in-process-relay e2e tests
 cargo test -p dante-core --features p2p  # plus DHT / gossip e2e
 ```
 

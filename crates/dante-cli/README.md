@@ -21,15 +21,18 @@ and ledger-gossip fallback.
 
 ## Library surface
 
-`dante_cli` exposes `serve` (`run` / `run_on`, `Bootstrap`) and `unfurl`, plus
-`now_ms` and `parse_fingerprint`. The desktop shell reuses `serve::run_on`
-verbatim on its own ephemeral port.
+`dante_cli` exposes `serve` (`run` / `run_on`, `Bootstrap`), `unfurl` and
+`gifsearch`, plus `now_ms` and `parse_fingerprint`. The desktop shell reuses
+`serve::run_on` verbatim on its own ephemeral port.
 
 - `serve.rs` — hand-rolled HTTP/1.1 server for the localhost JSON API + SSE,
   CSRF / DNS-rebinding guards, a single `engine_task`, and file uploads ≤ 9 MiB
 - `unfurl.rs` — opt-in link previews: SSRF-guarded (public unicast only),
   redirect / size / time capped
-- `web/index.html` — the whole SPA: one ~4.9k-line file with inline CSS / JS,
+- `gifsearch.rs` — opt-in Tenor/Giphy search, gated on an operator API key and
+  a per-session toggle; shares `unfurl`'s SSRF-guarded fetch and CDN allowlist,
+  plus its own rate limit
+- `web/index.html` — the whole SPA: one ~5.5k-line file with inline CSS / JS,
   embedded via `include_str!` and served under a strict nonce CSP
 
 A complete endpoint list is in the `serve` module docs.
@@ -40,6 +43,7 @@ A complete endpoint list is in the `serve` module docs.
 cargo test -p dante-cli
 ```
 
-Unit tests cover the ICE refresh window, the CSRF guard, typing coalescing, and
-unfurl's SSRF checks / OpenGraph scraping. There is no HTTP-level or SPA test
-suite; the binary's chat / bot loops are exercised only by hand.
+Unit tests cover the ICE refresh window, the CSRF guard, typing coalescing,
+unfurl's SSRF checks / OpenGraph scraping, and gifsearch's CDN host allowlist
+/ rating validation / URL-encoding. There is no HTTP-level or SPA test suite;
+the binary's chat / bot loops are exercised only by hand.

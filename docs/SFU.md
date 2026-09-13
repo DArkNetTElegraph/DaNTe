@@ -244,7 +244,18 @@ See the crate README for the exact status list.
 
 ## Open questions / next steps
 
-- **Renegotiation** for real rooms instead of a fixed `room_size`.
+- **Renegotiation** for real rooms instead of a fixed `room_size`: today a
+  room admits at most `DEFAULT_ROOM_SIZE` (16, already 2x the mesh-limit
+  default of 8) without needing renegotiation at all — every participant
+  pre-allocates a receive slot per possible other participant at their own
+  join time. Supporting more than that needs a real protocol change (a new
+  relay-wire message telling already-connected participants to renegotiate
+  and add a slot, handled on all three client surfaces: the browser SPA,
+  the CLI/engine path, and whatever answers on the other end), not just a
+  bigger constant. Not attempted: low value for the size of >16-participant
+  voice rooms this project's community-server use case actually sees,
+  against a change that touches production code on every client surface at
+  once and that this sandbox cannot verify on the browser side.
 - **RTCP NACK**: every leg (the SFU's own, and `dante-voice`'s, so this
   covers CLI/engine calls end to end) registers the NACK generator/responder
   interceptors *and* declares `nack` feedback capability for Opus — the
@@ -273,8 +284,20 @@ See the crate README for the exact status list.
   join — SFU again if the relay recovered and the roster is still over the
   limit, mesh if the roster has since shrunk under it.
 - **Mixed-capability rooms over the limit** do not interconnect: a
-  non-Chromium browser is refused while Chromium peers use the SFU. Needs a
-  room-wide capability signal to converge on one mode.
+  non-Chromium browser is refused while Chromium peers use the SFU. A
+  room-wide capability signal (every member advertises SFrame support,
+  probably as an MLS extension so it's part of the roster the group already
+  agrees on) could make the room converge on one mode instead — but which
+  mode is a real trade-off with no clean answer, not an implementation
+  detail:
+  - converge on mesh whenever any member lacks SFrame, even above the mesh
+    limit — nobody is excluded, but the room runs a mesh past the point it
+    was measured to hold up, for as long as that member stays;
+  - keep the current behaviour (refuse the non-Chromium member, everyone
+    else uses the SFU) — the room scales, but that member cannot join a
+    large voice room at all.
+  Also needs the protocol change to carry the signal, not just a client
+  policy choice. Left as documented behaviour, not attempted.
 - **Desktop SFrame**: the native audio path needs its own SFrame (or another
   E2E media layer) before the desktop shell can safely offer SFU mode.
 - **Screen share over SFU** is currently refused in the SPA (the pre-allocated

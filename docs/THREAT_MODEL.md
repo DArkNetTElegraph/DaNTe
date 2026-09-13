@@ -138,7 +138,12 @@ provide.
    size/time/redirects, and refuses any target that resolves to a non-public
    address (loopback, LAN, `169.254.169.254`, …) so a crafted link cannot turn
    it into an SSRF probe. Enabling it also tells the relay nothing new. A
-   relay-side unfurler that would hide the client IP is a possible future add.
+   relay-side unfurler that hides the client IP is a possible future add, but
+   a real trust-model change, not a client tweak: it would mean the relay
+   itself makes outbound HTTP requests on a client's behalf — a new
+   capability an operator has to be willing to run, and a new thing for a
+   client to trust that operator with (which URLs it fetched, when). Not
+   attempted without that decision.
    **GIF search (Tenor/Giphy)** is the same posture: **opt-in and off by
    default**, and further gated on the operator having configured a provider
    API key at all (`TENOR_API_KEY` / `GIPHY_API_KEY`) — most relays and

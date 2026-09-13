@@ -43,3 +43,39 @@ freeze the source while glancing elsewhere.
 **Open questions:** behaviour when the cursor is on a display that isn't being
 captured (e.g. permissions denied for one output); interaction with per-window
 "exclude from capture" flags; whether to also offer "follow focused window".
+
+---
+
+## SFU "stage" mode: a few speakers, many silent listeners
+
+**What:** instead of raising the flat room cap (`DEFAULT_ROOM_SIZE`, currently
+16 — see [`SFU.md`](SFU.md)'s renegotiation open question), give a room a
+small fixed number of speaker slots (e.g. 3–5) plus an effectively unlimited
+number of listen-only participants — Discord's "Stage Channels" model.
+
+**Why:** the actual demand behind "rooms bigger than 16" is usually "one talk,
+many listeners" (an announcement, a panel, a talk), not "16+ people all
+talking." A stage is a much smaller, cheaper problem than general N-way
+renegotiation: listeners never send audio, so they don't need a source slot
+allocated for them at all, and adding a listener never touches any existing
+participant's connection.
+
+**Sketch:**
+- Speaker slots work exactly like today's fixed-`room_size` SFU rooms —
+  small, bounded, no renegotiation needed among speakers themselves.
+- A listener's `RTCPeerConnection` offers no send tracks and needs no dedicated
+  return slot pre-allocated per *other* listener the way a speaker does today —
+  it only ever receives the speakers' streams, and `dante-sfu`'s current design
+  already gives an outgoing track per *slot*, not per pairing, so this may be
+  closer to "listeners subscribe to the existing speaker tracks" than a new
+  mechanism. Needs a real design pass on `crates/dante-sfu` before promising
+  this is small.
+- Needs relay-wire + roster-model work either way: a listener isn't a speaker
+  slot, so `SfuJoin` and the MLS roster / mesh-limit math both need a
+  listener/speaker distinction that doesn't exist today.
+- Natural fit for the "community server" case (an announcement channel,
+  town-hall style voice) more than for a regular group call.
+
+**Status:** not scheduled. Surfaced here instead of attempting the flat
+room-cap increase past 16, which has a worse cost/value trade for the same
+underlying want. Revisit at or after first release.

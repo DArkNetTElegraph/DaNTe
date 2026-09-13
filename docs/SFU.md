@@ -252,10 +252,11 @@ See the crate README for the exact status list.
   relay-wire message telling already-connected participants to renegotiate
   and add a slot, handled on all three client surfaces: the browser SPA,
   the CLI/engine path, and whatever answers on the other end), not just a
-  bigger constant. Not attempted: low value for the size of >16-participant
-  voice rooms this project's community-server use case actually sees,
-  against a change that touches production code on every client surface at
-  once and that this sandbox cannot verify on the browser side.
+  bigger constant.
+  **Decided:** not worth it for a flat N-way room. The actual want behind
+  "more than 16" is almost always "a few speakers, many listeners," not
+  "16+ people all talking" — see [`IDEAS.md`](IDEAS.md)'s stage-mode entry
+  for that shape instead, revisit at or after first release.
 - **RTCP NACK**: every leg (the SFU's own, and `dante-voice`'s, so this
   covers CLI/engine calls end to end) registers the NACK generator/responder
   interceptors *and* declares `nack` feedback capability for Opus — the

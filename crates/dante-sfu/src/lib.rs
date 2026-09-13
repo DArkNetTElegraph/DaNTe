@@ -220,6 +220,13 @@ fn now_ms() -> u64 {
 /// Packets beyond [`SOURCE_BITRATE_CAP_BYTES_PER_SEC`] for this source are
 /// dropped rather than forwarded: a single over-budget sender loses audio
 /// quality for itself, but never eats into another participant's fan-out.
+///
+/// The drop happens before the packet ever reaches a subscriber's outgoing
+/// track, so it never enters that track's NACK send buffer either — a
+/// subscriber that notices the gap will NACK for a sequence number the SFU
+/// can never answer. Harmless (the responder just doesn't reply, same as
+/// any other genuinely-lost packet), but worth knowing: under a real flood,
+/// this is where the extra NACK traffic comes from.
 async fn forward_track(source: usize, track: Arc<dyn TrackRemote>, outgoing: OutgoingMap) {
     let mut budget = TokenBucket::new(
         SOURCE_BITRATE_CAP_BYTES_PER_SEC,
@@ -265,6 +272,21 @@ async fn forward_track(source: usize, track: Arc<dyn TrackRemote>, outgoing: Out
 /// gets it retransmitted from the sender's own buffer — the SFU's buffer for
 /// a subscriber leg, or the original participant's for the SFU's own inbound
 /// leg — rather than relying on Opus FEC alone.
+///
+/// Duplicated (not shared) in `dante_voice`'s own `configure_audio_nack` —
+/// see that crate's `src/lib.rs`. Deliberate: sharing it would make
+/// `dante-sfu` depend on `dante-voice` in production, not just in this
+/// crate's own tests, which is backwards (the server-side forwarder
+/// depending on the 1:1-call crate `dante-core` composes alongside it). If
+/// you change one copy, change the other.
+///
+/// `with_size(64)`, not the builder's own default of 1024: the responder's
+/// buffer holds full RTP packets per *outgoing* stream, and this SFU opens
+/// one such stream per other participant on every subscriber's connection —
+/// `MAX_ROOMS` bounding the relay's media-plane memory (see its doc comment
+/// in `dante-relay`) stops being true if each of those streams reserves 16x
+/// more than it needs. 64 packets is ~1.3s of 20ms Opus frames, comfortably
+/// past the RTT a NACK round-trip needs on any real network.
 fn configure_audio_nack(registry: Registry, media: &mut MediaEngine) -> Registry {
     media.register_feedback(
         RTCPFeedback {
@@ -274,7 +296,10 @@ fn configure_audio_nack(registry: Registry, media: &mut MediaEngine) -> Registry
         RtpCodecKind::Audio,
     );
     registry
-        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .with(
+            Slot::NackResponder,
+            NackResponderBuilder::new().with_size(64).build(),
+        )
         .with(Slot::NackGenerator, NackGeneratorBuilder::new().build())
 }
 

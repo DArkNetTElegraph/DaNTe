@@ -4084,7 +4084,14 @@ async function sframeEncrypt(frame, controller) {
       const out = new Uint8Array(4 + 12 + ct.byteLength);
       out.set(SFRAME_MAGIC, 0); out.set(iv, 4); out.set(ct, 16);
       frame.data = out.buffer;
-    } catch (_) { /* pass the plaintext frame through */ }
+    } catch (_) {
+      // Encryption itself failed (a detached buffer, an unusable key, an
+      // engine-level fault) — this is not the "no key yet" case below, so
+      // it must be checked again here: falling through to enqueue() would
+      // put the still-plaintext `frame` on the wire to an SFU that expects
+      // ciphertext.
+      if (voiceRtc.sfu) return;
+    }
   } else if (voiceRtc.sfu) {
     // SFU mode: an unencrypted frame would be visible to the relay operator.
     // Drop it (Opus PLC covers the gap) rather than transmit plaintext.

@@ -188,6 +188,14 @@ above — it states precisely what is and is not protected.
 
 ## Try it
 
+**Automated setup:** `scripts/setup-linux.sh` (Fedora, Arch, Debian/Ubuntu and
+their derivatives — detects your distro, installs Rust + whatever system
+packages are missing, builds, and launches) or `scripts/setup-windows.ps1` on
+Windows. Both offer either the CLI + browser UI or the native desktop app;
+`--help` / `-?` lists every option (which relay to use, build-only, skip the
+package install, non-interactive `-y`/`-Yes`). Manual steps below if you'd
+rather see every command, or the script doesn't recognize your distro.
+
 ```bash
 cargo build --release -p dante-relay -p dante-cli
 

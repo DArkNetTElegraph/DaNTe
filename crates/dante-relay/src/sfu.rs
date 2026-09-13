@@ -114,26 +114,15 @@ impl SfuRooms {
     /// participant, mirroring `Request::GetIceConfig`'s exact logic in
     /// `state.rs` so mesh calls and SFU calls see the same STUN/TURN policy.
     fn ice_servers(&self) -> Vec<dante_sfu::IceServer> {
-        let mut out = Vec::new();
-        if !self.ice.stun.is_empty() {
-            out.push(dante_sfu::IceServer {
-                urls: self.ice.stun.clone(),
-                ..Default::default()
-            });
-        }
-        if let (Some(secret), false) = (&self.ice.turn_secret, self.ice.turn.is_empty()) {
-            let ttl = std::time::Duration::from_secs(self.ice.turn_ttl_secs.max(60));
-            if let Ok((username, credential)) =
-                turn::auth::generate_long_term_credentials(secret, ttl)
-            {
-                out.push(dante_sfu::IceServer {
-                    urls: self.ice.turn.clone(),
-                    username,
-                    credential,
-                });
-            }
-        }
-        out
+        self.ice
+            .to_ice_configs()
+            .into_iter()
+            .map(|c| dante_sfu::IceServer {
+                urls: c.urls,
+                username: c.username,
+                credential: c.credential,
+            })
+            .collect()
     }
 
     /// Serve an SFU request, or `None` if it is not one.
@@ -187,13 +176,17 @@ impl SfuRooms {
             .expect("SFU rate limiter poisoned")
             .sweep(now_ms, 10 * 60 * 1000);
 
+        // Computed before taking the rooms lock: TURN credential minting is
+        // an HMAC-SHA1 sign, cheap but non-zero, and must not serialize every
+        // other room's join/ice/leave behind one room's setup cost.
+        let ice = self.ice_servers();
         let mut rooms = self.rooms.lock().await;
         if !rooms.contains_key(&room) && rooms.len() >= MAX_ROOMS {
             return Response::Error("sfu: too many rooms".into());
         }
         let entry = rooms
             .entry(room)
-            .or_insert_with(|| Room::new(self.room_size, self.ice_servers()));
+            .or_insert_with(|| Room::new(self.room_size, ice));
         match entry.sfu.add_peer(offer).await {
             Ok((slot, answer)) => {
                 entry.drain();

@@ -74,6 +74,35 @@ pub struct IcePolicy {
     pub turn_ttl_secs: u64,
 }
 
+impl IcePolicy {
+    /// The ICE server list `Request::GetIceConfig` hands ordinary calls,
+    /// minting a fresh coturn-style TURN credential if `turn_secret` is set.
+    /// Also the single source of truth for the `sfu` feature's rooms
+    /// (`SfuRooms::ice_servers`), so the two paths cannot silently diverge.
+    pub fn to_ice_configs(&self) -> Vec<IceCfg> {
+        let mut out = Vec::new();
+        if !self.stun.is_empty() {
+            out.push(IceCfg {
+                urls: self.stun.clone(),
+                ..Default::default()
+            });
+        }
+        if let (Some(secret), false) = (&self.turn_secret, self.turn.is_empty()) {
+            let ttl = std::time::Duration::from_secs(self.turn_ttl_secs.max(60));
+            if let Ok((username, credential)) =
+                turn::auth::generate_long_term_credentials(secret, ttl)
+            {
+                out.push(IceCfg {
+                    urls: self.turn.clone(),
+                    username,
+                    credential,
+                });
+            }
+        }
+        out
+    }
+}
+
 /// Everything a relay mutates.
 pub struct RelayState {
     ledger: Ledger<MemoryStore>,
@@ -825,28 +854,7 @@ impl RelayState {
                 Response::Signals(out)
             }
 
-            Request::GetIceConfig => {
-                let mut out = Vec::new();
-                if !self.ice.stun.is_empty() {
-                    out.push(IceCfg {
-                        urls: self.ice.stun.clone(),
-                        ..Default::default()
-                    });
-                }
-                if let (Some(secret), false) = (&self.ice.turn_secret, self.ice.turn.is_empty()) {
-                    let ttl = std::time::Duration::from_secs(self.ice.turn_ttl_secs.max(60));
-                    if let Ok((username, credential)) =
-                        turn::auth::generate_long_term_credentials(secret, ttl)
-                    {
-                        out.push(IceCfg {
-                            urls: self.ice.turn.clone(),
-                            username,
-                            credential,
-                        });
-                    }
-                }
-                Response::IceConfig(out)
-            }
+            Request::GetIceConfig => Response::IceConfig(self.ice.to_ice_configs()),
 
             Request::AnnounceP2p(addrs) => {
                 if !self.deposit_rl.check(&ip, now, 1.0) {

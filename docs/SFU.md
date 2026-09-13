@@ -245,9 +245,17 @@ See the crate README for the exact status list.
 ## Open questions / next steps
 
 - **Renegotiation** for real rooms instead of a fixed `room_size`.
-- **RTCP**: the component relies on webrtc-rs' internal sender/receiver
-  interceptors; it does not propagate NACK/PLI between legs. Audio at 64 kbps
-  is tolerant, but this needs review before video/screen-share forwarding.
+- **RTCP NACK**: every leg (the SFU's own, and `dante-voice`'s, so this
+  covers CLI/engine calls end to end) registers the NACK generator/responder
+  interceptors *and* declares `nack` feedback capability for Opus — the
+  upstream default only advertises it for video, so leaving that step out
+  would have installed the interceptors without ever letting them engage. A
+  dropped packet on a real leg is now retransmitted from the sender's buffer
+  rather than relying on Opus FEC alone. Not proven for the browser path: it
+  depends on the browser's own SDP offer declaring audio NACK support, which
+  the SPA does not control and this repo cannot verify without a real
+  browser. PLI is video-only feedback and does not apply to this audio-only
+  component; it will need adding if screen share/video forwarding lands.
 - **Resource limits**: per-IP rate limiting, a room cap, offer/candidate size
   limits, empty-room teardown and a per-source bitrate cap (drop, not queue,
   past budget — see `dante-sfu`'s `SOURCE_BITRATE_CAP_BYTES_PER_SEC`) are in.

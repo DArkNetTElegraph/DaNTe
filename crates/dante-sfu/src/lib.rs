@@ -31,9 +31,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dante_net::ratelimit::TokenBucket;
+use rtc::interceptor::{NackGeneratorBuilder, NackResponderBuilder, Registry, Slot};
 use rtc::media_stream::MediaStreamTrack;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCPFeedback, RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    TYPE_RTCP_FB_NACK,
 };
 use tokio::sync::mpsc;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
@@ -250,6 +252,32 @@ async fn forward_track(source: usize, track: Arc<dyn TrackRemote>, outgoing: Out
     }
 }
 
+/// Enable RTCP NACK loss recovery for audio.
+///
+/// `rtc::peer_connection::configuration::interceptor_registry`'s own
+/// `register_default_interceptors` only advertises the `nack` RTCP feedback
+/// capability for `RtpCodecKind::Video` — this SFU is audio-only, so calling
+/// it verbatim would install the NACK interceptors without ever declaring
+/// the capability Opus needs to use them (`stream_supports_nack` gates on the
+/// negotiated per-codec feedback list, not merely on the interceptor being
+/// present). Registering it here for `Audio` instead closes the gap the
+/// crate docs used to flag as unaddressed: a leg that drops a packet now
+/// gets it retransmitted from the sender's own buffer — the SFU's buffer for
+/// a subscriber leg, or the original participant's for the SFU's own inbound
+/// leg — rather than relying on Opus FEC alone.
+fn configure_audio_nack(registry: Registry, media: &mut MediaEngine) -> Registry {
+    media.register_feedback(
+        RTCPFeedback {
+            typ: TYPE_RTCP_FB_NACK.to_owned(),
+            parameter: String::new(),
+        },
+        RtpCodecKind::Audio,
+    );
+    registry
+        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .with(Slot::NackGenerator, NackGeneratorBuilder::new().build())
+}
+
 /// One pre-packetized outgoing track for the source in `slot`.
 fn outgoing_track(slot: usize) -> Result<Arc<TrackLocalStaticRTP>, SfuError> {
     let codec = RTCRtpCodec {
@@ -392,11 +420,13 @@ impl Sfu {
             .build();
         let mut media = MediaEngine::default();
         media.register_default_codecs().map_err(SfuError::from)?;
+        let registry = configure_audio_nack(Registry::new(), &mut media);
 
         let pc = PeerConnectionBuilder::<&str>::new()
             .with_configuration(config)
             .with_setting_engine(setting)
             .with_media_engine(media)
+            .with_interceptor_registry(registry)
             .with_handler(Arc::new(Handler {
                 slot,
                 events: self.events_tx.clone(),
@@ -490,5 +520,21 @@ mod tests {
         }
         assert!(allowed <= 1, "at most one full-budget burst fits");
         assert!(dropped > 0, "the flood is bounded, not forwarded in full");
+    }
+
+    #[tokio::test]
+    async fn audio_nack_is_negotiated_so_a_dropped_packet_can_be_recovered() {
+        // `register_default_interceptors` upstream only advertises `nack` for
+        // video; a real SFU offer/answer exchange for our audio-only room
+        // must still end up with `nack` in the negotiated SDP, or the NACK
+        // interceptors we install never actually engage (they gate on the
+        // negotiated per-codec feedback, not on merely being present).
+        let (_call, offer) = dante_voice::Call::offer_for_sfu(1, &[]).await.unwrap();
+        let (mut sfu, _events) = Sfu::new(2, vec![]);
+        let (_slot, answer) = sfu.add_peer(&offer).await.unwrap();
+        assert!(
+            answer.to_lowercase().contains("nack"),
+            "answer SDP should negotiate nack RTCP feedback for audio:\n{answer}"
+        );
     }
 }

@@ -20,9 +20,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
+use rtc::interceptor::{NackGeneratorBuilder, NackResponderBuilder, Registry, Slot};
 use rtc::media_stream::MediaStreamTrack;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    RTCPFeedback, RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    TYPE_RTCP_FB_NACK,
 };
 use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use rtc_media::Sample;
@@ -308,6 +310,30 @@ type Built = (
     mpsc::UnboundedReceiver<CallEvent>,
 );
 
+/// Enable RTCP NACK loss recovery for audio.
+///
+/// `rtc::peer_connection::configuration::interceptor_registry`'s own
+/// `register_default_interceptors` only advertises the `nack` RTCP feedback
+/// capability for `RtpCodecKind::Video` — every call here is audio-only, so
+/// calling it verbatim would install the NACK interceptors without ever
+/// declaring the capability Opus needs to use them (a peer's SDP only
+/// negotiates feedback both sides declare). Registering it for `Audio`
+/// instead means two `dante-voice` peers — including the SFU legs in
+/// `crates/dante-sfu`, which mirrors this same helper — actually recover a
+/// dropped packet via retransmission rather than relying on Opus FEC alone.
+fn configure_audio_nack(registry: Registry, media: &mut MediaEngine) -> Registry {
+    media.register_feedback(
+        RTCPFeedback {
+            typ: TYPE_RTCP_FB_NACK.to_owned(),
+            parameter: String::new(),
+        },
+        RtpCodecKind::Audio,
+    );
+    registry
+        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .with(Slot::NackGenerator, NackGeneratorBuilder::new().build())
+}
+
 async fn build_pc(ice: &[IceServer]) -> Result<Built, VoiceError> {
     let (tx, rx) = mpsc::unbounded_channel();
     let dc: DcSlot = Arc::new(Mutex::new(None));
@@ -332,11 +358,13 @@ async fn build_pc(ice: &[IceServer]) -> Result<Built, VoiceError> {
 
     let mut media = MediaEngine::default();
     media.register_default_codecs().map_err(VoiceError::from)?;
+    let registry = configure_audio_nack(Registry::new(), &mut media);
 
     let pc = PeerConnectionBuilder::<&str>::new()
         .with_configuration(config)
         .with_setting_engine(setting)
         .with_media_engine(media)
+        .with_interceptor_registry(registry)
         .with_handler(Arc::new(Handler {
             tx: tx.clone(),
             dc: Arc::clone(&dc),
@@ -542,5 +570,24 @@ mod tests {
     fn tune_opus_is_a_noop_without_opus() {
         let sdp = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\n";
         assert_eq!(tune_opus(sdp), sdp);
+    }
+
+    #[tokio::test]
+    async fn audio_nack_is_negotiated_between_two_real_calls() {
+        // Without registering `nack` feedback for Audio, this SDP exchange
+        // negotiates no RTCP feedback at all (upstream's own
+        // `register_default_interceptors` only advertises it for Video), so
+        // a dropped packet on either leg would only ever be masked by Opus
+        // FEC, never actually retransmitted.
+        let (_caller, offer) = Call::offer().await.unwrap();
+        let (_callee, answer) = Call::answer(&offer).await.unwrap();
+        assert!(
+            offer.to_lowercase().contains("nack"),
+            "offer SDP should negotiate nack RTCP feedback for audio:\n{offer}"
+        );
+        assert!(
+            answer.to_lowercase().contains("nack"),
+            "answer SDP should negotiate nack RTCP feedback for audio:\n{answer}"
+        );
     }
 }

@@ -262,10 +262,16 @@ See the crate README for the exact status list.
 - **Fallback behaviour** when an SFU dies mid-call: the browser path now
   detects it (`pc.onconnectionstatechange` on the SFU leg, previously
   unhandled — audio just stopped with no notice at all) and ends the call
-  cleanly with a clear reason shown to the user. It does **not** demote to
-  mesh: that would mean silently re-running the whole mode-selection and
-  negotiation flow mid-call on every remaining participant, a bigger change
-  than "notice the failure" that needs its own design pass.
+  cleanly with a clear reason shown to the user.
+  Deliberately **not** demoting to mesh automatically — and not treating that
+  as still open, either: the SPA only ever picks SFU mode when the roster is
+  *above* the mesh limit (mesh is preferred at or below it), so a room using
+  the SFU is by construction a room the mesh doesn't scale to. Silently
+  renegotiating every remaining participant into mesh on failure would ask
+  them to do the one thing the threshold exists to prevent. Rejoining after
+  the notice re-runs mode selection fresh and correctly, same as any other
+  join — SFU again if the relay recovered and the roster is still over the
+  limit, mesh if the roster has since shrunk under it.
 - **Mixed-capability rooms over the limit** do not interconnect: a
   non-Chromium browser is refused while Chromium peers use the SFU. Needs a
   room-wide capability signal to converge on one mode.

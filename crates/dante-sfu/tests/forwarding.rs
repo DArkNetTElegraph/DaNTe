@@ -72,7 +72,7 @@ async fn drive_peer(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn three_peers_hear_each_other_only_through_the_sfu() {
-    let (mut sfu, mut events) = Sfu::new(N);
+    let (mut sfu, mut events) = Sfu::new(N, vec![]);
 
     let mut ice_tx = Vec::new();
     let mut calls = Vec::new();

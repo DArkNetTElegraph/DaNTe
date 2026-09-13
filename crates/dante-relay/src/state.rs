@@ -445,6 +445,13 @@ impl RelayState {
         self.ice = ice;
     }
 
+    /// The same ICE policy `Request::GetIceConfig` hands ordinary calls —
+    /// also used (feature `sfu`) to offer the SFU's own connections the same
+    /// STUN/TURN options, instead of leaving it host-candidates-only.
+    pub fn ice_policy(&self) -> &IcePolicy {
+        &self.ice
+    }
+
     /// Operator-provided libp2p bootstrap multiaddrs, always offered to clients
     /// that ask (via `Request::GetP2pPeers`).
     pub fn set_p2p_bootstrap(&mut self, addrs: Vec<String>) {
@@ -895,10 +902,12 @@ pub struct RelayHandler {
 impl RelayHandler {
     /// Wrap `state`.
     pub fn new(state: RelayState) -> Self {
+        #[cfg(feature = "sfu")]
+        let sfu = SfuRooms::with_ice_policy(state.ice_policy().clone());
         Self {
             state: Mutex::new(state),
             #[cfg(feature = "sfu")]
-            sfu: SfuRooms::new(),
+            sfu,
         }
     }
 

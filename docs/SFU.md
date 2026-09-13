@@ -4,7 +4,9 @@
 > proven; desktop is deliberately excluded.** [`crates/dante-sfu`](../crates/dante-sfu/README.md)
 > terminates real DTLS-SRTP PeerConnections and forwards RTP payloads opaquely;
 > `dante-relay`'s `sfu` feature (off by default) hosts rooms and carries
-> SDP/ICE over the existing relay wire; `Engine::enable_sfu()` gives an engine
+> SDP/ICE over the existing relay wire, offering each room's `Sfu` the same
+> operator-configured STUN/TURN policy `Request::GetIceConfig` hands ordinary
+> calls; `Engine::enable_sfu()` gives an engine
 > one SFU leg instead of a mesh; and the SPA now negotiates the SFU through
 > `dante serve`'s `/api/sfu/*`, gated on SFrame support and chosen by a roster
 > threshold. The desktop shell is not offered SFU mode (no SFrame in its
@@ -244,8 +246,6 @@ See the crate README for the exact status list.
 ## Open questions / next steps
 
 - **Renegotiation** for real rooms instead of a fixed `room_size`.
-- **SFU-side ICE**: the SFU gathers host candidates only (no STUN/TURN
-  configured), so a relay behind NAT cannot offer a reachable candidate yet.
 - **RTCP**: the component relies on webrtc-rs' internal sender/receiver
   interceptors; it does not propagate NACK/PLI between legs. Audio at 64 kbps
   is tolerant, but this needs review before video/screen-share forwarding.

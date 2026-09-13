@@ -39,9 +39,26 @@ use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use webrtc::peer_connection::{
     MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
-    RTCConfigurationBuilder, RTCIceCandidateInit, RTCPeerConnectionIceEvent,
+    RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceServer, RTCPeerConnectionIceEvent,
     RTCPeerConnectionState, RTCSessionDescription, SettingEngineBuilder,
 };
+
+/// A STUN or TURN server for ICE. `username` / `credential` are empty for
+/// STUN. Deliberately not `webrtc`'s own `RTCIceServer` (converted to one
+/// internally, in [`add_peer`]) — this keeps callers (`dante-relay`) from
+/// needing a direct dependency on the `webrtc` crate just to describe three
+/// strings; the same shape as `dante_voice::IceServer`, kept independent
+/// rather than shared since the two crates don't otherwise depend on
+/// each other.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IceServer {
+    /// e.g. `stun:stun.example.org:3478` or `turn:turn.example.org:3478?transport=udp`.
+    pub urls: Vec<String>,
+    /// TURN username (empty for STUN).
+    pub username: String,
+    /// TURN credential (empty for STUN).
+    pub credential: String,
+}
 
 /// SSRC base the SFU assigns to source slots: slot `s` gets
 /// `SFU_SSRC_BASE + s`. Distinct from the participants' own SSRCs, so a
@@ -242,12 +259,27 @@ pub struct Sfu {
     peers: Vec<Option<Peer>>,
     events_tx: mpsc::UnboundedSender<SfuEvent>,
     outgoing: OutgoingMap,
+    /// STUN/TURN servers offered to every participant's `PeerConnection`.
+    /// Empty by default, matching the project's "no project-run
+    /// infrastructure" stance — the *operator* decides whether to configure
+    /// any (same `IceServer` shape and source as ordinary calls), not this
+    /// crate. With none, the SFU only offers host candidates, so it must be
+    /// reachable directly (a public IP or a full-cone port mapping); STUN
+    /// lets participants discover the SFU's public address if it is behind
+    /// NAT, TURN gives a relayed fallback if direct reachability fails
+    /// outright.
+    ice_servers: Vec<IceServer>,
 }
 
 impl Sfu {
-    /// Create an empty room with `room_size` slots, plus the event receiver
-    /// that carries [`SfuEvent`]s (ICEs to hand back, state changes).
-    pub fn new(room_size: usize) -> (Self, mpsc::UnboundedReceiver<SfuEvent>) {
+    /// Create an empty room with `room_size` slots, offering `ice_servers` to
+    /// every participant's connection (may be empty — host candidates only),
+    /// plus the event receiver that carries [`SfuEvent`]s (ICEs to hand back,
+    /// state changes).
+    pub fn new(
+        room_size: usize,
+        ice_servers: Vec<IceServer>,
+    ) -> (Self, mpsc::UnboundedReceiver<SfuEvent>) {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         (
             Self {
@@ -255,6 +287,7 @@ impl Sfu {
                 peers: (0..room_size).map(|_| None).collect(),
                 events_tx,
                 outgoing: Arc::new(Mutex::new(HashMap::new())),
+                ice_servers,
             },
             events_rx,
         )
@@ -314,7 +347,18 @@ impl Sfu {
         }
         let outgoing = Arc::new(outgoing);
 
-        let config = RTCConfigurationBuilder::default().build();
+        let servers: Vec<RTCIceServer> = self
+            .ice_servers
+            .iter()
+            .map(|s| RTCIceServer {
+                urls: s.urls.clone(),
+                username: s.username.clone(),
+                credential: s.credential.clone(),
+            })
+            .collect();
+        let config = RTCConfigurationBuilder::default()
+            .with_ice_servers(servers)
+            .build();
         let setting = SettingEngineBuilder::default()
             .with_include_loopback_candidate(true)
             .build();

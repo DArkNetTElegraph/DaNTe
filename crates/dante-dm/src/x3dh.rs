@@ -13,6 +13,22 @@ use dante_proto::enc::{Reader, WireError, Writer};
 use crate::error::DmError;
 
 const SPK_SIG_DOMAIN: &[u8] = b"dante/x3dh/signed-prekey/v1";
+/// Each one-time prekey is signed individually (not as part of one signature
+/// over the whole list) because the relay legitimately hands out a **subset**
+/// of the published OTPs — one per fetch, so two initiators never race for
+/// the same key (`dante-relay`'s `GetPrekeys` handler slices the stored
+/// bundle down to a single OTP per response). A whole-list signature would
+/// have to cover every OTP that was ever published to still verify, which
+/// breaks the moment the relay serves fewer than all of them. Per-OTP
+/// signatures let a single `(otp, sig)` pair verify on its own regardless of
+/// how many others were originally published alongside it, while still
+/// making it impossible to substitute in an OTP the real owner never signed
+/// — the concrete gap a relay-directory-writes security audit found: the OTP
+/// list used to carry no signature at all, so a bundle could be
+/// re-published with the OTPs swapped for the attacker's own, and
+/// `bundle.verify()` (which only ever checked `spk_sig` over `spk_pub`)
+/// passed regardless. See `docs/THREAT_MODEL.md` §6.
+const OTP_SIG_DOMAIN: &[u8] = b"dante/x3dh/signed-otp/v1";
 const X3DH_INFO: &[u8] = b"dante/x3dh/v1";
 /// Max one-time prekeys in a published bundle.
 pub const MAX_OTPS: usize = 100;
@@ -30,22 +46,35 @@ pub struct PreKeyBundle {
     pub spk_pub: [u8; 32],
     /// `idk_pub` over `SHA-256(domain || spk_pub)`.
     pub spk_sig: [u8; 64],
-    /// Unused one-time prekeys (X25519); one is consumed per new session.
-    pub otps: Vec<[u8; 32]>,
+    /// Unused one-time prekeys (X25519) each paired with `idk_pub`'s own
+    /// signature over it (see [`Self::otp_sig_challenge`]); one pair is
+    /// consumed per new session.
+    pub otps: Vec<([u8; 32], [u8; 64])>,
 }
 
 impl PreKeyBundle {
-    /// The bytes the signed prekey signature covers.
+    /// The bytes `spk_sig` covers.
     pub fn spk_sig_challenge(spk_pub: &[u8; 32]) -> [u8; 32] {
         sha256_parts(&[SPK_SIG_DOMAIN, spk_pub])
     }
 
-    /// Verify the signed-prekey signature.
+    /// The bytes an individual OTP's own signature covers — bound to
+    /// `spk_pub` too, so an OTP signed for one bundle can't be replayed
+    /// alongside a different `spk_pub` from the same identity.
+    pub fn otp_sig_challenge(spk_pub: &[u8; 32], otp: &[u8; 32]) -> [u8; 32] {
+        sha256_parts(&[OTP_SIG_DOMAIN, spk_pub, otp])
+    }
+
+    /// Verify `spk_sig` and every individual OTP signature.
     pub fn verify(&self) -> Result<(), DmError> {
-        SignPublic::from_bytes(&self.idk_pub)
-            .map_err(|_| DmError::BadPrekeySignature)?
-            .verify(&Self::spk_sig_challenge(&self.spk_pub), &self.spk_sig)
-            .map_err(|_| DmError::BadPrekeySignature)
+        let idk = SignPublic::from_bytes(&self.idk_pub).map_err(|_| DmError::BadPrekeySignature)?;
+        idk.verify(&Self::spk_sig_challenge(&self.spk_pub), &self.spk_sig)
+            .map_err(|_| DmError::BadPrekeySignature)?;
+        for (otp, sig) in &self.otps {
+            idk.verify(&Self::otp_sig_challenge(&self.spk_pub, otp), sig)
+                .map_err(|_| DmError::BadPrekeySignature)?;
+        }
+        Ok(())
     }
 
     /// Encode.
@@ -57,8 +86,8 @@ impl PreKeyBundle {
             .fixed(&self.spk_pub)
             .fixed(&self.spk_sig)
             .u32(self.otps.len() as u32);
-        for o in &self.otps {
-            w.fixed(o);
+        for (otp, sig) in &self.otps {
+            w.fixed(otp).fixed(sig);
         }
         w.into_vec()
     }
@@ -77,7 +106,7 @@ impl PreKeyBundle {
         }
         let mut otps = Vec::with_capacity(n);
         for _ in 0..n {
-            otps.push(r.fixed::<32>()?);
+            otps.push((r.fixed::<32>()?, r.fixed::<64>()?));
         }
         r.finish()?;
         Ok(Self {
@@ -116,13 +145,22 @@ impl PreKeySecrets {
     /// Build the publishable bundle for `identity`.
     pub fn bundle(&self, identity: &Identity) -> PreKeyBundle {
         let spk_pub = self.spk.public().to_bytes();
+        let otps = self
+            .otps
+            .iter()
+            .map(|o| {
+                let pub_key = o.public().to_bytes();
+                let sig = identity.sign(&PreKeyBundle::otp_sig_challenge(&spk_pub, &pub_key));
+                (pub_key, sig)
+            })
+            .collect();
         PreKeyBundle {
             identity_id: identity.id().as_bytes().to_owned(),
             idk_pub: identity.sign_public().to_bytes(),
             ik_pub: identity.agree_public().to_bytes(),
             spk_pub,
             spk_sig: identity.sign(&PreKeyBundle::spk_sig_challenge(&spk_pub)),
-            otps: self.otps.iter().map(|o| o.public().to_bytes()).collect(),
+            otps,
         }
     }
 
@@ -271,7 +309,7 @@ pub fn initiator(me: &Identity, bundle: &PreKeyBundle) -> Result<InitiatorHandsh
     let dh2 = ek.agree(&AgreePublic::from_bytes(&bundle.ik_pub))?; // EK_a · IK_b
     let dh3 = ek.agree(&spk)?; // EK_a · SPK_b
 
-    let used_otp = bundle.otps.first().copied();
+    let used_otp = bundle.otps.first().map(|(otp, _sig)| *otp);
     let dh4 = match &used_otp {
         Some(o) => Some(ek.agree(&AgreePublic::from_bytes(o))?),
         None => None,
@@ -351,6 +389,50 @@ mod tests {
         let mut tampered = bundle.clone();
         tampered.spk_pub[0] ^= 1;
         assert!(tampered.verify().is_err());
+    }
+
+    /// Swapping in a foreign OTP value while keeping the original OTP's
+    /// signature must fail — the concrete substitution a relay-directory-
+    /// writes security audit found silently accepted, back when the OTP list
+    /// carried no signature at all: a bundle could be re-published with the
+    /// OTPs swapped for the attacker's own, and `bundle.verify()` (which only
+    /// ever checked `spk_sig` over `spk_pub`) passed regardless.
+    #[test]
+    fn otp_substitution_is_rejected() {
+        let id = Identity::generate(0);
+        let bundle = PreKeySecrets::generate(3).bundle(&id);
+        bundle.verify().unwrap();
+
+        let foreign_otp = AgreeSecret::generate().public().to_bytes();
+        let mut swapped = bundle.clone();
+        swapped.otps[0].0 = foreign_otp; // keep the original signature
+        assert!(
+            swapped.verify().is_err(),
+            "an OTP value not matching its own signature must be rejected"
+        );
+
+        // A self-consistent (otp, sig) pair lifted from a *different*
+        // identity's bundle must not verify against this one — the
+        // signature has to be checked against *this* bundle's own idk_pub.
+        let other_id = Identity::generate(0);
+        let other_bundle = PreKeySecrets::generate(1).bundle(&other_id);
+        let mut cross_identity = bundle.clone();
+        cross_identity.otps[0] = other_bundle.otps[0];
+        assert!(cross_identity.verify().is_err());
+    }
+
+    /// The relay legitimately hands out one OTP per fetch, re-encoding the
+    /// bundle with just that one `(otp, sig)` pair kept
+    /// (`dante-relay/src/state.rs`'s `GetPrekeys` handler) — this must still
+    /// verify, or every real prekey fetch would fail closed the moment more
+    /// than one OTP was ever published.
+    #[test]
+    fn a_bundle_sliced_down_to_one_otp_still_verifies() {
+        let id = Identity::generate(0);
+        let mut bundle = PreKeySecrets::generate(5).bundle(&id);
+        let one = bundle.otps[2]; // as if the relay served an arbitrary one
+        bundle.otps = vec![one];
+        bundle.verify().unwrap();
     }
 
     #[test]

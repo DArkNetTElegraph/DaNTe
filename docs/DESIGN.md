@@ -605,7 +605,8 @@ DaNTe/
   save, and connects the engine; *unlock* opens the existing keystore file
   with a passphrase; *import* accepts a pasted keystore **or** recovery blob.
   `DANTE_PASSPHRASE` still short-circuits to a direct load when set.
-- **Desktop shell *(built, never run)*:** `apps/dante-desktop` — a Tauri 2
+- **Desktop shell *(built and CI-verified; the window itself has never been
+  opened)*:** `apps/dante-desktop` — a Tauri 2
   crate that is a **thin wrapper**, not a rewrite. `crates/dante-cli` has a
   `[lib]` target exposing `serve::run` / `serve::run_on(existing, listener,
   boot)` plus `now_ms` / `parse_fingerprint`; the desktop `main.rs` binds an
@@ -632,6 +633,11 @@ DaNTe/
     leak a conversation.
   - **Mic/speaker bridge** (`dante-audio`, Opus + cpal) for call audio, which
     a plain webview cannot do.
+  - **Native application menu bar** (`src/menu.rs`): About/Hide/Quit, Close
+    Window (goes through the same hide-to-tray interception as the OS
+    titlebar button), Edit (undo/redo/cut/copy/paste/select-all), Window
+    (minimize/fullscreen) — Tauri 2's unified `tauri::menu` API renders this
+    as the OS menu bar on macOS and the window's own on Windows/Linux.
 
   The crate is **detached from the workspace** (own `[workspace]`, not a
   member) because Tauri needs `webkit2gtk-4.1` / `libsoup-3` (Linux) /
@@ -642,11 +648,15 @@ DaNTe/
   job on **Linux, Windows and macOS**, with its own fmt and clippy. Build it
   by hand with `cd apps/dante-desktop && cargo tauri dev` (see its README).
 
-  **Still outstanding:** native application menus, auto-update, and
-  signed/notarized installers for distribution — CI proves the code builds
-  on all three platforms, but produces no distributable bundle for any of
-  them yet. And runtime verification: a green build says the code is
-  well-formed; no one has opened the window.
+  A `v*` tag's release workflow now runs the real Tauri bundler on all three
+  platforms and attaches the resulting installers (`.dmg`, `.msi`/`.exe`,
+  `.deb`/`.rpm`/`.AppImage`) to the GitHub release — see
+  [`apps/dante-desktop/README.md`](../apps/dante-desktop/README.md#release).
+  **Still outstanding:** the bundles are unsigned (no Apple/Windows
+  certificates exist for this project) and there is no auto-update. And
+  runtime verification: a green build and a produced installer both say the
+  code is well-formed and packages correctly; **no one has opened the
+  window** — that is a materially different, still-unverified claim.
 - **Settings screen** *(done)*: a ⚙ overlay in the SPA — Identity (recovery
   phrase), Appearance (light/dark/auto theme), Behaviour (typing-broadcast
   toggle, desktop-notification permission), Network (relay list, read-only),

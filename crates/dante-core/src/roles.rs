@@ -383,27 +383,37 @@ impl ServerPolicy {
         let raw = b.u32()?;
         let with_icons = raw & ROLE_ICON_FLAG != 0;
         let nr = (raw & !ROLE_ICON_FLAG) as usize;
-        if nr > b.remaining() {
+        // Smallest possible encoded `Role`: u16 id + empty string name (u32
+        // length prefix) + u32 allow + u32 deny + u16 rank = 16 bytes (see
+        // `ROLE_ICON_FLAG`'s doc comment); with icons, +1 for the `false` tag.
+        const MIN_ROLE_BYTES: usize = 16;
+        if nr > b.remaining() / MIN_ROLE_BYTES {
             return Err(WireError::LengthTooLarge(nr as u64));
         }
         let mut roles = Vec::with_capacity(nr);
         for _ in 0..nr {
             roles.push(Role::read(&mut b, with_icons)?);
         }
-        let na = bounded(&mut b)?;
+        // Smallest assignment entry: 32-byte member id + a `bounded()` count
+        // (u32) for its (possibly empty) role-id list.
+        const MIN_ASSIGNMENT_BYTES: usize = 32 + 4;
+        let na = bounded(&mut b, MIN_ASSIGNMENT_BYTES)?;
         let mut assignments = Vec::with_capacity(na);
         for _ in 0..na {
             let m = b.fixed::<32>()?;
-            let ni = bounded(&mut b)?;
+            let ni = bounded(&mut b, 2)?; // smallest element: one u16 role id
             let mut ids = Vec::with_capacity(ni);
             for _ in 0..ni {
                 ids.push(b.u16()?);
             }
             assignments.push((m, ids));
         }
+        // Smallest emoji/sticker/sound/nickname entry: empty string name (u32
+        // length prefix) + 32-byte fixed value.
+        const MIN_NAMED_ENTRY_BYTES: usize = 4 + 32;
         let mut emojis = Vec::new();
         if b.remaining() > 0 {
-            let ne = bounded(&mut b)?;
+            let ne = bounded(&mut b, MIN_NAMED_ENTRY_BYTES)?;
             emojis.reserve(ne);
             for _ in 0..ne {
                 let name = b.string()?;
@@ -428,7 +438,7 @@ impl ServerPolicy {
         }
         let mut stickers = Vec::new();
         if b.remaining() > 0 {
-            let ns = bounded(&mut b)?;
+            let ns = bounded(&mut b, MIN_NAMED_ENTRY_BYTES)?;
             stickers.reserve(ns);
             for _ in 0..ns {
                 let name = b.string()?;
@@ -440,7 +450,7 @@ impl ServerPolicy {
         }
         let mut sounds = Vec::new();
         if b.remaining() > 0 {
-            let nsnd = bounded(&mut b)?;
+            let nsnd = bounded(&mut b, MIN_NAMED_ENTRY_BYTES)?;
             sounds.reserve(nsnd);
             for _ in 0..nsnd {
                 let name = b.string()?;
@@ -452,7 +462,7 @@ impl ServerPolicy {
         }
         let mut nicknames = Vec::new();
         if b.remaining() > 0 {
-            let nn = bounded(&mut b)?;
+            let nn = bounded(&mut b, MIN_NAMED_ENTRY_BYTES)?;
             nicknames.reserve(nn);
             for _ in 0..nn {
                 let member = b.fixed::<32>()?;
@@ -487,9 +497,16 @@ fn challenge(body: &[u8]) -> [u8; 32] {
     sha256(&buf)
 }
 
-fn bounded(r: &mut Reader<'_>) -> Result<usize, WireError> {
+/// Read a `u32` element count and bound it against how many `min_elem_bytes`-
+/// sized elements could actually fit in what's left of the buffer, not just
+/// the raw byte count. A plain `n > r.remaining()` check lets a tiny message
+/// claim a huge count of small elements (each far smaller than
+/// `min_elem_bytes`) and still pass, so `Vec::with_capacity(n)` at the call
+/// site would over-allocate by roughly `min_elem_bytes`x relative to the
+/// actual message size — this closes that amplification.
+fn bounded(r: &mut Reader<'_>, min_elem_bytes: usize) -> Result<usize, WireError> {
     let n = r.u32()? as usize;
-    if n > r.remaining() {
+    if n > r.remaining() / min_elem_bytes.max(1) {
         return Err(WireError::LengthTooLarge(n as u64));
     }
     Ok(n)
@@ -501,6 +518,46 @@ mod tests {
 
     fn root() -> SignSecret {
         SignSecret::from_bytes(&[3u8; 32])
+    }
+
+    #[test]
+    fn decode_rejects_a_role_count_that_could_not_fit_in_the_remaining_bytes() {
+        // A minimal header claiming a huge role count with nothing left in
+        // the buffer to back it must be refused before any allocation sized
+        // off that count happens, not just eventually fail mid-decode.
+        let mut w = Writer::new();
+        w.fixed(&[1u8; 32]) // server_root
+            .fixed(&[2u8; 32]) // owner_id
+            .u64(0) // version
+            .u64(0) // issued_ms
+            .u32(1_000_000); // claims a million roles; zero bytes follow
+        let body = w.into_vec();
+        let mut out = Writer::new();
+        out.bytes(&body).fixed(&[0u8; SIG_LEN]);
+        let encoded = out.into_vec();
+        assert!(matches!(
+            ServerPolicy::decode(&encoded),
+            Err(WireError::LengthTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_an_assignment_count_that_could_not_fit_either() {
+        let mut w = Writer::new();
+        w.fixed(&[1u8; 32])
+            .fixed(&[2u8; 32])
+            .u64(0)
+            .u64(0)
+            .u32(0) // zero roles
+            .u32(1_000_000); // claims a million assignments; zero bytes follow
+        let body = w.into_vec();
+        let mut out = Writer::new();
+        out.bytes(&body).fixed(&[0u8; SIG_LEN]);
+        let encoded = out.into_vec();
+        assert!(matches!(
+            ServerPolicy::decode(&encoded),
+            Err(WireError::LengthTooLarge(_))
+        ));
     }
 
     #[test]

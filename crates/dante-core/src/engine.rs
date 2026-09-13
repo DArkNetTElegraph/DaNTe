@@ -60,6 +60,28 @@ pub const SFU_RECV_SLOTS: usize = 15;
 /// Cap on persisted seen-envelope tags.
 const SEEN_CAP: usize = 5000;
 
+/// Record `tag` as seen, pruning the oldest tag first if that pushes the set
+/// past `cap`. Returns `true` if `tag` was newly seen (mirrors
+/// `HashSet::insert`'s return). `order` must only ever hold tags that are
+/// also in `seen`, and in the order they were first seen.
+fn record_seen_envelope(
+    seen: &mut HashSet<[u8; 32]>,
+    order: &mut std::collections::VecDeque<[u8; 32]>,
+    tag: [u8; 32],
+    cap: usize,
+) -> bool {
+    if !seen.insert(tag) {
+        return false;
+    }
+    order.push_back(tag);
+    if order.len() > cap {
+        if let Some(oldest) = order.pop_front() {
+            seen.remove(&oldest);
+        }
+    }
+    true
+}
+
 /// Cap on persisted channel-history lines (oldest dropped first).
 const CHANNEL_HISTORY_CAP: usize = 2000;
 
@@ -565,6 +587,10 @@ pub struct Engine {
     channels: HashMap<[u8; 32], ChannelSession>,
     hosted: HashMap<[u8; 32], HostedServer>,
     seen_envelopes: HashSet<[u8; 32]>,
+    /// `seen_envelopes`' members in insertion order, so pruning down to
+    /// `SEEN_CAP` drops the oldest tags rather than a random subset (`HashSet`
+    /// iteration order is randomized per process).
+    seen_envelopes_order: std::collections::VecDeque<[u8; 32]>,
     history: Vec<HistoryEntry>,
     channel_history: Vec<ChannelHistoryEntry>,
     /// Channels the host removed us from since the last `take_evicted_channels`
@@ -891,6 +917,7 @@ impl Engine {
             channels: HashMap::new(),
             hosted: HashMap::new(),
             seen_envelopes: HashSet::new(),
+            seen_envelopes_order: std::collections::VecDeque::new(),
             history: Vec::new(),
             channel_history: Vec::new(),
             evicted_channels: Vec::new(),
@@ -955,7 +982,8 @@ impl Engine {
                 .into_iter()
                 .map(|(idk, st)| (idk, Session::import(st)))
                 .collect();
-            engine.seen_envelopes = s.seen_envelopes.into_iter().collect();
+            engine.seen_envelopes = s.seen_envelopes.iter().copied().collect();
+            engine.seen_envelopes_order = s.seen_envelopes.into_iter().collect();
             engine.history = s.history;
             engine.channel_history = s.channel_history;
             engine.invite_uses = s.invite_uses.into_iter().collect();
@@ -1245,10 +1273,7 @@ impl Engine {
         if !self.dirty {
             return Ok(());
         }
-        let mut seen: Vec<[u8; 32]> = self.seen_envelopes.iter().copied().collect();
-        if seen.len() > SEEN_CAP {
-            seen.drain(..seen.len() - SEEN_CAP);
-        }
+        let seen: Vec<[u8; 32]> = self.seen_envelopes_order.iter().copied().collect();
         let state = PersistedState {
             prekeys: self.prekeys.export(),
             sessions: self
@@ -5876,7 +5901,12 @@ impl Engine {
         let mut consumed_prekey = false;
         for env in envelopes {
             let tag = sha256(&env.encode());
-            if !self.seen_envelopes.insert(tag) {
+            if !record_seen_envelope(
+                &mut self.seen_envelopes,
+                &mut self.seen_envelopes_order,
+                tag,
+                SEEN_CAP,
+            ) {
                 continue;
             }
             let Ok(sealed) = env.open(&ik) else { continue };
@@ -6236,6 +6266,41 @@ impl Engine {
     /// Whether `peer_idk` is a live identity in the local replica.
     pub fn knows(&self, peer_idk: &[u8; 32]) -> bool {
         self.ledger.is_live(peer_idk)
+    }
+}
+
+#[cfg(test)]
+mod seen_envelope_tests {
+    use super::record_seen_envelope;
+    use std::collections::{HashSet, VecDeque};
+
+    #[test]
+    fn pruning_past_the_cap_drops_oldest_first() {
+        let mut seen = HashSet::new();
+        let mut order = VecDeque::new();
+        let tags: Vec<[u8; 32]> = (0u8..5).map(|i| [i; 32]).collect();
+        for &tag in &tags {
+            assert!(record_seen_envelope(&mut seen, &mut order, tag, 3));
+        }
+        // Cap 3: the two oldest (tags[0], tags[1]) must be gone, the three
+        // newest must remain — never a random subset.
+        assert!(!seen.contains(&tags[0]));
+        assert!(!seen.contains(&tags[1]));
+        for tag in &tags[2..] {
+            assert!(seen.contains(tag));
+        }
+        assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn a_tag_seen_twice_is_not_recorded_or_evicted_twice() {
+        let mut seen = HashSet::new();
+        let mut order = VecDeque::new();
+        let tag = [7u8; 32];
+        assert!(record_seen_envelope(&mut seen, &mut order, tag, 5));
+        assert!(!record_seen_envelope(&mut seen, &mut order, tag, 5));
+        assert_eq!(order.len(), 1);
+        assert!(seen.contains(&tag));
     }
 }
 

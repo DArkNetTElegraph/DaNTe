@@ -243,41 +243,56 @@ provide.
   and a partition risk. Mitigate with many diverse addresses, DNS + in-repo
   distribution, and user-added peers.
 - **Relay directory writes are unauthenticated (found in a pre-alpha security
-  audit, unresolved).** `Request::PublishPrekeys`, `PublishKeyPackages`, and
-  `PostToChannel` (`dante-relay/src/state.rs`) all derive the owning identity
-  from attacker-supplied bytes with no signature check binding the writer to
-  it. Concretely: anyone can fetch a victim's real prekey bundle, keep every
-  signed field, and republish it with the (unsigned) one-time-prekey list
-  swapped for keys they generated — a legitimate initiator then X3DHs against
-  an OTP the victim never held, and the first message is silently,
-  permanently undeliverable (`x3dh::responder`'s `UnknownOneTimePrekey`
-  dropped at `debug!` in `engine.rs`). This is **not** a confidentiality
-  break — `send_content` resolves the peer's key from this client's own
-  ledger replica, not from the (unauthenticated) bundle, so `Envelope::seal_with`
-  still targets the real identity — but it is a real, silent, targeted
-  denial-of-first-contact any network participant can mount against anyone,
-  and the same unauthenticated-write pattern lets a removed channel member
-  keep posting to (and, via oldest-first eviction past `MAX_CHANNEL_ENTRIES`,
-  destroy the history of) a channel whose `channel_id` they still hold —
-  directly weakening §4's "Removed member loses access" row, which is stated
-  there without this caveat. Fix needs binding these writes to a signature
-  over the claimed identity (and, for prekey bundles, over the OTP list
-  specifically — currently only `spk_pub` is signed in
-  `PreKeyBundle::verify()`), not attempted here; it is a protocol change, not
-  a patch.
+  audit; `PublishPrekeys` and `PublishKeyPackages` are now fixed,
+  `PostToChannel` remains open).** `Request::PublishPrekeys`,
+  `PublishKeyPackages`, and `PostToChannel` (`dante-relay/src/state.rs`) all
+  originally derived the owning identity from attacker-supplied bytes with no
+  signature check binding the writer to it.
+  - **Prekeys — fixed.** Anyone could fetch a victim's real prekey bundle,
+    keep every signed field, and republish it with the (unsigned)
+    one-time-prekey list swapped for keys they generated, so a legitimate
+    initiator would X3DH against an OTP the victim never held. Each OTP now
+    carries its own Ed25519 signature (`PreKeyBundle::verify()`,
+    domain-separated from `spk_sig`), so a substituted OTP fails verification
+    even when it's re-signed-in-appearance by keeping the original bundle's
+    other fields. `bundle.ik_pub` is also now checked against the ledger's own
+    `agreement_key` for the peer before use in `send_content`.
+  - **KeyPackages — the relay-write half is fixed; a credential-binding gap
+    and a gossip-path gap remain.** `PublishKeyPackages` now requires a
+    signature from the claimed identity's ledger-attested key over the
+    published batch, so an attacker can no longer flood or overwrite a
+    victim's KeyPackage queue through the ordinary client-facing wire.
+    Two things are **not** covered by this fix: `dante-mls`'s KeyPackage
+    credential itself still isn't bound to the publishing identity's `idk`
+    (see the next bullet — a separate, still-open issue), and
+    `ingest_gossiped_keypackage` (the relay-to-relay federation path a
+    KeyPackage can also arrive over) still has no signature check at all —
+    it only adopts a gossiped KeyPackage when the local queue for that
+    identity is empty and never overrides a locally-published one, but a
+    malicious relay peer in the gossip mesh can still seed a first
+    KeyPackage for an identity that has never published one itself.
+  - **PostToChannel — still open.** The same unauthenticated-write pattern
+    lets a removed channel member keep posting to (and, via oldest-first
+    eviction past `MAX_CHANNEL_ENTRIES`, destroy the history of) a channel
+    whose `channel_id` they still hold — directly weakening §4's "Removed
+    member loses access" row, which is stated there without this caveat.
+    Not yet fixed; needs the same kind of per-writer signature binding as
+    the prekey/KeyPackage fixes above, plus a fairness-aware eviction policy
+    once writers are attributable.
 - **MLS `KeyPackage`s carry no binding to the DaNTe identity that published
   them (found in the same audit, unresolved).** `dante-mls`'s
   `publish_key_package` pairs caller-chosen credential bytes with a freshly
   generated, unrelated signature keypair; nothing signs the credential with
   the publisher's `idk`, and the engine adds a fetched `KeyPackage` to a group
   with no check that its credential equals the peer id it was fetched for.
-  Combined with the unauthenticated `PublishKeyPackages` above, an attacker
-  can flood a victim's KeyPackage queue and get their own package served
-  instead. Impact is capped at join-denial plus a phantom roster
+  This is now a narrower gap than before `PublishKeyPackages` required a
+  ledger-checked signature to publish at all (see above), but it is still
+  real insecure design, not just a hardening gap: a KeyPackage published
+  under a correctly-signed request can still carry a credential unrelated to
+  the signer. Impact is capped at join-denial plus a phantom roster
   entry — the Welcome is still DM'd sealed to the real identity's
-  ledger-attested key, which the attacker cannot obtain — but it is real
-  insecure design, not just a hardening gap. Same fix direction as above:
-  sign the credential.
+  ledger-attested key, which an attacker cannot obtain — but the fix (sign
+  the credential with `idk`, check it on use) has not been attempted here.
 
 ## 7. Cryptographic posture
 

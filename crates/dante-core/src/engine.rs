@@ -28,7 +28,7 @@ use dante_ledger::{
     Ledger, LedgerParams, MemoryStore,
 };
 use dante_mls::{self as mls};
-use dante_net::{sync, transport::Client};
+use dante_net::{sync, transport::Client, wire::keypkg_publish_challenge};
 use dante_proto::{envelope::recipient_hint, Envelope, Record};
 use dante_voice::{Call, CallEvent, CallState, IceServer};
 
@@ -1425,6 +1425,12 @@ impl Engine {
             self.announced_name = Some(display_hint.to_owned());
         }
         self.dirty = true;
+        // Boot publishes a KeyPackage before the identity has ever announced
+        // itself to the relay's ledger, so that first publish is refused
+        // ("unknown identity") now that the relay authenticates KeyPackage
+        // publishes against the ledger. Retry it here, now that the ledger
+        // actually knows us — best-effort, same as the boot-time attempt.
+        let _ = self.refresh_mls_key_package().await;
         Ok(())
     }
 
@@ -2123,7 +2129,8 @@ impl Engine {
             fresh.push(kp.0);
         }
         if !fresh.is_empty() {
-            sync::publish_key_packages(&mut self.client, &me, fresh).await?;
+            let sig = self.identity.sign(&keypkg_publish_challenge(&me, &fresh));
+            sync::publish_key_packages(&mut self.client, &me, fresh, sig).await?;
         }
         while self.mls_pending.len() > Self::MLS_KEYPKG_POOL * 2 {
             self.mls_pending.remove(0);

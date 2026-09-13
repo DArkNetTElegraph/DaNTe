@@ -62,7 +62,7 @@ with no operator who can be compelled to surveil users**. Concretely:
 | Group (channel/voice) content confidentiality | A1, A2, A3, A5, A6, A8 | **Not** against A4 — a member-host is inside the group and sees plaintext by design. |
 | Group forward secrecy | A1–A3, A5, A6, A8; **partial** vs A7 | Channels and group calls each run one MLS group (RFC 9420); the MLS secret tree gives per-message forward secrecy. |
 | Group **post-compromise security** | A7 (after access ends) | MLS rekeys the whole group on every add / remove, and any member can force a rekey by committing an update — a compromised member's key stops being useful once the group next changes. |
-| Removed member loses access | A (the removed member) | The host commits an MLS remove; the group rekeys in O(log n) and the removed member is evicted (cannot process further messages). Re-admission works with a fresh KeyPackage. |
+| Removed member loses access | A (the removed member) | The host commits an MLS remove; the group rekeys in O(log n) and the removed member is evicted (cannot process further messages). Re-admission works with a fresh KeyPackage. **Caveat (§6):** a removed member who still holds the (non-rotating) `channel_id` can still write to the channel's relay log, since that write is unauthenticated — they cannot read new content (MLS holds), but they can flood and, past the log's retention cap, evict genuine history. |
 | Group message authorship (insider forgery) | A4 / any member | MLS binds every application message to its sender's leaf signature key; another member cannot forge a message as someone else. Channel membership **commits** are additionally accepted only from the recorded host identity (`process_from`). |
 | Password-protected channel log | A3, and a leak of the `channel_id` capability | A channel created with a password wraps every relay-log frame in an outer XChaCha20-Poly1305 layer keyed by `Argon2id(password; server_root ‖ channel_id)`. A relay, or anyone who obtains only the `channel_id`, sees opaque blobs and cannot strip the wrapper. The wrapper key is static per `(channel, password)` and does not rotate with MLS epochs; a removed member still holds it but is MLS-evicted underneath, so cannot read the inner content. Never against A4 (a member has the password). Weaving the PSK into the MLS key schedule instead would add epoch rotation — a possible future hardening. |
 | Recipient authenticity | A2, A3, A6 | Only after out-of-band fingerprint / safety-number verification. Trust-on-first-use (TOFU) before that is vulnerable to A2/A6. |
@@ -242,6 +242,42 @@ provide.
 - **Bootstrap trust and blocking.** The bootstrap set is a censorship chokepoint
   and a partition risk. Mitigate with many diverse addresses, DNS + in-repo
   distribution, and user-added peers.
+- **Relay directory writes are unauthenticated (found in a pre-alpha security
+  audit, unresolved).** `Request::PublishPrekeys`, `PublishKeyPackages`, and
+  `PostToChannel` (`dante-relay/src/state.rs`) all derive the owning identity
+  from attacker-supplied bytes with no signature check binding the writer to
+  it. Concretely: anyone can fetch a victim's real prekey bundle, keep every
+  signed field, and republish it with the (unsigned) one-time-prekey list
+  swapped for keys they generated — a legitimate initiator then X3DHs against
+  an OTP the victim never held, and the first message is silently,
+  permanently undeliverable (`x3dh::responder`'s `UnknownOneTimePrekey`
+  dropped at `debug!` in `engine.rs`). This is **not** a confidentiality
+  break — `send_content` resolves the peer's key from this client's own
+  ledger replica, not from the (unauthenticated) bundle, so `Envelope::seal_with`
+  still targets the real identity — but it is a real, silent, targeted
+  denial-of-first-contact any network participant can mount against anyone,
+  and the same unauthenticated-write pattern lets a removed channel member
+  keep posting to (and, via oldest-first eviction past `MAX_CHANNEL_ENTRIES`,
+  destroy the history of) a channel whose `channel_id` they still hold —
+  directly weakening §4's "Removed member loses access" row, which is stated
+  there without this caveat. Fix needs binding these writes to a signature
+  over the claimed identity (and, for prekey bundles, over the OTP list
+  specifically — currently only `spk_pub` is signed in
+  `PreKeyBundle::verify()`), not attempted here; it is a protocol change, not
+  a patch.
+- **MLS `KeyPackage`s carry no binding to the DaNTe identity that published
+  them (found in the same audit, unresolved).** `dante-mls`'s
+  `publish_key_package` pairs caller-chosen credential bytes with a freshly
+  generated, unrelated signature keypair; nothing signs the credential with
+  the publisher's `idk`, and the engine adds a fetched `KeyPackage` to a group
+  with no check that its credential equals the peer id it was fetched for.
+  Combined with the unauthenticated `PublishKeyPackages` above, an attacker
+  can flood a victim's KeyPackage queue and get their own package served
+  instead. Impact is capped at join-denial plus a phantom roster
+  entry — the Welcome is still DM'd sealed to the real identity's
+  ledger-attested key, which the attacker cannot obtain — but it is real
+  insecure design, not just a hardening gap. Same fix direction as above:
+  sign the credential.
 
 ## 7. Cryptographic posture
 

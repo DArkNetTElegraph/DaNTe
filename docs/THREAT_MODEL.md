@@ -281,7 +281,7 @@ provide.
     fully) is still a real follow-up, not attempted here.
   - **PostToChannel — fixed via a relay-side channel roster, not just a
     signature.** A signature alone (`identity` + a per-post signature over
-    [`post_to_channel_challenge`], now required and checked against the
+    `post_to_channel_challenge`, now required and checked against the
     ledger the same way `PublishKeyPackages` is) proves *who* is posting but
     not that they're *still a member* — the relay had no notion of channel
     membership at all before this fix, so it couldn't tell a current member

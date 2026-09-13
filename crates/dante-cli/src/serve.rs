@@ -713,6 +713,13 @@ struct Shared {
     /// `embeds` — searching reveals the query text and this machine's IP to
     /// the provider.
     gifsearch: AtomicBool,
+    /// Local rate limit on GIF search (`/api/gifsearch/query` and `/pick`):
+    /// one bucket, since this is a single-user localhost API, not per-IP like
+    /// a relay's. Bounds how fast a runaway loop (a buggy tab, a stuck
+    /// debounce) can burn through the operator's metered Tenor/Giphy quota;
+    /// the CSRF guard already keeps this same-origin-only, this is about
+    /// quota, not abuse from elsewhere.
+    gif_ratelimit: Mutex<dante_net::ratelimit::TokenBucket>,
     cmd: mpsc::Sender<Cmd>,
     /// How to connect the engine after onboarding.
     boot: Bootstrap,
@@ -910,6 +917,10 @@ pub async fn run_on(
         embeds: AtomicBool::new(false),
         gif_provider: crate::gifsearch::Provider::from_env(),
         gifsearch: AtomicBool::new(false),
+        // 20 tokens, refilling at 0.5/s (30/min sustained): comfortable
+        // headroom for interactive typing against the SPA's 350ms debounce,
+        // low enough to bound a runaway loop against a metered quota.
+        gif_ratelimit: Mutex::new(dante_net::ratelimit::TokenBucket::new(20.0, 0.5, now_ms())),
         cmd: cmd_tx,
         boot,
         pending_rx: Mutex::new(Some(cmd_rx)),
@@ -4496,6 +4507,15 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 )
                 .await;
             }
+            if !shared.gif_ratelimit.lock().await.try_take(now_ms(), 1.0) {
+                return respond(
+                    &mut stream,
+                    429,
+                    "application/json",
+                    b"{\"error\":\"too many GIF searches, slow down\"}",
+                )
+                .await;
+            }
             #[derive(serde::Deserialize)]
             struct Req {
                 q: String,
@@ -4526,6 +4546,15 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                     403,
                     "application/json",
                     b"{\"error\":\"GIF search is off\"}",
+                )
+                .await;
+            }
+            if !shared.gif_ratelimit.lock().await.try_take(now_ms(), 1.0) {
+                return respond(
+                    &mut stream,
+                    429,
+                    "application/json",
+                    b"{\"error\":\"too many GIF requests, slow down\"}",
                 )
                 .await;
             }

@@ -978,7 +978,14 @@ infrastructure. Reached. ---**
   happens to be on (same reasoning that made `/api/unfurl` a `POST`). SPA: a 🎬 composer
   button (shown only when available and opted in) opens a search box + result
   grid; a Settings toggle states the third-party-contact tradeoff before
-  turning it on. See [`THREAT_MODEL.md`](THREAT_MODEL.md) §4.
+  turning it on. See [`THREAT_MODEL.md`](THREAT_MODEL.md) §4. Both endpoints
+  share a single local token-bucket rate limit (20 capacity, 0.5/s refill —
+  `Shared::gif_ratelimit`, reusing `dante_net::ratelimit::TokenBucket`) so a
+  runaway loop can't burn through the operator's metered API quota; this is a
+  single-user localhost API so one shared bucket is enough, unlike a relay's
+  per-IP limiting. Giphy's content rating defaults to the most restrictive
+  (`g`) and widens only via `GIPHY_RATING=pg|pg-13|r`; an unrecognised value
+  warns and falls back to `g` rather than being forwarded to the API as-is.
 - **URL embeds** *(done — opt-in, serve-side)*: **off by default**; a
   Settings toggle flips it and the SPA re-asserts the choice to `dante serve`
   on every load (`POST /api/embeds`), so a stale flag can't silently keep it

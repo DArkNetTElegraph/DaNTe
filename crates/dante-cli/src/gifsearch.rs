@@ -14,6 +14,10 @@
 //! checks the host against an allowlist of the two providers' known CDN
 //! domains before running it through [`crate::unfurl::fetch`]'s existing
 //! SSRF-guarded, capped, timed-out HTTP client.
+//!
+//! Giphy's content rating defaults to `g` (the most restrictive); the
+//! operator can widen it with `GIPHY_RATING=pg|pg-13|r`. Tenor has no
+//! equivalent knob here — its `contentfilter=medium` is fixed.
 
 use std::time::Duration;
 
@@ -44,7 +48,32 @@ pub struct GifResult {
 /// neither key is set — the feature is simply unavailable, not degraded.
 pub enum Provider {
     Tenor(String),
-    Giphy(String),
+    /// `(api_key, rating)` — rating is one of Giphy's own values
+    /// (`g`/`pg`/`pg-13`/`r`), checked at startup so a typo fails loudly
+    /// instead of silently sending an unrecognised value to the API.
+    Giphy(String, &'static str),
+}
+
+/// Giphy's own content-rating values, most to least restrictive.
+const GIPHY_RATINGS: [&str; 4] = ["g", "pg", "pg-13", "r"];
+
+/// Match `requested` (`GIPHY_RATING`, case-insensitive) against Giphy's
+/// values, falling back to the most restrictive (`g`) — and warning, rather
+/// than silently forwarding a typo to the API — when it's set but unrecognised.
+fn resolve_giphy_rating(requested: &str) -> &'static str {
+    GIPHY_RATINGS
+        .iter()
+        .find(|r| requested.eq_ignore_ascii_case(r))
+        .copied()
+        .unwrap_or_else(|| {
+            if !requested.is_empty() {
+                eprintln!(
+                    "dante: GIPHY_RATING={requested:?} is not one of g/pg/pg-13/r; \
+                     using the default (g)."
+                );
+            }
+            "g"
+        })
 }
 
 impl Provider {
@@ -56,7 +85,9 @@ impl Provider {
         }
         if let Ok(k) = std::env::var("GIPHY_API_KEY") {
             if !k.is_empty() {
-                return Some(Provider::Giphy(k));
+                let requested = std::env::var("GIPHY_RATING").unwrap_or_default();
+                let rating = resolve_giphy_rating(&requested);
+                return Some(Provider::Giphy(k, rating));
             }
         }
         None
@@ -65,7 +96,7 @@ impl Provider {
     pub fn name(&self) -> &'static str {
         match self {
             Provider::Tenor(_) => "tenor",
-            Provider::Giphy(_) => "giphy",
+            Provider::Giphy(_, _) => "giphy",
         }
     }
 }
@@ -81,9 +112,9 @@ pub async fn search(provider: &Provider, query: &str) -> Result<Vec<GifResult>, 
             "https://tenor.googleapis.com/v2/search?q={q}&key={key}&client_key=dante\
              &limit={MAX_RESULTS}&media_filter=tinygif,gif&contentfilter=medium"
         ),
-        Provider::Giphy(key) => format!(
+        Provider::Giphy(key, rating) => format!(
             "https://api.giphy.com/v1/gifs/search?api_key={key}&q={q}\
-             &limit={MAX_RESULTS}&rating=g"
+             &limit={MAX_RESULTS}&rating={rating}"
         ),
     };
     let deadline = Instant::now() + SEARCH_BUDGET;
@@ -100,7 +131,7 @@ pub async fn search(provider: &Provider, query: &str) -> Result<Vec<GifResult>, 
     let json: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(match provider {
         Provider::Tenor(_) => parse_tenor(&json),
-        Provider::Giphy(_) => parse_giphy(&json),
+        Provider::Giphy(_, _) => parse_giphy(&json),
     })
 }
 
@@ -208,6 +239,20 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn giphy_rating_defaults_safely_and_accepts_case_insensitive_values() {
+        assert_eq!(resolve_giphy_rating(""), "g", "unset: most restrictive");
+        assert_eq!(resolve_giphy_rating("g"), "g");
+        assert_eq!(resolve_giphy_rating("PG"), "pg", "case-insensitive");
+        assert_eq!(resolve_giphy_rating("pg-13"), "pg-13");
+        assert_eq!(resolve_giphy_rating("R"), "r");
+        assert_eq!(
+            resolve_giphy_rating("nc-17"),
+            "g",
+            "unrecognised: falls back to the safe default, never forwarded as-is"
+        );
+    }
 
     #[test]
     fn host_allowlist_rejects_lookalikes_and_non_cdn_hosts() {

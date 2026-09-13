@@ -203,6 +203,30 @@ async fn main() -> Result<()> {
     }
 }
 
+/// `--sfu-mesh-limit`, clamped to what the SFU can actually admit
+/// ([`dante_cli::serve::SFU_MAX_MESH_LIMIT`]). A higher configured limit
+/// would tell an over-limit room to switch to the SFU at a size the SFU
+/// cannot admit past — worse than staying in mesh, not better — so this is
+/// enforced here rather than trusted from the flag.
+fn parse_sfu_mesh_limit(flags: &HashMap<String, String>) -> usize {
+    let requested = flags
+        .get("sfu-mesh-limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    if requested > dante_cli::serve::SFU_MAX_MESH_LIMIT {
+        eprintln!(
+            "dante: --sfu-mesh-limit {requested} exceeds the SFU's actual capacity \
+             ({} — one receive slot per possible other participant); clamping to it. \
+             A higher limit would tell an over-limit room to switch to the SFU at a \
+             size the SFU cannot admit past, which is worse than staying in mesh.",
+            dante_cli::serve::SFU_MAX_MESH_LIMIT
+        );
+        dante_cli::serve::SFU_MAX_MESH_LIMIT
+    } else {
+        requested
+    }
+}
+
 async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
     use std::path::PathBuf;
 
@@ -268,10 +292,7 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         pow,
         also_relay_listen,
         sfu: flags.contains_key("sfu"),
-        sfu_mesh_limit: flags
-            .get("sfu-mesh-limit")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8),
+        sfu_mesh_limit: parse_sfu_mesh_limit(flags),
         // `serve` narrates startup on stderr; the structured sink is for the
         // desktop shell's boot screen.
         progress: None,
@@ -1883,7 +1904,7 @@ fn bail_soft(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_flags;
+    use super::{parse_flags, parse_sfu_mesh_limit};
 
     #[test]
     fn boolean_flags_do_not_swallow_the_next_flag() {
@@ -1902,5 +1923,29 @@ mod tests {
         let flags = parse_flags(["--pow-bits=8", "--sfu"].map(String::from).into_iter());
         assert_eq!(flags.get("pow-bits").map(String::as_str), Some("8"));
         assert!(flags.contains_key("sfu"));
+    }
+
+    #[test]
+    fn sfu_mesh_limit_is_clamped_to_what_the_sfu_can_admit() {
+        let flags = parse_flags(["--sfu-mesh-limit", "1"].map(String::from).into_iter());
+        assert_eq!(parse_sfu_mesh_limit(&flags), 1, "under the cap: unchanged");
+
+        let flags = parse_flags(["--sfu-mesh-limit", "15"].map(String::from).into_iter());
+        assert_eq!(
+            parse_sfu_mesh_limit(&flags),
+            15,
+            "exactly at the cap: unchanged"
+        );
+
+        let flags = parse_flags(["--sfu-mesh-limit", "50"].map(String::from).into_iter());
+        assert_eq!(
+            parse_sfu_mesh_limit(&flags),
+            dante_cli::serve::SFU_MAX_MESH_LIMIT,
+            "over the cap: clamped, not passed through -- a higher limit would tell an \
+             over-capacity room to switch to an SFU that cannot actually admit it"
+        );
+
+        let flags = parse_flags(std::iter::empty::<String>());
+        assert_eq!(parse_sfu_mesh_limit(&flags), 8, "default when unset");
     }
 }

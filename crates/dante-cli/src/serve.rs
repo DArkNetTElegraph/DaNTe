@@ -65,6 +65,16 @@ const INBOX_CAP: usize = 500;
 /// A typing signal is shown for this long after the last keystroke it carries.
 const TYPING_FRESH_MS: u64 = 4_000;
 
+/// The largest `--sfu-mesh-limit` that can ever mean anything: the SPA's own
+/// `SFU_RECV_SLOTS` (in `web/index.html`) pre-allocates this many receive-only
+/// m-lines per participant, and the relay's `SfuRooms::DEFAULT_ROOM_SIZE` is
+/// exactly one more (room capacity = every other participant's slot, plus
+/// yours). A mesh limit above this would tell a room "switch to the SFU" at a
+/// size the SFU cannot actually admit past — worse than staying in mesh, not
+/// better — so callers must clamp to it (see `cmd_serve`'s `--sfu-mesh-limit`
+/// parsing).
+pub const SFU_MAX_MESH_LIMIT: usize = 15;
+
 /// A request from the HTTP side to the single engine task. The reply carries a
 /// string (an id / root on success, or an error message).
 enum Cmd {
@@ -4029,6 +4039,15 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         }
 
         ("POST", "/api/sfu/join") => {
+            if !shared.boot.sfu {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"SFU mode is off (start with --sfu)\"}",
+                )
+                .await;
+            }
             #[derive(serde::Deserialize)]
             struct Req {
                 channel: String,
@@ -4060,6 +4079,15 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         }
 
         ("POST", "/api/sfu/ice") => {
+            if !shared.boot.sfu {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"SFU mode is off (start with --sfu)\"}",
+                )
+                .await;
+            }
             #[derive(serde::Deserialize)]
             struct Req {
                 channel: String,
@@ -4079,6 +4107,15 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         }
 
         ("POST", "/api/sfu/leave") => {
+            if !shared.boot.sfu {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"SFU mode is off (start with --sfu)\"}",
+                )
+                .await;
+            }
             #[derive(serde::Deserialize)]
             struct Req {
                 channel: String,
@@ -4096,6 +4133,15 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
         }
 
         ("GET", "/api/sfu/ice") => {
+            if !shared.boot.sfu {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"SFU mode is off (start with --sfu)\"}",
+                )
+                .await;
+            }
             let channel = query
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("channel="))

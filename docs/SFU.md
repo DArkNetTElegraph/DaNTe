@@ -119,6 +119,12 @@ negotiates the relay wire through the local API:
 | `GET /api/sfu/ice?channel=&slot=` | `Engine::sfu_pull` → `SfuPull`, returns `{candidates}` |
 | `POST /api/sfu/leave {channel, slot}` | `Engine::sfu_leave` → `SfuLeave` |
 
+All four reject with `403` if `dante serve` was not started with `--sfu` —
+enforced server-side, not left to the SPA's own gating alone. Without this, a
+caller that skips the SPA's JS entirely (a raw HTTP client, or a compromised
+page) could reach a relay's SFU whenever the relay happened to support it,
+regardless of whether the operator opted the *client* into SFU mode at all.
+
 `GET /api/state` reports `sfu` and `sfu_mesh_limit` to the page. The SPA:
 
 - chooses the mode from the channel's **MLS roster** (all members compute the
@@ -131,8 +137,17 @@ negotiates the relay wire through the local API:
 - on a room above the limit where SFrame is unavailable (or the key cannot be
   derived, or the join fails), **refuses the call and says why** rather than
   fall back to a mesh that no longer interconnects with the SFU peers;
-- shows a one-time hint in a mesh room that has grown past the limit: leave
-  and rejoin to switch.
+- shows a hint in a mesh room that has grown past the limit: leave and rejoin
+  to switch — shown once per room (`voiceRtc.sfuHinted`, reset on leaving),
+  not once per session;
+- blocks the mesh-sync poll (`refreshVoice`/`refreshGroupCalls`, every 1.5s)
+  for the whole SFU negotiation window, not just once negotiation finishes:
+  `voiceRtc.sfu` is only set at the very end of a multi-second wait (SFrame
+  key + SDP/ICE), so a poll tick mid-negotiation would otherwise see neither
+  it nor a useful `pendingMode` (already cleared) and open real mesh legs,
+  splitting the room the mode switch exists to keep exclusive. A dedicated
+  `voiceRtc.sfuPending` flag covers the gap, set before the wait begins and
+  cleared on every exit path (success, refusal, or leaving).
 
 The desktop shell deliberately does **not** offer SFU mode: its native audio
 path (`dante-audio` → engine media) has no SFrame equivalent, so the relay
@@ -141,7 +156,13 @@ exists.
 
 ## Mesh vs SFU
 
-Implemented as a **roster threshold** (default 8, `--sfu-mesh-limit`):
+Implemented as a **roster threshold** (default 8, `--sfu-mesh-limit`, clamped
+server-side to `SFU_MAX_MESH_LIMIT` = 15 — the SPA's `SFU_RECV_SLOTS`, one
+receive-only m-line per possible other participant, matching the relay's
+16-slot room capacity. A configured limit above that would tell an
+over-capacity room to switch to an SFU that cannot actually admit it, which is
+worse than staying in mesh, so it is enforced, not just documented, in
+`crates/dante-cli/src/main.rs`'s flag parsing):
 
 - **At or below the limit:** mesh. Per-leg DTLS-SRTP means the relay never
   sees media content, and SFrame is a bonus.

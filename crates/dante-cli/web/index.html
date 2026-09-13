@@ -4000,6 +4000,15 @@ const voiceRtc = {
   // Relay-hosted SFU mode: `{ pc, slot, timer, pending, audios }` for the one
   // connection to the relay's SFU, instead of `peers`.
   sfu: null,
+  // True from the moment we commit to SFU mode until `sfu` is set (success)
+  // or the join is torn down (failure) — covers the whole negotiation
+  // window (SFrame key wait + SDP/ICE), which can take seconds. `sfu` alone
+  // is not enough to gate the mesh-sync poll: it is only set at the very end
+  // of that window, so without this flag a 1.5s refreshVoice/refreshGroupCalls
+  // tick firing mid-negotiation would see neither `sfu` nor a useful
+  // `pendingMode` (already cleared) and open real mesh legs, splitting the
+  // room the SFU/mesh switch is meant to keep exclusive.
+  sfuPending: false,
   pendingMode: null,      // "sfu" | "mesh" | "refuse", chosen at join time
   sfuNotice: null,        // why the SFU was not used ("no-sframe", …)
   sfuHinted: false,       // rejoin hint already shown for a too-large mesh room
@@ -4168,6 +4177,11 @@ async function voiceRtcStart(channelId) {
 }
 
 function voiceRtcStop() {
+  voiceRtc.sfuPending = false;
+  // The rejoin-to-SFU hint is per-room, not per-session: leaving resets it
+  // so a different room that later also outgrows the mesh limit gets its
+  // own hint instead of "already shown once, ever" silently suppressing it.
+  voiceRtc.sfuHinted = false;
   if (voiceRtc.sfu) voiceSfuStop();
   sframeStop();
   stopMonitor(store.me.fingerprint);
@@ -4250,7 +4264,10 @@ function voiceStopScreen() {
 // channel with an ad-hoc group call in progress (MLS-membership-driven,
 // store.groupCalls) — whichever has a live entry for it.
 function voiceSyncPeers() {
-  if (voiceRtc.sfu) return;   // SFU mode: one leg to the relay, no peer mesh
+  // SFU mode (or still negotiating it): one leg to the relay, no peer mesh.
+  // `sfuPending` covers the negotiation window `sfu` itself does not: it is
+  // only set once negotiation finishes, seconds after the decision is made.
+  if (voiceRtc.sfu || voiceRtc.sfuPending) return;
   const cid = voiceRtc.channelId;
   if (!cid) return;
   // A mesh room that has outgrown the limit can converge on SFU only by
@@ -4414,10 +4431,14 @@ async function voiceRtcAfterJoin() {
     voiceSyncPeers();
     return true;
   }
+  // Committed to SFU mode: block the mesh-sync poll for the whole
+  // negotiation window, not just once `sfu` itself is set at the end of it.
+  voiceRtc.sfuPending = true;
   // Past the mesh limit the SFU is the only mode that connects; never fall
   // back to a mesh the other participants have already left, and never open
   // an SFU leg before SFrame is armed.
   if (!await sframeEnsureKey(5000)) {
+    voiceRtc.sfuPending = false;
     sfuRefuse("no-key");
     voiceRtcStop();
     return false;
@@ -4425,8 +4446,10 @@ async function voiceRtcAfterJoin() {
   try {
     voiceRtc.sfuNotice = null;
     await voiceSfuStart();
+    voiceRtc.sfuPending = false;
     return true;
   } catch (e) {
+    voiceRtc.sfuPending = false;
     voiceRtcStop();
     sfuRefuse("join-failed", e);
     return false;

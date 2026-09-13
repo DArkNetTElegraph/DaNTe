@@ -4094,6 +4094,24 @@ impl Engine {
         Ok(sync::get_blob(&mut self.client, hash).await?)
     }
 
+    /// Store an ad-hoc image blob (a GIF-search pick, not a per-server asset
+    /// like an emoji/sticker/sound — no name, no `ServerPolicy` entry) and
+    /// return its SHA-256. The caller sends a normal text message referencing
+    /// the hash (`gif:<hex>`); any peer fetches it with [`Engine::fetch_blob`].
+    /// Same size envelope and format check as a sticker image.
+    pub async fn put_gif_blob(&mut self, image: &[u8]) -> Result<[u8; 32], CoreError> {
+        if image.is_empty() || image.len() > 512 * 1024 {
+            return Err(CoreError::Channel("gif image must be 1..=512 KiB"));
+        }
+        let is_gif = image.starts_with(b"GIF87a") || image.starts_with(b"GIF89a");
+        let is_webp = image.starts_with(b"RIFF") && image.get(8..12) == Some(b"WEBP");
+        if !is_gif && !is_webp {
+            return Err(CoreError::Channel("gif image must be a GIF or WebP"));
+        }
+        sync::put_blob(&mut self.client, image).await?;
+        Ok(sha256(image))
+    }
+
     /// Remove `member` from the server that `channel_id` belongs to (and,
     /// with `ban`, block their return). If we host it, act directly; otherwise
     /// — with `PERM_KICK` — DM the host a `KickRequest`. Staff (a member with

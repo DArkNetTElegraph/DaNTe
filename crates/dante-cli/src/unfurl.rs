@@ -98,7 +98,13 @@ pub async fn unfurl(raw_url: &str) -> Result<Preview, String> {
 
 /// One `GET` with redirect-following. Returns `(final_url, body, content_type)`.
 /// `want` (a content-type prefix) is enforced on the final response.
-async fn fetch(
+/// Fetch `start_url` (following up to [`MAX_REDIRECTS`] redirects), enforcing
+/// `cap` bytes and `deadline`, and — if `want` is given — that the response's
+/// `Content-Type` starts with it. Every connection target (initial host and
+/// each redirect hop) must resolve to a public unicast address (SSRF guard).
+/// `pub(crate)`: also used by [`crate::gifsearch`] for a fixed, known-host API
+/// call, not just this module's arbitrary-URL unfurling.
+pub(crate) async fn fetch(
     start_url: &str,
     deadline: Instant,
     cap: usize,

@@ -295,7 +295,18 @@ See the crate README for the exact status list.
   its own piece of work rather than bundled into this decision.
 - **Desktop SFrame**: the native audio path needs its own SFrame (or another
   E2E media layer) before the desktop shell can safely offer SFU mode.
-- **Screen share over SFU** is currently refused in the SPA (the pre-allocated
-  audio slots do not carry video; it needs renegotiation).
+- **Video over SFU** (screen share now, webcam planned later) is currently
+  refused in the SPA — the pre-allocated slots are audio-only, there is no
+  video path at all in an SFU-mode connection.
+  **Decided:** build it, and design it once for both — screen share and the
+  planned webcam feature need the same three pieces (a video codec/slot the
+  SFU forwards, on-demand renegotiation to add that slot only when someone
+  actually starts sending video rather than pre-allocating one per possible
+  sharer the way audio slots are today, and real bandwidth handling for the
+  relay operator), so building screen-share-only first and reworking it for
+  webcam later would mean doing the renegotiation piece twice. Not started —
+  this is a real build (video codec choice, the renegotiation mechanism
+  itself, SFrame-equivalent handling for video frames, bandwidth), not a
+  small addition.
 - **SFU discovery** beyond "the connected relay hosts it", and a per-network
   default rather than a `--sfu` flag.

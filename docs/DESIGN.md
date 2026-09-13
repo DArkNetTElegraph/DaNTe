@@ -1004,8 +1004,9 @@ infrastructure. Reached. ---**
   address (blocks loopback, RFC1918, link-local incl. `169.254.169.254`,
   CGNAT, ULA, `::1`, mapped v4, …); non-`http(s)` schemes refused. The
   privacy cost (your IP reaches the linked site) is stated in the toggle
-  label. A relay-side unfurler that hides the client IP is still a possible
-  future enhancement.
+  label. **Decided:** build a relay-side unfurler that hides the client IP,
+  opt-in per operator like every other relay capability that changes its
+  trust profile — see [`THREAT_MODEL.md`](THREAT_MODEL.md) §4. Not yet built.
 - **Bots** *(done — headless bridge)*: a bot is an **ordinary DaNTe identity**
   (its own keystore, PoW-announced, X3DH/ratchet) — nothing bot-specific at the
   protocol level. `dante bot --keystore K --relay R [--name N] [--auto-join]`

@@ -42,8 +42,8 @@ struct Room {
 }
 
 impl Room {
-    fn new(size: usize) -> Self {
-        let (sfu, events) = Sfu::new(size);
+    fn new(size: usize, ice_servers: Vec<dante_sfu::IceServer>) -> Self {
+        let (sfu, events) = Sfu::new(size, ice_servers);
         Self {
             sfu,
             events,
@@ -70,6 +70,10 @@ pub struct SfuRooms {
     rooms: AsyncMutex<HashMap<[u8; 32], Room>>,
     /// Per-IP token bucket, checking requests sync (no await while held).
     rl: Mutex<KeyedRateLimiter<IpAddr>>,
+    /// The same STUN/TURN policy `Request::GetIceConfig` hands ordinary
+    /// calls. Empty by default (host candidates only) — the operator decides
+    /// whether to configure any, same as for ordinary calls.
+    ice: crate::state::IcePolicy,
 }
 
 impl Default for SfuRooms {
@@ -79,18 +83,57 @@ impl Default for SfuRooms {
 }
 
 impl SfuRooms {
-    /// Rooms with the default slot count.
+    /// Rooms with the default slot count and no configured ICE servers
+    /// (host candidates only).
     pub fn new() -> Self {
         Self::with_room_size(DEFAULT_ROOM_SIZE)
     }
 
-    /// Rooms with `room_size` slots (clamped to what the slot field can carry).
+    /// Rooms with `room_size` slots (clamped to what the slot field can
+    /// carry) and no configured ICE servers.
     pub fn with_room_size(room_size: usize) -> Self {
+        Self::build(room_size, crate::state::IcePolicy::default())
+    }
+
+    /// Rooms with the default slot count, offering `ice` to every
+    /// participant's connection.
+    pub fn with_ice_policy(ice: crate::state::IcePolicy) -> Self {
+        Self::build(DEFAULT_ROOM_SIZE, ice)
+    }
+
+    fn build(room_size: usize, ice: crate::state::IcePolicy) -> Self {
         Self {
             room_size: room_size.clamp(1, u8::MAX as usize),
             rooms: AsyncMutex::new(HashMap::new()),
             rl: Mutex::new(KeyedRateLimiter::new(SFU_RATE.0, SFU_RATE.1)),
+            ice,
         }
+    }
+
+    /// Build the ICE server list a new room's `Sfu` should offer every
+    /// participant, mirroring `Request::GetIceConfig`'s exact logic in
+    /// `state.rs` so mesh calls and SFU calls see the same STUN/TURN policy.
+    fn ice_servers(&self) -> Vec<dante_sfu::IceServer> {
+        let mut out = Vec::new();
+        if !self.ice.stun.is_empty() {
+            out.push(dante_sfu::IceServer {
+                urls: self.ice.stun.clone(),
+                ..Default::default()
+            });
+        }
+        if let (Some(secret), false) = (&self.ice.turn_secret, self.ice.turn.is_empty()) {
+            let ttl = std::time::Duration::from_secs(self.ice.turn_ttl_secs.max(60));
+            if let Ok((username, credential)) =
+                turn::auth::generate_long_term_credentials(secret, ttl)
+            {
+                out.push(dante_sfu::IceServer {
+                    urls: self.ice.turn.clone(),
+                    username,
+                    credential,
+                });
+            }
+        }
+        out
     }
 
     /// Serve an SFU request, or `None` if it is not one.
@@ -150,7 +193,7 @@ impl SfuRooms {
         }
         let entry = rooms
             .entry(room)
-            .or_insert_with(|| Room::new(self.room_size));
+            .or_insert_with(|| Room::new(self.room_size, self.ice_servers()));
         match entry.sfu.add_peer(offer).await {
             Ok((slot, answer)) => {
                 entry.drain();
@@ -238,6 +281,45 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn ice_servers_mirrors_get_ice_config_and_a_real_join_still_negotiates() {
+        // No policy configured -> no ICE servers offered (host candidates only).
+        let rooms = SfuRooms::with_room_size(2);
+        assert_eq!(rooms.ice_servers(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_configured_ice_policy_is_minted_into_stun_and_turn_entries() {
+        let ice = crate::state::IcePolicy {
+            stun: vec!["stun:s.example:3478".into()],
+            turn: vec!["turn:t.example:3478".into()],
+            turn_secret: Some("shared-secret".into()),
+            turn_ttl_secs: 600,
+        };
+        let rooms = SfuRooms::with_ice_policy(ice);
+        let servers = rooms.ice_servers();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].urls, vec!["stun:s.example:3478".to_string()]);
+        assert!(servers[0].username.is_empty());
+        assert_eq!(servers[1].urls, vec!["turn:t.example:3478".to_string()]);
+        assert!(
+            !servers[1].username.is_empty(),
+            "TURN got minted credentials"
+        );
+        assert!(!servers[1].credential.is_empty());
+
+        // A real join still negotiates fine once ICE servers are attached to
+        // the room's Sfu — end to end, not just the ice_servers() builder.
+        let room = [7u8; 32];
+        let offer = offer(1).await;
+        let r = join(&rooms, room, &offer, 1_000).await;
+        let Response::SfuAnswer { slot, answer } = r else {
+            panic!("expected an answer, got {r:?}");
+        };
+        assert_eq!(slot, 0);
+        assert!(answer.contains("m=audio"));
     }
 
     #[tokio::test]

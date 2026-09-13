@@ -27,7 +27,7 @@ renegotiation. Slots with no participant stay silent.
 use dante_sfu::Sfu;
 
 # async fn example(offer_sdp: &str) -> Result<(), dante_sfu::SfuError> {
-let (mut sfu, mut events) = Sfu::new(8);
+let (mut sfu, mut events) = Sfu::new(8, vec![]);
 let (slot, answer_sdp) = sfu.add_peer(offer_sdp).await?;
 // hand `answer_sdp` back; feed the participant's ICE in:
 sfu.add_ice(slot, "candidate:...").await?;

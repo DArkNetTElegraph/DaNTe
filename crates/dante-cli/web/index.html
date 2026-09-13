@@ -4410,6 +4410,8 @@ function sfuRefuse(reason, err) {
       ? "This room is larger than the mesh limit (" + limit + "), and this browser cannot encrypt call frames (no SFrame / createEncodedStreams). Joining would let the relay see unencrypted audio, so the call was not joined. Use a Chromium-based browser, or a smaller room."
       : reason === "no-key"
       ? "This room is larger than the mesh limit (" + limit + "), and the call's media key could not be derived in time. Joining the SFU without it would expose unencrypted audio, so the call was not joined. Please retry."
+      : reason === "connection-lost"
+      ? "Lost the connection to the relay's SFU mid-call — the call has ended. Rejoin to reconnect."
       : "Could not reach the relay's SFU (" + (err && err.message ? err.message : err) + "); the call was not joined. Please retry.";
   ui.sys(msg);
   ui.say(msg);
@@ -4487,6 +4489,20 @@ async function voiceSfuStart() {
     // The slot arrives with the answer; buffer trickle until then.
     if (sfu.slot == null) sfu.pending.push(e.candidate.candidate);
     else api.sfuIce(cid, sfu.slot, e.candidate.candidate).catch(() => {});
+  };
+  // Unlike a mesh leg (one connection per other participant, so losing one
+  // just drops that person), this single connection *is* the whole call —
+  // there is no fallback leg left once it fails. Previously nothing
+  // detected that at all: audio would just stop, forever, with no notice
+  // and no cleanup (the ICE-pull timer kept polling a dead connection).
+  // `voiceRtc.sfu === sfu` guards against a stale callback firing after
+  // this connection has already been superseded by a later one.
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "failed" && voiceRtc.sfu === sfu) {
+      sfuRefuse("connection-lost");
+      voiceRtcStop();
+      voiceRerender();
+    }
   };
 
   await pc.setLocalDescription(await pc.createOffer());

@@ -129,6 +129,11 @@ pub enum Request {
         /// Our slot.
         slot: u8,
     },
+    /// Ask the relay to fetch `url`'s link-preview metadata on our behalf, so
+    /// our own IP never reaches the linked site. Opt-in on the relay's side
+    /// (feature `unfurl` and an operator flag); refused with
+    /// [`Response::Error`] if the relay does not offer it.
+    UnfurlLink(String),
 }
 
 /// One ICE server entry (STUN or TURN). `username` / `credential` are empty
@@ -190,6 +195,20 @@ pub enum Response {
     },
     /// Reply to [`Request::SfuPull`]: the SFU's ICE candidates for us.
     SfuIce(Vec<String>),
+    /// Reply to [`Request::UnfurlLink`]: the fetched preview.
+    /// `image_data_uri` empty means no image was found or fetched.
+    UnfurlPreview {
+        /// The final URL after any redirects.
+        url: String,
+        /// Site name, or the host if none was found.
+        site: String,
+        /// Page title, or the host if none was found.
+        title: String,
+        /// Short description (empty if none was found).
+        description: String,
+        /// A `data:` URI for the preview image, or empty for none.
+        image_data_uri: String,
+    },
 }
 
 const REQ_PING: u8 = 0;
@@ -215,6 +234,7 @@ const REQ_SFU_JOIN: u8 = 19;
 const REQ_SFU_ICE: u8 = 20;
 const REQ_SFU_PULL: u8 = 21;
 const REQ_SFU_LEAVE: u8 = 22;
+const REQ_UNFURL: u8 = 23;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -232,6 +252,7 @@ const RES_POSTED: u8 = 12;
 const RES_P2P_PEERS: u8 = 13;
 const RES_SFU_ANSWER: u8 = 14;
 const RES_SFU_ICE: u8 = 15;
+const RES_UNFURL: u8 = 16;
 
 /// Upper bound on how many elements a length-prefixed list decoder will
 /// pre-reserve. A count field is untrusted `u32` wire data and each element is
@@ -405,6 +426,9 @@ impl Request {
             Request::SfuLeave { room, slot } => {
                 w.u8(REQ_SFU_LEAVE).fixed(room).u8(*slot);
             }
+            Request::UnfurlLink(url) => {
+                w.u8(REQ_UNFURL).string(url);
+            }
         }
         w.into_vec()
     }
@@ -466,6 +490,7 @@ impl Request {
                 room: r.fixed::<32>()?,
                 slot: r.u8()?,
             },
+            REQ_UNFURL => Request::UnfurlLink(r.string()?),
             REQ_FETCH => {
                 let n = r.u32()? as usize;
                 if n > r.remaining() {
@@ -517,6 +542,7 @@ impl Request {
             Request::SfuIce { .. } => "SfuIce",
             Request::SfuPull { .. } => "SfuPull",
             Request::SfuLeave { .. } => "SfuLeave",
+            Request::UnfurlLink(_) => "UnfurlLink",
         }
     }
 }
@@ -607,6 +633,20 @@ impl Response {
                 w.u8(RES_SFU_ICE);
                 write_str_list(&mut w, candidates);
             }
+            Response::UnfurlPreview {
+                url,
+                site,
+                title,
+                description,
+                image_data_uri,
+            } => {
+                w.u8(RES_UNFURL)
+                    .string(url)
+                    .string(site)
+                    .string(title)
+                    .string(description)
+                    .string(image_data_uri);
+            }
         }
         w.into_vec()
     }
@@ -660,6 +700,13 @@ impl Response {
                 answer: r.string()?,
             },
             RES_SFU_ICE => Response::SfuIce(read_str_list(&mut r)?),
+            RES_UNFURL => Response::UnfurlPreview {
+                url: r.string()?,
+                site: r.string()?,
+                title: r.string()?,
+                description: r.string()?,
+                image_data_uri: r.string()?,
+            },
             other => {
                 return Err(WireError::BadDiscriminant {
                     ty: "Response",
@@ -740,6 +787,7 @@ mod tests {
             room: [10u8; 32],
             slot: 3,
         });
+        rt_req(Request::UnfurlLink("https://example.org/article".into()));
     }
 
     #[test]
@@ -774,6 +822,20 @@ mod tests {
             "candidate:1 1 udp 1 127.0.0.1 1 typ host".into(),
             String::new(),
         ]));
+        rt_res(Response::UnfurlPreview {
+            url: "https://example.org/article".into(),
+            site: "Example".into(),
+            title: "A title".into(),
+            description: "A description".into(),
+            image_data_uri: "data:image/png;base64,AA==".into(),
+        });
+        rt_res(Response::UnfurlPreview {
+            url: "https://example.org/article".into(),
+            site: "example.org".into(),
+            title: "example.org".into(),
+            description: String::new(),
+            image_data_uri: String::new(),
+        });
         rt_res(Response::IceConfig(vec![
             IceCfg {
                 urls: vec!["stun:stun.example.org:3478".into()],

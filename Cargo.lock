@@ -930,12 +930,9 @@ dependencies = [
  "dante-ledger",
  "dante-net",
  "dante-relay",
- "rustls",
- "rustls-native-certs",
  "serde",
  "serde_json",
  "tokio",
- "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1033,8 +1030,11 @@ dependencies = [
  "dante-p2p",
  "dante-proto",
  "proptest",
+ "rustls",
+ "rustls-native-certs",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 

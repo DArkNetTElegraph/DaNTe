@@ -19,9 +19,17 @@ default = ["p2p"]
 # `--no-default-features` for a TCP-only relay with no libp2p tree.
 p2p = ["dep:dante-p2p", "dante-net/p2p"]
 # Host the group-call SFU signalling (`SfuJoin`/`SfuIce`/`SfuPull`/`SfuLeave`).
-# Off by default: the media component is proven but the client integration is
-# not shipped, and this pulls the WebRTC tree into the relay binary.
+# Off by default because it pulls the WebRTC dependency tree into the relay
+# binary — the browser SPA and the CLI/engine path both drive it when it's
+# enabled (see docs/SFU.md), the client integration is not the reason it's
+# off.
 sfu = ["dep:dante-sfu"]
+# Opt-in relay-side link unfurler: fetches a linked URL's metadata on a
+# client's behalf so the client's own IP never reaches the linked site. Off
+# by default like every other relay capability that changes what the relay
+# does or sees (this one especially — it makes outbound requests and learns
+# which URLs a client asked about). See docs/THREAT_MODEL.md §4.
+unfurl = ["dante-net/unfurl"]
 
 [dependencies]
 dante-crypto.workspace = true

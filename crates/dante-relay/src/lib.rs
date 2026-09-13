@@ -16,5 +16,7 @@ pub mod run;
 pub mod sfu;
 pub mod state;
 pub mod turn_server;
+#[cfg(feature = "unfurl")]
+pub mod unfurl;
 
 pub use run::{run, RunConfig, DEFAULT_LISTEN};

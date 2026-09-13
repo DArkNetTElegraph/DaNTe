@@ -305,6 +305,34 @@ pub async fn sfu_pull(
     }
 }
 
+/// Ask the relay to fetch `url`'s link-preview metadata on our behalf
+/// (feature `unfurl`, and the operator must have opted in with
+/// `--allow-relay-unfurl`) — the relay's own IP reaches the linked site
+/// instead of ours. `Err` if the relay does not offer it, refuses (rate
+/// limit, oversized URL), or the fetch itself fails (bad URL, non-public
+/// target, timeout, oversized response).
+pub async fn unfurl_link(
+    client: &mut Client,
+    url: &str,
+) -> Result<(String, String, String, String, Option<String>), NetError> {
+    match client.request(&Request::UnfurlLink(url.to_owned())).await? {
+        Response::UnfurlPreview {
+            url,
+            site,
+            title,
+            description,
+            image_data_uri,
+        } => Ok((
+            url,
+            site,
+            title,
+            description,
+            (!image_data_uri.is_empty()).then_some(image_data_uri),
+        )),
+        other => Err(NetError::Peer(format!("UnfurlLink: {other:?}"))),
+    }
+}
+
 /// Leave the SFU room; the SFU closes our leg and frees the slot.
 pub async fn sfu_leave(client: &mut Client, room: &[u8; 32], slot: u8) -> Result<(), NetError> {
     match client

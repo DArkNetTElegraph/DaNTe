@@ -103,6 +103,9 @@ fn parse_args() -> RunConfig {
             "--p2p-seed" => {
                 cfg.p2p_seed = it.next();
             }
+            "--allow-relay-unfurl" => {
+                cfg.allow_unfurl = true;
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "usage: dante-relay [--listen ADDR] [--min-pow-bits N]\n  \
@@ -111,6 +114,7 @@ fn parse_args() -> RunConfig {
                      [--turn-listen HOST:PORT] [--turn-public-ip IP]  (run an in-process TURN server)\n  \
                      [--p2p-bootstrap MULTIADDR,...]  (libp2p bootstrap peers offered to p2p clients)\n  \
                      [--p2p-listen MULTIADDR] [--p2p-seed HEX32]  (serve clients over libp2p; feature p2p)\n  \
+                     [--allow-relay-unfurl]  (fetch link previews for clients; feature unfurl, off by default)\n  \
                      the TURN secret is read from DANTE_TURN_SECRET (preferred) or --turn-secret\n  \
                      defaults: --listen {DEFAULT_LISTEN}, PoW floor from LedgerParams::default()"
                 );

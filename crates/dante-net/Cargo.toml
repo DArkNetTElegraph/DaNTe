@@ -13,6 +13,11 @@ description = "DaNTe networking: framed TCP transport, relay request/response pr
 # Pulls the libp2p tree, so it is off by default and turned on transitively by
 # `dante-core`/`dante-cli`'s own `p2p` feature.
 p2p = ["dep:dante-p2p"]
+# The SSRF-guarded link-preview fetcher, shared by dante-cli's own local
+# unfurler and dante-relay's opt-in relay-side one. Off by default: pulls a
+# minimal hand-rolled HTTPS client (rustls + the OS trust store), not a full
+# HTTP client crate.
+unfurl = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs"]
 
 [dependencies]
 dante-crypto.workspace = true
@@ -22,6 +27,12 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "time", "macros"] }
 async-trait = "0.1"
+# `unfurl` feature only. Versions match: this is a straight move of what used
+# to be dante-cli's own unfurl.rs, so both consumers (dante-cli's local
+# unfurl, dante-relay's opt-in relay-side one) share one implementation.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

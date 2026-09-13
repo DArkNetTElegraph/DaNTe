@@ -27,7 +27,9 @@ pub const DEFAULT_ROOM_SIZE: usize = 16;
 /// the refill has to stay above a fast poll loop.
 const SFU_RATE: (f64, f64) = (300.0, 120.0);
 /// Concurrent rooms per relay. Each room is a handful of WebRTC connections,
-/// so this bounds the relay's media-plane memory.
+/// so this bounds the relay's media-plane memory — the per-connection NACK
+/// send buffers are why `configure_audio_nack` (`dante-sfu`) keeps their
+/// size small rather than letting them multiply this bound by 16x.
 const MAX_ROOMS: usize = 64;
 /// An SDP offer larger than this is not a real one.
 const MAX_OFFER_BYTES: usize = 64 * 1024;

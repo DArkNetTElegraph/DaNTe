@@ -321,6 +321,17 @@ type Built = (
 /// instead means two `dante-voice` peers — including the SFU legs in
 /// `crates/dante-sfu`, which mirrors this same helper — actually recover a
 /// dropped packet via retransmission rather than relying on Opus FEC alone.
+///
+/// Duplicated (not shared) with `dante_sfu::configure_audio_nack` on
+/// purpose — see that crate's `src/lib.rs` for why. If you change one copy,
+/// change the other.
+///
+/// `with_size(64)`, not the builder's own default of 1024 packets: a 1:1
+/// call only opens one such buffer, but `dante-sfu` opens one per other
+/// participant per subscriber, so the size picked here is the one that
+/// actually has to stay small — kept the same in both places rather than
+/// diverging for no reason. 64 packets is ~1.3s of 20ms Opus frames,
+/// comfortably past the RTT a NACK round-trip needs on any real network.
 fn configure_audio_nack(registry: Registry, media: &mut MediaEngine) -> Registry {
     media.register_feedback(
         RTCPFeedback {
@@ -330,7 +341,10 @@ fn configure_audio_nack(registry: Registry, media: &mut MediaEngine) -> Registry
         RtpCodecKind::Audio,
     );
     registry
-        .with(Slot::NackResponder, NackResponderBuilder::new().build())
+        .with(
+            Slot::NackResponder,
+            NackResponderBuilder::new().with_size(64).build(),
+        )
         .with(Slot::NackGenerator, NackGeneratorBuilder::new().build())
 }
 

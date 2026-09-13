@@ -4433,26 +4433,27 @@ async function voiceRtcAfterJoin() {
   }
   // Committed to SFU mode: block the mesh-sync poll for the whole
   // negotiation window, not just once `sfu` itself is set at the end of it.
+  // One `finally` clears it on every exit path, so a future added return (or
+  // an unexpected throw from sframeEnsureKey itself) can't leave it stuck.
   voiceRtc.sfuPending = true;
-  // Past the mesh limit the SFU is the only mode that connects; never fall
-  // back to a mesh the other participants have already left, and never open
-  // an SFU leg before SFrame is armed.
-  if (!await sframeEnsureKey(5000)) {
-    voiceRtc.sfuPending = false;
-    sfuRefuse("no-key");
-    voiceRtcStop();
-    return false;
-  }
   try {
+    // Past the mesh limit the SFU is the only mode that connects; never
+    // fall back to a mesh the other participants have already left, and
+    // never open an SFU leg before SFrame is armed.
+    if (!await sframeEnsureKey(5000)) {
+      sfuRefuse("no-key");
+      voiceRtcStop();
+      return false;
+    }
     voiceRtc.sfuNotice = null;
     await voiceSfuStart();
-    voiceRtc.sfuPending = false;
     return true;
   } catch (e) {
-    voiceRtc.sfuPending = false;
     voiceRtcStop();
     sfuRefuse("join-failed", e);
     return false;
+  } finally {
+    voiceRtc.sfuPending = false;
   }
 }
 

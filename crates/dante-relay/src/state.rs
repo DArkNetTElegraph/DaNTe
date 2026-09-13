@@ -129,6 +129,9 @@ pub struct RelayState {
     read_rl: KeyedRateLimiter<IpAddr>,
     max_get_records: u64,
     ice: IcePolicy,
+    /// Operator opt-in for the relay-side link unfurler (feature `unfurl`).
+    /// Off by default.
+    unfurl_enabled: bool,
     /// libp2p bootstrap multiaddrs handed to clients: operator-seeded entries
     /// (no TTL) first, then self-reported by clients `(addr, last_seen_ms)`.
     p2p_seed: Vec<String>,
@@ -236,6 +239,7 @@ impl RelayState {
             read_rl: KeyedRateLimiter::new(limits.read.0, limits.read.1),
             max_get_records: 512,
             ice: IcePolicy::default(),
+            unfurl_enabled: false,
             p2p_seed: Vec::new(),
             p2p_reported: std::collections::VecDeque::new(),
             ledger_outbox: std::collections::VecDeque::new(),
@@ -479,6 +483,18 @@ impl RelayState {
     /// STUN/TURN options, instead of leaving it host-candidates-only.
     pub fn ice_policy(&self) -> &IcePolicy {
         &self.ice
+    }
+
+    /// Turn the opt-in relay-side link unfurler on or off (feature `unfurl`).
+    /// Off by default: this makes the relay itself fetch a URL on a client's
+    /// behalf, which the operator has to actively choose to do.
+    pub fn set_unfurl_enabled(&mut self, on: bool) {
+        self.unfurl_enabled = on;
+    }
+
+    /// Whether the operator has turned the relay-side unfurler on.
+    pub fn unfurl_enabled(&self) -> bool {
+        self.unfurl_enabled
     }
 
     /// Operator-provided libp2p bootstrap multiaddrs, always offered to clients
@@ -896,6 +912,12 @@ impl RelayState {
             | Request::SfuIce { .. }
             | Request::SfuPull { .. }
             | Request::SfuLeave { .. } => Response::Error("sfu not supported".into()),
+
+            // Same story: a relay-side unfurl is intercepted by `RelayHandler`
+            // (it's async and, when enabled, does outbound I/O) before the
+            // state sees it. Reaching here means this relay was built without
+            // the `unfurl` feature.
+            Request::UnfurlLink(_) => Response::Error("unfurl not supported".into()),
         }
     }
 }
@@ -905,6 +927,8 @@ pub struct RelayHandler {
     state: Mutex<RelayState>,
     #[cfg(feature = "sfu")]
     sfu: SfuRooms,
+    #[cfg(feature = "unfurl")]
+    unfurl: crate::unfurl::UnfurlGate,
 }
 
 impl RelayHandler {
@@ -912,10 +936,14 @@ impl RelayHandler {
     pub fn new(state: RelayState) -> Self {
         #[cfg(feature = "sfu")]
         let sfu = SfuRooms::with_ice_policy(state.ice_policy().clone());
+        #[cfg(feature = "unfurl")]
+        let unfurl = crate::unfurl::UnfurlGate::new(state.unfurl_enabled());
         Self {
             state: Mutex::new(state),
             #[cfg(feature = "sfu")]
             sfu,
+            #[cfg(feature = "unfurl")]
+            unfurl,
         }
     }
 
@@ -933,6 +961,12 @@ impl RequestHandler for RelayHandler {
         // than under the relay-state lock.
         #[cfg(feature = "sfu")]
         if let Some(response) = self.sfu.handle(&req, peer_ip, now).await {
+            return response;
+        }
+        // Same reason: fetching a URL is real network I/O and must not hold
+        // (or wait on) the state lock.
+        #[cfg(feature = "unfurl")]
+        if let Some(response) = self.unfurl.handle(&req, peer_ip, now).await {
             return response;
         }
         self.state.lock().await.handle(req, peer_ip, now)

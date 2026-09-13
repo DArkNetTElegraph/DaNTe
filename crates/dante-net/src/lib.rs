@@ -26,6 +26,8 @@ pub mod ratelimit;
 pub mod socks5;
 pub mod sync;
 pub mod transport;
+#[cfg(feature = "unfurl")]
+pub mod unfurl;
 pub mod wire;
 
 #[cfg(test)]

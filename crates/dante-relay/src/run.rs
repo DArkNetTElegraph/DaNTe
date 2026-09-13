@@ -49,6 +49,12 @@ pub struct RunConfig {
     /// Hex-encoded 32-byte ed25519 seed for the relay's libp2p identity, so its
     /// PeerId is stable across restarts. Random (ephemeral) if omitted.
     pub p2p_seed: Option<String>,
+    /// Operator opt-in for the relay-side link unfurler (feature `unfurl`):
+    /// the relay fetches a linked URL's metadata on a client's behalf, so
+    /// the client's own IP never reaches the linked site. Off by default —
+    /// see `docs/THREAT_MODEL.md` §4 for the trust-model trade-off. No
+    /// effect if the crate was not built with the `unfurl` feature.
+    pub allow_unfurl: bool,
 }
 
 impl Default for RunConfig {
@@ -64,6 +70,7 @@ impl Default for RunConfig {
             p2p_bootstrap: Vec::new(),
             p2p_listen: None,
             p2p_seed: None,
+            allow_unfurl: false,
         }
     }
 }
@@ -146,6 +153,18 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
         );
     }
     relay_state.set_ice_policy(cfg.ice);
+    if cfg.allow_unfurl {
+        if cfg!(feature = "unfurl") {
+            tracing::info!(
+                "relay-side link unfurler enabled: this relay will fetch link previews on clients' behalf"
+            );
+            relay_state.set_unfurl_enabled(true);
+        } else {
+            tracing::warn!(
+                "--allow-relay-unfurl set, but this binary was not built with the `unfurl` feature — ignored"
+            );
+        }
+    }
     #[cfg(feature = "p2p")]
     let p2p_bootstrap = cfg.p2p_bootstrap.clone();
     if !cfg.p2p_bootstrap.is_empty() {

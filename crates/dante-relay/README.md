@@ -49,15 +49,30 @@ both drive it (`dante serve --sfu`, `Engine::enable_sfu()`); off by default
 because it pulls the WebRTC dependency tree into the relay binary — see
 [`docs/SFU.md`](../../docs/SFU.md).
 
+## Link unfurler (feature `unfurl`, off by default)
+
+With `--features unfurl` and `--allow-relay-unfurl`, the relay serves
+`UnfurlLink` by fetching the linked URL's metadata itself (the same
+SSRF-guarded fetcher `dante-cli`'s local unfurler uses, shared via
+`dante_net::unfurl` rather than duplicated) and handing back a
+`UnfurlPreview`, so the client's own IP never reaches the linked site. A real
+trust change, not a convenience flag — the relay now makes outbound requests
+and learns which URLs were asked about — so it is off by default on both
+axes (the Cargo feature and the runtime flag); see
+[`docs/RUNNING_A_RELAY.md`](../../docs/RUNNING_A_RELAY.md) and
+[`docs/THREAT_MODEL.md`](../../docs/THREAT_MODEL.md) §4.
+
 ## Test
 
 ```sh
 cargo test -p dante-relay
-cargo test -p dante-relay --features sfu   # + the relay-hosted SFU e2e
+cargo test -p dante-relay --features sfu      # + the relay-hosted SFU e2e
+cargo test -p dante-relay --features unfurl   # + the unfurl gate's own tests
 ```
 
 Covers store-and-fetch for every directory, rate limiting, one-time prekeys and
 last-resort KeyPackages, TURN credential minting, federation ingest / outbox
 dedup, writer step-down on channel-log overtake, the in-process TURN server
-(credential accept / reject), and (feature `sfu`) three participants
-forwarding real RTP through a relay-hosted SFU room.
+(credential accept / reject), (feature `sfu`) three participants forwarding
+real RTP through a relay-hosted SFU room, and (feature `unfurl`) the opt-in
+gate's own enable/rate-limit/size-limit behaviour.

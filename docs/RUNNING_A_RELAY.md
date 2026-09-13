@@ -211,6 +211,26 @@ configured above — no separate flag needed. It is off by default because it
 pulls the WebRTC dependency tree into the relay binary; the desktop shell
 does not offer SFU mode at all (see above).
 
+## Fetching link previews for clients (optional)
+
+By default, a client that wants a link preview fetches it itself — its own
+IP reaches the linked site, never the relay's. A relay built with the
+non-default `unfurl` feature can instead do that fetch on the client's
+behalf, so the client's IP never reaches the linked site:
+
+```sh
+cargo build --release -p dante-relay --features unfurl
+```
+
+and run with `--allow-relay-unfurl`. This is a real trust change, not a
+convenience flag: enabling it means *this relay* now makes outbound HTTP
+requests and learns which URLs its clients asked about — see
+[`THREAT_MODEL.md`](THREAT_MODEL.md) §4. Off by default for that reason. The
+fetch itself reuses the same SSRF-guarded fetcher the client-local unfurler
+uses (public-unicast-only targets, capped size/time/redirects, no cookies,
+no JavaScript) and has its own per-IP rate limit independent of every other
+request type.
+
 ## Proof-of-work
 
 The default floor makes registering an identity cost real memory and time,

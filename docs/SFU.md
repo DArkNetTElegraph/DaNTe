@@ -78,12 +78,11 @@ uses — so possession of the channel id is the authorization, and the relay
 needs no new identity check. Media never travels this path: each participant
 holds a DTLS-SRTP connection to the SFU's own UDP endpoint.
 
-Still to do on the client side: the SPA does no SFU negotiation, the desktop
-audio bridge still fans out per mesh leg (`/api/call/audio`), no SFU endpoint
-is advertised to clients, there is no participant-count threshold, and the
-mode must currently be chosen consistently by every member (mixed mode leaves
-the two sides with no shared media path). The relay feature is off in release
-builds.
+Still to do on the client side: the desktop audio bridge fans out per mesh
+leg (`/api/call/audio`) with no SFU equivalent — see [Browser
+mode](#browser-mode-dante-serve--spa) below for the SPA's negotiation,
+threshold and mixed-mode handling, all implemented. The relay feature is off
+in release builds.
 
 ## Engine mode (`dante-core`)
 

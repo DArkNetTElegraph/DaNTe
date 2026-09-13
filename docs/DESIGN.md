@@ -68,7 +68,7 @@ achievable with no project-run infrastructure.
   regardless.
   **The SPA no longer surfaces group calls** — persistent voice channels (with
   real browser audio) replaced the ad-hoc "group call in a text channel" model;
-  the engine/serve endpoints stay for the CLI and a future SFU path.
+  the engine/serve endpoints stay for the CLI and the SFU path (see below).
 - **Voice channels *(done — persistent, Discord-style)*:** a channel created
   with `voice = true` (`ChannelInfo.voice`, back-compat: a blob without the byte
   decodes as text) has no message log; members join a persistent call in it.
@@ -267,9 +267,9 @@ no relay at all (the relay is still the store-and-forward node — but the
 wire over a `/dante/relay/1` libp2p stream, redundant fan-out/merge across
 the discovered relay set, ledger gossip + startup backfill that federates
 relay replicas, and gossip acceleration for channel logs — see Phase 3);
-the group-call SFU **integration** that the Phase 7 SFrame layer is for (the
-media-plane component exists and is proven — see [`SFU.md`](SFU.md)); desktop
-release
+desktop SFU support (the browser path the Phase 7 SFrame layer is for is
+wired and proven — see [`SFU.md`](SFU.md) — the desktop shell's native audio
+path has no SFrame equivalent yet); desktop release
 packaging (native menus, auto-update, signed installers). Phase 8 (stickers,
 soundboards, opt-in URL embeds, headless bot bridge) is done. The Tauri
 native layer itself — startup progress, tray, OS notifications — landed,
@@ -813,8 +813,9 @@ infrastructure. Reached. ---**
   passes through untouched, so a peer with no SFrame still works; a frame we
   can't decrypt is dropped (Opus PLC covers the gap) rather than fed to the
   decoder. **No-op** where the browser lacks encoded transforms (non-Chromium)
-  — DTLS-SRTP still applies. Its point is a future SFU that forwards media
-  without decoding; there is no SFU yet. Video (screen share) is not wrapped.
+  — DTLS-SRTP still applies. Its point is an SFU that forwards media without
+  decoding (see next bullet — implemented and wired for the browser path).
+  Video (screen share) is not wrapped.
   Runtime-verified: under headless Chromium `sframeActive()` returned true on
   both peers with a shared epoch, so the transform is genuinely running rather
   than silently no-op'd.
@@ -828,7 +829,8 @@ infrastructure. Reached. ---**
   run; see [`SFU.md`](SFU.md). Channels and group calls use MLS; the pre-MLS
   sender-keys ratchet has been removed.
 - Group voice keys exported from the channel's MLS group; **rekey on every join/leave** (done — `Engine::group_call_key`).
-- SFU role in the server relay above ~5 participants; full mesh below (mesh done).
+- SFU role in the server relay above the mesh limit (default 8), full mesh at
+  or below it — **done** for the browser path, see the bullet above.
 - Screen share with audio: VP9 first, then AV1; FHD60 target, HD30 floor, 4K144 a native-only stretch.
   Sources: full display, single window, and "follow the active screen" (see `IDEAS.md`).
 - Noise suppression: RNNoise, client-side.

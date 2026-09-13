@@ -259,8 +259,13 @@ See the crate README for the exact status list.
 - **Resource limits**: per-IP rate limiting, a room cap, offer/candidate size
   limits, empty-room teardown and a per-source bitrate cap (drop, not queue,
   past budget — see `dante-sfu`'s `SOURCE_BITRATE_CAP_BYTES_PER_SEC`) are in.
-- **Fallback behaviour** when an SFU dies mid-call (demote to mesh? drop the
-  call?).
+- **Fallback behaviour** when an SFU dies mid-call: the browser path now
+  detects it (`pc.onconnectionstatechange` on the SFU leg, previously
+  unhandled — audio just stopped with no notice at all) and ends the call
+  cleanly with a clear reason shown to the user. It does **not** demote to
+  mesh: that would mean silently re-running the whole mode-selection and
+  negotiation flow mid-call on every remaining participant, a bigger change
+  than "notice the failure" that needs its own design pass.
 - **Mixed-capability rooms over the limit** do not interconnect: a
   non-Chromium browser is refused while Chromium peers use the SFU. Needs a
   room-wide capability signal to converge on one mode.

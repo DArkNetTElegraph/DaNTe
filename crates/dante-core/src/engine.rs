@@ -2405,6 +2405,13 @@ impl Engine {
         self.pending_group_calls.keys().copied().collect()
     }
 
+    /// Channels with a group call we're currently in — mesh or
+    /// [`Engine::enable_sfu`] mode alike. Pair with [`Engine::group_call_state`]
+    /// to notice an SFU leg failing: nothing does that polling for you.
+    pub fn active_group_call_channels(&self) -> Vec<[u8; 32]> {
+        self.group_calls.keys().copied().collect()
+    }
+
     // ---- voice channels ---------------------------------------------------
 
     /// Relay signal topic for a voice channel's presence beacons (distinct from

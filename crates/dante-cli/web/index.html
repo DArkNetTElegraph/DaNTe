@@ -4501,7 +4501,18 @@ async function voiceSfuStart() {
     if (pc.connectionState === "failed" && voiceRtc.sfu === sfu) {
       sfuRefuse("connection-lost");
       voiceRtcStop();
-      voiceRerender();
+      // Tell the engine too, not just the local media — otherwise this
+      // fingerprint stays in the roster for every other participant (and
+      // for our own next mode decision), the same way every other leave
+      // path here already does (voiceAction / groupCallAction). `cid` is
+      // this function's own const, captured before voiceRtcStop() clears
+      // voiceRtc.channelId, so it still names the right channel.
+      if (groupCallFor(cid)) api.groupCallLeave(cid).catch(() => {});
+      else api.voiceLeave(cid).catch(() => {});
+      // Not voiceRerender(): it gates on voiceRtc.channelId, which
+      // voiceRtcStop() just cleared, so its guard could never match and
+      // the voice UI would silently stay showing the call as live.
+      render();
     }
   };
 

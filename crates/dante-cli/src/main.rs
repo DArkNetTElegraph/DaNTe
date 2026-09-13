@@ -572,6 +572,11 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
     let mut save_tick = tokio::time::interval(Duration::from_secs(15));
     let mut peer: Option<Target> = None;
     let mut voice_sig = String::new();
+    // `group_call_state` only has something to report for a channel with an
+    // SFU leg (mesh legs report through `poll_calls` instead) — nothing else
+    // reads it today, so a leg failing (relay down, network drop) was as
+    // silent here as it was in the browser before that got fixed.
+    let mut group_call_states: HashMap<[u8; 32], dante_core::CallState> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -697,6 +702,20 @@ async fn cmd_chat(flags: &HashMap<String, String>) -> Result<()> {
                         u.state);
                 }
                 let _ = engine.poll_group_calls(now).await;
+                let active: std::collections::HashSet<_> =
+                    engine.active_group_call_channels().into_iter().collect();
+                group_call_states.retain(|cid, _| active.contains(cid));
+                for cid in &active {
+                    let Some(state) = engine.group_call_state(cid) else { continue };
+                    let prev = group_call_states.insert(*cid, state);
+                    if prev != Some(state)
+                        && matches!(state, dante_core::CallState::Failed | dante_core::CallState::Disconnected)
+                    {
+                        println!("\u{1f4de} group call #{} {:?}",
+                            IdentityId::from_bytes(*cid).to_base32().split('-').next().unwrap_or(""),
+                            state);
+                    }
+                }
                 let _ = engine.send_voice_presence(now).await;
                 let vps = engine.poll_voice(now).await;
                 let sig: String = vps.iter()

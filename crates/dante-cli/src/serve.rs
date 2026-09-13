@@ -21,6 +21,9 @@
 //!   `/api/server/unban`, `/api/server/bans`, `/api/autokick`, `/api/remove`
 //! - custom emoji / stickers / sounds: `/api/emoji`, `/api/sticker`,
 //!   `/api/sound` (plus `/remove`)
+//! - GIF search (opt-in, off unless configured — see `crate::gifsearch`):
+//!   `/api/gifsearch` (state / toggle), `/api/gifsearch/query`,
+//!   `/api/gifsearch/pick`, `/api/gif` (fetch a picked blob)
 //! - calls & voice: `/api/calls`, `/api/call`, `/api/call/accept`,
 //!   `/api/call/hangup`, `/api/call/signal`, `/api/call/audio`, `/api/ice`,
 //!   `/api/groupcalls`, `/api/groupcall/start|join|leave`, `/api/voice`,
@@ -304,6 +307,11 @@ enum Cmd {
     GetEmoji {
         hash: [u8; 32],
         reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
+    /// Store an ad-hoc GIF-search pick as a blob; reply is its hex SHA-256.
+    PutGif {
+        image: Vec<u8>,
+        reply: oneshot::Sender<Result<String, String>>,
     },
     /// Add/replace (`image = Some`) or remove (`image = None`) a sticker.
     Sticker {
@@ -687,6 +695,14 @@ struct Shared {
     /// (`POST /api/embeds`). Gates `POST /api/unfurl`, which reveals this
     /// machine's IP to linked sites.
     embeds: AtomicBool,
+    /// The GIF-search provider, if the operator set `TENOR_API_KEY` /
+    /// `GIPHY_API_KEY` — `None` means the feature is simply unavailable.
+    gif_provider: Option<crate::gifsearch::Provider>,
+    /// Opt-in GIF search. Off by default even when a provider is configured;
+    /// the SPA flips it per session (`POST /api/gifsearch`), same pattern as
+    /// `embeds` — searching reveals the query text and this machine's IP to
+    /// the provider.
+    gifsearch: AtomicBool,
     cmd: mpsc::Sender<Cmd>,
     /// How to connect the engine after onboarding.
     boot: Bootstrap,
@@ -882,6 +898,8 @@ pub async fn run_on(
         my_name: Mutex::new(String::new()),
         ready: AtomicBool::new(false),
         embeds: AtomicBool::new(false),
+        gif_provider: crate::gifsearch::Provider::from_env(),
+        gifsearch: AtomicBool::new(false),
         cmd: cmd_tx,
         boot,
         pending_rx: Mutex::new(Some(cmd_rx)),
@@ -2350,6 +2368,14 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             let blob = engine.fetch_blob(&hash).await.ok().flatten();
             let _ = reply.send(blob);
         }
+        Cmd::PutGif { image, reply } => {
+            let r = engine
+                .put_gif_blob(&image)
+                .await
+                .map(|h| to_hex(&h))
+                .map_err(|e| e.to_string());
+            let _ = reply.send(r);
+        }
         Cmd::Sticker {
             server,
             name,
@@ -2952,6 +2978,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 "also_relay_listen": shared.boot.also_relay_listen,
                 "sfu": shared.boot.sfu,
                 "sfu_mesh_limit": shared.boot.sfu_mesh_limit,
+                "gifsearch_available": shared.gif_provider.is_some(),
             })
             .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
@@ -4375,6 +4402,133 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                     let json = serde_json::json!({ "error": e }).to_string();
                     respond(&mut stream, 200, "application/json", json.as_bytes()).await
                 }
+            }
+        }
+
+        ("GET", "/api/gifsearch") => {
+            let on = shared.gifsearch.load(Ordering::Relaxed);
+            let provider = shared.gif_provider.as_ref().map(|p| p.name());
+            let body = serde_json::json!({ "on": on, "provider": provider }).to_string();
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/gifsearch") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                on: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            shared.gifsearch.store(r.on, Ordering::Relaxed);
+            respond(&mut stream, 200, "application/json", b"{\"ok\":\"ok\"}").await
+        }
+
+        ("GET", "/api/gifsearch/query") => {
+            let Some(provider) = &shared.gif_provider else {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"no GIF provider is configured\"}",
+                )
+                .await;
+            };
+            if !shared.gifsearch.load(Ordering::Relaxed) {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"GIF search is off\"}",
+                )
+                .await;
+            }
+            let q = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("q="))
+                .unwrap_or("");
+            let q = percent_decode(q);
+            match crate::gifsearch::search(provider, &q).await {
+                Ok(results) => {
+                    let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
+                    respond(&mut stream, 200, "application/json", json.as_bytes()).await
+                }
+                Err(e) => {
+                    let json = serde_json::json!({ "error": e }).to_string();
+                    respond(&mut stream, 200, "application/json", json.as_bytes()).await
+                }
+            }
+        }
+
+        ("POST", "/api/gifsearch/pick") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                url: String,
+            }
+            if shared.gif_provider.is_none() || !shared.gifsearch.load(Ordering::Relaxed) {
+                return respond(
+                    &mut stream,
+                    403,
+                    "application/json",
+                    b"{\"error\":\"GIF search is off\"}",
+                )
+                .await;
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            let image = match crate::gifsearch::fetch_gif(&r.url).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let json = serde_json::json!({ "error": e }).to_string();
+                    return respond(&mut stream, 200, "application/json", json.as_bytes()).await;
+                }
+            };
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::PutGif { image, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            match rx.await {
+                Ok(Ok(hash)) => {
+                    let json = serde_json::json!({ "hash": hash }).to_string();
+                    respond(&mut stream, 200, "application/json", json.as_bytes()).await
+                }
+                Ok(Err(e)) => {
+                    let json = serde_json::json!({ "error": e }).to_string();
+                    respond(&mut stream, 200, "application/json", json.as_bytes()).await
+                }
+                Err(_) => respond(&mut stream, 500, "text/plain", b"no reply").await,
+            }
+        }
+
+        ("GET", "/api/gif") => {
+            let hex = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("hash="))
+                .unwrap_or("");
+            let Some(hash) = hex_bytes(hex)
+                .filter(|b| b.len() == 32)
+                .map(|b| <[u8; 32]>::try_from(b).unwrap())
+            else {
+                return respond(&mut stream, 400, "text/plain", b"bad hash").await;
+            };
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::GetEmoji { hash, reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            match rx.await.ok().flatten() {
+                Some(bytes) => respond(&mut stream, 200, sniff_image(&bytes), &bytes).await,
+                None => respond(&mut stream, 404, "text/plain", b"no such blob").await,
             }
         }
 

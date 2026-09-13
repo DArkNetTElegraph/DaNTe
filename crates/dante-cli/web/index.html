@@ -431,6 +431,18 @@ img.sticker { display: block; max-width: 180px; max-height: 180px; object-fit: c
 }
 .emoji-cell:hover { background: var(--bg-hover); }
 
+/* GIF search picker */
+.gif-pop { width: 280px; }
+.gif-search-box {
+  margin: 8px; padding: 6px 10px; border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border-strong, var(--divider)); background: var(--bg-base);
+  color: inherit; font: inherit;
+}
+.gif-status { padding: 0 10px 6px; font-size: 12px; color: var(--text-faint); min-height: 1em; }
+.gif-grid { grid-template-columns: repeat(2, 1fr); max-height: 320px; }
+.gif-cell { height: auto; aspect-ratio: 1.4; }
+.gif-thumb { width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm, 6px); }
+
 .composer .ghost-icon { border: 0; cursor: pointer; }
 
 /* profile card */
@@ -1023,6 +1035,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
         <input id="text" autocomplete="off" placeholder="Message" disabled />
         <button type="button" id="emoji-pick" class="ghost-icon" data-tip="Emoji" data-icon="smile" disabled></button>
         <button type="button" id="sticker-pick" class="ghost-icon" data-tip="Stickers" data-icon="image" disabled hidden></button>
+        <button type="button" id="gif-pick" class="ghost-icon" data-tip="GIF search" data-icon="film" disabled hidden></button>
         <button id="send" disabled>Send</button>
       </form>
       <input type="file" id="chat-file" hidden>
@@ -1302,6 +1315,8 @@ const store = {
   sounds: {},                         // server root -> { name: hexhash }
   embedsOn: LS.get("embeds_on", false), // opt-in link previews (leaks IP)
   embeds: {},                         // url -> preview | null (miss) | "pending"
+  gifsearchAvailable: false,           // operator configured a provider key
+  gifsearchOn: LS.get("gifsearch_on", false), // opt-in GIF search (leaks IP + query)
   contacts: [],                       // [{fp,petname,verified,added_ms}]
   blocked: [],                        // [fp]
   calls: [],                          // [{peer,state,incoming}]
@@ -1395,6 +1410,11 @@ const api = {
   sfuIce(channel, slot, candidate) { return this.post("/api/sfu/ice", { channel, slot, candidate }); },
   sfuCandidates(channel, slot) { return this.get("/api/sfu/ice?channel=" + encodeURIComponent(channel) + "&slot=" + slot); },
   sfuLeave(channel, slot)   { return this.post("/api/sfu/leave", { channel, slot }); },
+  // Opt-in GIF search (Tenor/Giphy, if the operator configured a key).
+  gifSearchState()          { return this.get("/api/gifsearch"); },
+  gifSearchToggle(on)       { return this.post("/api/gifsearch", { on }); },
+  gifSearchQuery(q)         { return this.get("/api/gifsearch/query?q=" + encodeURIComponent(q)); },
+  gifSearchPick(url)        { return this.post("/api/gifsearch/pick", { url }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
   setNickname(server, member, nickname) { return this.post("/api/nickname", { server, member, nickname }); },
   requestNickname(server, nickname) { return this.post("/api/nickname/request", { server, nickname }); },
@@ -1552,6 +1572,7 @@ function selectTarget(server, target) {
   box.disabled = !target; $("#send").disabled = !target;
   $("#emoji-pick").disabled = !target;
   updateStickerButton();
+  updateGifButton();
   // Attachments go through the DM file-transfer path only.
   $("#attach").disabled = !target || target.startsWith("#") || isSelf(target);
   if (target) box.focus();
@@ -3091,6 +3112,107 @@ function updateStickerButton() {
   stk.hidden = !has;
   stk.disabled = !has;
 }
+// Show the composer GIF button whenever there's a target to send into and the
+// feature is both operator-configured and user-opted-in (Settings).
+function updateGifButton() {
+  const gb = $("#gif-pick");
+  if (!gb) return;
+  const has = !!curTarget() && store.gifsearchAvailable && store.gifsearchOn;
+  gb.hidden = !has;
+  gb.disabled = !has;
+}
+
+/* ---------- GIF search picker -------------------------------------------
+   A search box + result grid, same popover shell as the emoji/sticker picker.
+   Search only ever reveals the query text + this IP to the configured
+   provider (gated server-side on the Settings toggle); picking a result has
+   the server fetch+store it as a blob once, then sends `gif:<hash>` — no
+   external URL is ever embedded in the message itself, so a later viewer
+   never re-contacts the provider just by opening the conversation. */
+let gifPickerReq = 0;
+function openGifPicker(anchor) {
+  if (emojiPop) { emojiPopClose(); return; }
+  const pop = el("div", "emoji-pop gif-pop");
+  const input = el("input", "gif-search-box");
+  input.type = "text";
+  input.placeholder = "Search GIFs…";
+  const grid = el("div", "emoji-grid gif-grid");
+  const status = el("div", "gif-status");
+  pop.appendChild(input);
+  pop.appendChild(status);
+  pop.appendChild(grid);
+  pop.style.visibility = "hidden";
+  document.body.appendChild(pop);
+  emojiPop = pop;
+  const r = anchor.getBoundingClientRect();
+  const place = () => {
+    const h = pop.offsetHeight, w = pop.offsetWidth;
+    const above = r.top - 8 - h;
+    pop.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + "px";
+    pop.style.top = (above >= 8 ? above : Math.min(r.bottom + 8, innerHeight - h - 8)) + "px";
+  };
+  place();
+  pop.style.visibility = "";
+  setTimeout(() => addEventListener("click", emojiPopOutside), 0);
+  input.focus();
+
+  let debounce = null;
+  const runSearch = async (q) => {
+    const my = ++gifPickerReq;
+    if (!q.trim()) { grid.innerHTML = ""; status.textContent = ""; return; }
+    status.textContent = "Searching…";
+    let results;
+    try { results = await api.gifSearchQuery(q); }
+    catch (_) { if (my === gifPickerReq) status.textContent = "Search failed."; return; }
+    if (my !== gifPickerReq) return;
+    if (results && results.error) { status.textContent = results.error; grid.innerHTML = ""; return; }
+    if (!Array.isArray(results) || !results.length) { status.textContent = "No results."; grid.innerHTML = ""; return; }
+    status.textContent = "";
+    grid.innerHTML = "";
+    for (const g of results) {
+      const b = el("button", "emoji-cell gif-cell");
+      const img = el("img", "gif-thumb");
+      img.src = g.preview_url;
+      img.alt = "gif";
+      img.loading = "lazy";
+      b.appendChild(img);
+      b.onclick = () => { emojiPopClose(); sendGif(g.full_url); };
+      grid.appendChild(b);
+    }
+    place();
+  };
+  input.addEventListener("input", () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => runSearch(input.value), 350);
+  });
+}
+
+// Fetch+blob `url` server-side (once) and send `gif:<hash>` on the current
+// target, same send path as a sticker.
+async function sendGif(url) {
+  const t = curTarget();
+  if (!t) return;
+  let res;
+  try { res = await api.gifSearchPick(url); }
+  catch (e) { ui.sys("GIF fetch failed: " + e.message); return; }
+  if (!res || res.error || !res.hash) { ui.sys("GIF fetch failed: " + (res && res.error || "unknown error")); return; }
+  const text = "gif:" + res.hash;
+  try {
+    if (isSelf(t)) {
+      store.messages.push({ kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1 });
+      renderChat();
+    } else if (t.startsWith("#")) {
+      await api.send(t, text, null);
+    } else {
+      store._pendingDmTarget = t;
+      const r = await api.send(t, text);
+      store._pendingDmTarget = null;
+      const mid = r && typeof r.ok === "string" && /^[0-9a-f]{32}$/.test(r.ok) ? r.ok : undefined;
+      store.messages.push({ kind: "message", from: "you", text, _target: t, _at: Date.now(), seq: -1, msg_id: mid });
+      renderChat();
+    }
+  } catch (err) { ui.sys("Send failed: " + err.message); }
+}
 /* escape, then swap :shortcode: for a custom emoji <img> and @fp for a mention */
 function richText(s) {
   // A message that is nothing but one :name: matching a server sticker renders
@@ -3100,6 +3222,12 @@ function richText(s) {
     const sm = stickerMap();
     if (sm[lone[1]])
       return `<img class="sticker" alt=":${lone[1]}:" title=":${lone[1]}:" src="/api/sticker?hash=${sm[lone[1]]}">`;
+  }
+  // A message that is nothing but `gif:<hash>` (an ad-hoc GIF-search pick —
+  // no per-server registration, unlike a sticker) renders the same way.
+  const gif = s.trim().match(/^gif:([0-9a-f]{64})$/);
+  if (gif) {
+    return `<img class="sticker" alt="[gif]" src="/api/gif?hash=${gif[1]}">`;
   }
   return mdRender(s);
 }
@@ -4647,6 +4775,7 @@ $("#emoji-pick").addEventListener("click", () => {
   openEmojiPicker($("#emoji-pick"), s => { insertAtCaret($("#text"), s); $("#text").focus(); });
 });
 $("#sticker-pick").addEventListener("click", () => openStickerPicker($("#sticker-pick")));
+$("#gif-pick").addEventListener("click", () => openGifPicker($("#gif-pick")));
 $("#chat-file").addEventListener("change", e => {
   const f = e.target.files && e.target.files[0];
   e.target.value = "";
@@ -4887,6 +5016,15 @@ function openSettings() {
       if (!on) store.embeds = {};
       renderChat();
     }));
+  if (store.gifsearchAvailable) {
+    beSec.appendChild(settingToggle("GIF search — sends your search text and IP to the provider (Tenor/Giphy)",
+      store.gifsearchOn,
+      on => {
+        store.gifsearchOn = on; LS.set("gifsearch_on", on);
+        api.gifSearchToggle(on).catch(() => {});
+        updateGifButton();
+      }));
+  }
   const notifBtn = el("button", "set-wide",
     ("Notification" in window && Notification.permission === "granted") ? "Desktop notifications: on" : "Enable desktop notifications");
   notifBtn.onclick = async () => {
@@ -5288,6 +5426,7 @@ async function init() {
   store.sfu = !!state.sfu;
   const limit = Number(state.sfu_mesh_limit);
   store.sfuMeshLimit = Number.isFinite(limit) && limit > 0 ? limit : 8;
+  store.gifsearchAvailable = !!state.gifsearch_available;
   if (!state.ready) { renderOnboard(state); return; }
 
   $("#app").dataset.members = LS.get("members", "shown");
@@ -5320,6 +5459,8 @@ async function init() {
   // Re-assert the opt-in link-preview choice; the server defaults it off on
   // every restart, so a stale enabled flag here can't silently keep it on.
   if (store.embedsOn) api.post("/api/embeds", { on: true }).catch(() => {});
+  // Same re-assert for GIF search: the server defaults it off every restart.
+  if (store.gifsearchAvailable && store.gifsearchOn) api.gifSearchToggle(true).catch(() => {});
 
   poll();
   openStream();

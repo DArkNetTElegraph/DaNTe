@@ -139,6 +139,16 @@ provide.
    address (loopback, LAN, `169.254.169.254`, …) so a crafted link cannot turn
    it into an SSRF probe. Enabling it also tells the relay nothing new. A
    relay-side unfurler that would hide the client IP is a possible future add.
+   **GIF search (Tenor/Giphy)** is the same posture: **opt-in and off by
+   default**, and further gated on the operator having configured a provider
+   API key at all (`TENOR_API_KEY` / `GIPHY_API_KEY`) — most relays and
+   self-hosted instances will simply not offer it. When on, a search sends
+   the query text and this machine's IP to the configured provider; picking a
+   result has `dante serve` fetch that one GIF once (host-allowlisted to the
+   provider's own CDN, size- and time-capped) and store it as a blob keyed by
+   SHA-256, exactly like a custom sticker — the message itself carries only
+   the hash, so viewing the conversation later never re-contacts the
+   provider. Enabling it tells the relay nothing new.
 5. **Anonymity of network location.** DaNTe does not hide your IP address from
    peers you connect to directly or from relays. Run it over Tor/VPN if network-
    level anonymity is required. (A future phase may integrate transport-level

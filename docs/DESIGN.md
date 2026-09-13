@@ -937,7 +937,23 @@ infrastructure. Reached. ---**
   a button row in the voice room (when connected, if the server has clips);
   owner management in server settings → "Emoji, stickers & sounds". `chat`:
   `/sound <root> <name> <path|remove>`.
-- Tenor/Giphy search — opt-in, off by default, warns it contacts a third party.
+- **GIF search (Tenor/Giphy)** *(done)*: opt-in and off by default, and only
+  offered at all when the operator sets `TENOR_API_KEY` / `GIPHY_API_KEY` —
+  `crates/dante-cli/src/gifsearch.rs`. A search hits only the configured
+  provider's own fixed API host (the query is the only client-controlled
+  input); picking a result has `serve` fetch that one GIF (host-allowlisted
+  to the provider's CDN, size/time-capped, via the same SSRF-guarded HTTP
+  client `unfurl.rs` uses) and store it as a blob — `Engine::put_gif_blob`.
+  Sent as an ordinary text message whose whole body is `gif:<sha256hex>` (no
+  new `Content` kind, same convention as a sticker's `:name:` token, just
+  without a per-server registration since a GIF pick is ad-hoc); the SPA
+  renders that as a standalone image via `GET /api/gif?hash=`, and never
+  re-contacts the provider on later views. `serve`: `GET /api/gifsearch`
+  (state) / `POST /api/gifsearch` (session toggle) / `GET
+  /api/gifsearch/query?q=` / `POST /api/gifsearch/pick`. SPA: a 🎬 composer
+  button (shown only when available and opted in) opens a search box + result
+  grid; a Settings toggle states the third-party-contact tradeoff before
+  turning it on. See [`THREAT_MODEL.md`](THREAT_MODEL.md) §4.
 - **URL embeds** *(done — opt-in, serve-side)*: **off by default**; a
   Settings toggle flips it and the SPA re-asserts the choice to `dante serve`
   on every load (`POST /api/embeds`), so a stale flag can't silently keep it

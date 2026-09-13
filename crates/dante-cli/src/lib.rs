@@ -6,6 +6,7 @@
 //! The interactive `chat` client and the argument plumbing live in the binary
 //! (`src/main.rs`), which also depends on this crate.
 
+pub mod gifsearch;
 pub mod serve;
 pub mod unfurl;
 

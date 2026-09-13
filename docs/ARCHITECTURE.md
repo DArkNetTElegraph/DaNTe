@@ -46,10 +46,11 @@ community-run relay nodes that provide store-and-forward for offline delivery.
 | `dante-proto` | lib | Canonical wire types shared across the network boundary: the length-prefixed binary codec (`enc::Writer`/`Reader`), the `Record` envelope, sealed-sender `Envelope`, RFC 6962 Merkle proofs. No logic beyond encode/verify. |
 | `dante-net` | lib | The **framed-TCP** relay transport (`u32` length prefix), the `Request`/`Response` relay wire + `RequestHandler`, the relay **client** (with multi-endpoint failover and, with `p2p`, a libp2p backend), the sealed-sender mailbox, per-key rate limiting, ledger sync. |
 | `dante-p2p` | lib | The libp2p stack (feature-gated, on by default): TCP+Noise+Yamux `Swarm`, Kademlia DHT, gossipsub, identify, ping, and the `/dante/relay/1` request-response protocol that carries the `dante-net` relay wire peer-to-peer. |
-| `dante-relay` | bin | A relay node: sealed-sender mailbox store-and-forward with TTL, ledger replica, prekey + key-package directories, per-channel log, ephemeral signal buffer, per-IP rate limiting; optional in-process TURN; with `--p2p-listen`, relay↔relay federation over gossipsub. |
+| `dante-relay` | bin | A relay node: sealed-sender mailbox store-and-forward with TTL, ledger replica, prekey + key-package directories, per-channel log, ephemeral signal buffer, per-IP rate limiting; optional in-process TURN; with `--p2p-listen`, relay↔relay federation over gossipsub; with the non-default `sfu` feature, hosts `dante-sfu` group-call rooms over the same wire. |
 | `dante-dm` | lib | 1:1 sessions: prekey bundle publication, X3DH, Double Ratchet, chunked encrypted file transfer. |
 | `dante-mls` | lib | Thin wrapper over `OpenMLS` 0.9 — one MLS group per channel and per group call; member export/import for persistence. |
 | `dante-voice` | lib | 1:1 voice/media calls (`webrtc` sans-IO core) over DM signalling; DTLS-SRTP; Opus track; ≥64 kbps floor; ICE/TURN plumbing. |
+| `dante-sfu` | lib | An opaque RTP-forwarding SFU for group calls above the mesh limit: terminates DTLS-SRTP per participant, forwards payloads without decoding (never holds the SFrame key). Hosted by `dante-relay` behind its non-default `sfu` feature; the browser SPA is the only client that drives it today, gated on SFrame capability. |
 | `dante-audio` | lib | Opus codec + `cpal` mic/speaker glue. Detached (`[workspace]`, links libopus/ALSA); not in CI. |
 | `dante-core` | lib | Orchestration engine the UI consumes: wires identity + ledger + net (+ `dante-p2p`) + dm + mls + voice together; task-oriented async API + event stream. No UI concerns. |
 | `dante-cli` | bin | `dante` — headless client (`serve` embeds the web UI + JSON API, `chat` a TTY client, `bot` a JSON-lines bridge) and the integration-test harness. |
@@ -69,7 +70,11 @@ in transitively — `--no-default-features` is the lean path.
   identity keystore, runs all E2E crypto locally.
 - **Relay** — opt-in, run by whoever creates a server (or by volunteers).
   Sees only ciphertext and coarse routing metadata (recipient hint, size,
-  timing). Provides offline delivery and, later, media relay (TURN/SFU).
+  timing) for ordinary traffic. Provides offline delivery, in-process TURN,
+  and — behind its non-default `sfu` feature — a media relay for group calls
+  above the mesh limit; there DTLS-SRTP terminates at the relay by necessity
+  (it forwards RTP), though it still never holds the SFrame key that protects
+  audio content itself. See [`THREAT_MODEL.md`](THREAT_MODEL.md) item 10.
 - **Bootstrap** — a handful of `/ip4/.../tcp/N/p2p/<id>` multiaddrs used only for
   first contact with the DHT (`--bootstrap`, the `DANTE_BOOTSTRAP` env var, or a
   compiled-in `DEFAULT_BOOTSTRAP`, currently empty). Swappable; not trusted for
@@ -81,8 +86,14 @@ in transitively — `--no-default-features` is the lean path.
 See [`DESIGN.md`](DESIGN.md) for the phased roadmap and current state. In
 short: Phases 1–8 are implemented (identity/ledger/relay, E2E DMs, files,
 servers & channels on MLS, 1:1 + group + channel voice, screen share,
-stickers/soundboards/embeds/bots), and the libp2p transport is the default
-(DHT relay discovery, redundant relay set, relay federation, rendezvous-hashed
-channel logs). `THREAT_MODEL.md` and `PROTOCOL.md` are the authoritative specs.
-Known deferrals: a serverless mailbox, a group-call SFU, seeding
-`DEFAULT_BOOTSTRAP`, and browser runtime-verification of the media paths.
+stickers/soundboards/embeds/bots, opt-in GIF search), and the libp2p transport
+is the default (DHT relay discovery, redundant relay set, relay federation,
+rendezvous-hashed channel logs). A group-call SFU (`dante-sfu`) exists and is
+wired into the browser SPA, gated on SFrame support with a roster-size
+threshold; the media paths (voice, screen share, SFrame, and the SFU itself)
+have all been runtime-verified against real headless-Chromium peers, not just
+compiled. `THREAT_MODEL.md` and `PROTOCOL.md` are the authoritative specs.
+Known deferrals: a serverless mailbox, seeding `DEFAULT_BOOTSTRAP`, desktop-shell
+SFU support (no native SFrame equivalent yet), and code-signing / auto-update
+for the desktop shell's release bundles (both scaffolded, neither has a
+maintainer-held credential behind it yet).

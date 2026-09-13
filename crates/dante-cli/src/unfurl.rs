@@ -48,7 +48,8 @@ pub async fn unfurl(raw_url: &str) -> Result<Preview, String> {
         return Err("url too long".into());
     }
     let deadline = Instant::now() + BUDGET;
-    let (final_url, body, _ct) = fetch(raw_url, deadline, MAX_BODY, Some("text/html")).await?;
+    let (final_url, body, _ct) =
+        fetch(raw_url, deadline, MAX_BODY, Some("text/html"), None).await?;
     let html = String::from_utf8_lossy(&body);
     let host = host_of(&final_url).unwrap_or_default();
 
@@ -76,14 +77,20 @@ pub async fn unfurl(raw_url: &str) -> Result<Preview, String> {
     // The thumbnail gets its own fresh budget so a slow page fetch does not
     // starve it.
     let image_data_uri = match image {
-        Some(img_url) => fetch(&img_url, Instant::now() + BUDGET, MAX_IMAGE, Some("image/"))
-            .await
-            .ok()
-            .filter(|(_u, bytes, _ct)| !bytes.is_empty())
-            .map(|(_u, bytes, ct)| {
-                let mime = ct.split(';').next().unwrap_or("image/jpeg").trim();
-                format!("data:{};base64,{}", mime, b64(&bytes))
-            }),
+        Some(img_url) => fetch(
+            &img_url,
+            Instant::now() + BUDGET,
+            MAX_IMAGE,
+            Some("image/"),
+            None,
+        )
+        .await
+        .ok()
+        .filter(|(_u, bytes, _ct)| !bytes.is_empty())
+        .map(|(_u, bytes, ct)| {
+            let mime = ct.split(';').next().unwrap_or("image/jpeg").trim();
+            format!("data:{};base64,{}", mime, b64(&bytes))
+        }),
         None => None,
     };
 
@@ -102,16 +109,26 @@ pub async fn unfurl(raw_url: &str) -> Result<Preview, String> {
 /// `cap` bytes and `deadline`, and — if `want` is given — that the response's
 /// `Content-Type` starts with it. Every connection target (initial host and
 /// each redirect hop) must resolve to a public unicast address (SSRF guard).
-/// `pub(crate)`: also used by [`crate::gifsearch`] for a fixed, known-host API
-/// call, not just this module's arbitrary-URL unfurling.
+/// If `host_ok` is given, it is additionally checked on **every** hop
+/// (including the first) — a caller with a fixed-host allowlist (like
+/// [`crate::gifsearch`]'s CDN check) must not have it silently bypassed by a
+/// redirect the allowlisted host itself returns; `unfurl`'s own arbitrary-URL
+/// use passes `None` since any public host is legitimately in scope for it.
+/// `pub(crate)`: also used by [`crate::gifsearch`].
 pub(crate) async fn fetch(
     start_url: &str,
     deadline: Instant,
     cap: usize,
     want: Option<&str>,
+    host_ok: Option<fn(&str) -> bool>,
 ) -> Result<(String, Vec<u8>, String), String> {
     let mut url = start_url.to_string();
     for _ in 0..=MAX_REDIRECTS {
+        if let Some(ok) = host_ok {
+            if !ok(&url) {
+                return Err("redirected to a host outside the allowlist".into());
+            }
+        }
         let (parts, host, port, tls) = split_url(&url)?;
         let addr = resolve_public(&host, port).await?;
 
@@ -604,6 +621,27 @@ mod tests {
         // The SSRF guard must fire before any connection is attempted.
         let e = unfurl("http://127.0.0.1:9/secret").await.unwrap_err();
         assert!(e.contains("non-public"), "got: {e}");
+    }
+
+    #[tokio::test]
+    async fn host_ok_is_checked_before_any_connection_is_attempted() {
+        // A `host_ok` that rejects everything must fire on the very first
+        // hop, before `fetch` ever tries to connect — a caller with a fixed
+        // allowlist (like gifsearch's CDN check) must never silently fall
+        // through to a real request. Port 1 on a real public IP is never
+        // reachable, so if the gate did not fire first this would instead
+        // hang until `deadline` and report a timeout, not this exact error.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let e = fetch(
+            "https://93.184.216.34:1/whatever",
+            deadline,
+            1024,
+            None,
+            Some(|_: &str| false),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e, "redirected to a host outside the allowlist");
     }
 
     #[test]

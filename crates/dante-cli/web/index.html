@@ -1413,7 +1413,7 @@ const api = {
   // Opt-in GIF search (Tenor/Giphy, if the operator configured a key).
   gifSearchState()          { return this.get("/api/gifsearch"); },
   gifSearchToggle(on)       { return this.post("/api/gifsearch", { on }); },
-  gifSearchQuery(q)         { return this.get("/api/gifsearch/query?q=" + encodeURIComponent(q)); },
+  gifSearchQuery(q)         { return this.post("/api/gifsearch/query", { q }); },
   gifSearchPick(url)        { return this.post("/api/gifsearch/pick", { url }); },
   invite(channel, peer)   { return this.post("/api/invite", { channel, peer }); },
   setNickname(server, member, nickname) { return this.post("/api/nickname", { server, member, nickname }); },

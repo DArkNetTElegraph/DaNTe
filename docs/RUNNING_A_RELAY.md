@@ -206,13 +206,10 @@ AES-GCM-encrypted under the channel's MLS key in SFrame-capable browsers (see
 [`SFU.md`](SFU.md) and [`THREAT_MODEL.md`](THREAT_MODEL.md) §5.10 for the
 exact boundary, including the non-Chromium refusal).
 
-Two honest limitations of the current SFU build:
-
-- The SFU advertises **host candidates only** (no STUN configured), so run it
-  on a host with a publicly reachable IP or full-cone port mapping.
-- It is off by default because it pulls the WebRTC dependency tree into the
-  relay binary. The media plane and signalling are proven with real multi-peer
-  tests, but the browser and desktop client paths are not wired yet.
+SFU-hosted rooms get the same `--stun` / `--turn` / `--turn-secret` policy
+configured above — no separate flag needed. It is off by default because it
+pulls the WebRTC dependency tree into the relay binary; the desktop shell
+does not offer SFU mode at all (see above).
 
 ## Proof-of-work
 

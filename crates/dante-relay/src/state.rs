@@ -150,9 +150,17 @@ pub struct RelayState {
     /// only drained by `serve_p2p`, so a relay with no `--p2p-listen` just lets
     /// the newest few sit here.
     ledger_outbox: std::collections::VecDeque<Vec<u8>>,
-    /// `(channel_id, seq, blob)` for locally-posted channel frames a federated
-    /// relay should re-broadcast so sibling replicas converge.
-    channel_outbox: std::collections::VecDeque<([u8; 32], u64, Vec<u8>)>,
+    /// `(channel_id, seq, blob, identity, sig)` for locally-posted channel
+    /// frames a federated relay should re-broadcast so sibling replicas
+    /// converge. `identity`/`sig` ride along so a sibling can independently
+    /// verify authorship instead of trusting the gossip mesh outright.
+    channel_outbox: std::collections::VecDeque<ChannelOutboxEntry>,
+    /// `(channel_id, server_root, version, members, sig)` for locally-applied
+    /// channel rosters a federated relay should re-broadcast, so a sibling
+    /// that never receives `SetChannelRoster` directly (client requests are
+    /// pinned to one relay per channel) can still enforce membership on
+    /// gossiped frames instead of only ever seeing the primary's copy.
+    channel_roster_outbox: std::collections::VecDeque<ChannelRosterOutboxEntry>,
     /// Channels a client asked to `FetchChannel` that this relay has no log
     /// for — `serve_p2p` pulls them from siblings once.
     channel_backfill: std::collections::VecDeque<[u8; 32]>,
@@ -230,6 +238,11 @@ const MAX_CHANNEL_FETCH_BYTES: usize = 7 * 1024 * 1024;
 type ChannelLog = (u64, bool, Vec<(u64, Vec<u8>, u64)>);
 /// `(server_root, version, current members)` — see `RelayState::channel_rosters`.
 type ChannelRoster = ([u8; 32], u64, std::collections::HashSet<[u8; 32]>);
+/// `(channel_id, seq, blob, identity, sig)` — see `RelayState::channel_outbox`.
+type ChannelOutboxEntry = ([u8; 32], u64, Vec<u8>, [u8; 32], [u8; 64]);
+/// `(channel_id, server_root, version, members, sig)` — see
+/// `RelayState::channel_roster_outbox`.
+type ChannelRosterOutboxEntry = ([u8; 32], [u8; 32], u64, Vec<[u8; 32]>, [u8; 64]);
 /// Cap on the pending channel re-broadcast / backfill queues.
 const CHANNEL_FED_QUEUE_CAP: usize = 4096;
 
@@ -258,6 +271,7 @@ impl RelayState {
             p2p_reported: std::collections::VecDeque::new(),
             ledger_outbox: std::collections::VecDeque::new(),
             channel_outbox: std::collections::VecDeque::new(),
+            channel_roster_outbox: std::collections::VecDeque::new(),
             channel_backfill: std::collections::VecDeque::new(),
             channel_backfill_set: std::collections::HashSet::new(),
             prekey_outbox: std::collections::VecDeque::new(),
@@ -297,8 +311,16 @@ impl RelayState {
     }
 
     /// Locally-posted channel frames to re-broadcast on `dante/chan/<id>`.
-    pub fn take_channel_outbox(&mut self) -> Vec<([u8; 32], u64, Vec<u8>)> {
+    pub fn take_channel_outbox(&mut self) -> Vec<ChannelOutboxEntry> {
         self.channel_outbox.drain(..).collect()
+    }
+
+    /// Locally-applied channel rosters to re-broadcast on `dante/chan/<id>`,
+    /// so every relay in the mesh — not just the one a client's roster
+    /// update happened to land on — can enforce membership on gossiped
+    /// frames.
+    pub fn take_channel_roster_outbox(&mut self) -> Vec<ChannelRosterOutboxEntry> {
+        self.channel_roster_outbox.drain(..).collect()
     }
 
     /// Channels a client asked for that this relay lacks — pull them from
@@ -318,27 +340,51 @@ impl RelayState {
         self.mbox_outbox.drain(..).collect()
     }
 
-    /// KeyPackage-share messages (`identity ‖ kp`) since the last call.
+    /// Encoded `Request::PublishKeyPackages` blobs (the whole originally
+    /// signed batch) since the last call, so a sibling can independently
+    /// verify the same signature rather than trusting us blindly.
     pub fn take_keypkg_outbox(&mut self) -> Vec<Vec<u8>> {
         self.keypkg_outbox.drain(..).collect()
     }
 
-    /// Adopt a sibling's last-resort KeyPackage for `identity` — but only if we
-    /// hold none of our own (our locally-published single-use KeyPackages
-    /// always take priority; this is purely the cross-relay fallback).
+    /// Adopt a sibling's last-resort KeyPackage — but only if we hold none of
+    /// our own for that identity (our locally-published single-use
+    /// KeyPackages always take priority; this is purely the cross-relay
+    /// fallback), and only if the batch's own signature verifies against the
+    /// ledger's current key for its claimed identity. `msg` is an encoded
+    /// `Request::PublishKeyPackages` (see [`Self::take_keypkg_outbox`]) — the
+    /// whole originally-signed batch, not just the one item this relay ends
+    /// up keeping, since the signature covers the batch as a unit and can't
+    /// be checked piecemeal.
     pub fn ingest_gossiped_keypackage(&mut self, msg: &[u8]) -> bool {
-        if msg.len() < 33 || msg.len() > 32 + MAX_KEYPKG_BYTES {
+        let Ok(Request::PublishKeyPackages {
+            identity,
+            key_packages,
+            sig,
+        }) = Request::decode(msg)
+        else {
+            return false;
+        };
+        if key_packages.is_empty() || key_packages.iter().any(|kp| kp.len() > MAX_KEYPKG_BYTES) {
             return false;
         }
-        let id: [u8; 32] = msg[..32].try_into().unwrap();
-        let kp = msg[32..].to_vec();
-        if !self.key_packages.contains_key(&id) && self.key_packages.len() >= MAX_KEYPKG_IDENTITIES
+        if self
+            .verify_keypkg_publish_sig(&identity, &key_packages, &sig)
+            .is_err()
         {
             return false;
         }
-        let q = self.key_packages.entry(id).or_default();
+        if !self.key_packages.contains_key(&identity)
+            && self.key_packages.len() >= MAX_KEYPKG_IDENTITIES
+        {
+            return false;
+        }
+        let Some(last) = key_packages.into_iter().next_back() else {
+            return false;
+        };
+        let q = self.key_packages.entry(identity).or_default();
         if q.is_empty() {
-            q.push_back(kp);
+            q.push_back(last);
             true
         } else {
             false
@@ -409,15 +455,38 @@ impl RelayState {
     /// Ignored if we sequence this channel ourselves (`local_writer`), if the
     /// seq is already present, or if the frame is oversized. Returns whether it
     /// was stored (so `serve_p2p` can subscribe / re-broadcast).
+    ///
+    /// `identity`/`sig` are checked the same way the direct `PostToChannel`
+    /// handler checks them — a gossiped frame with no genuine ledger
+    /// signature is refused outright. Membership is enforced too, but only
+    /// when this relay already holds a roster for `channel_id`: gossip
+    /// delivery order isn't guaranteed, so a follower that hasn't yet
+    /// received the roster (see [`Self::ingest_gossiped_channel_roster`])
+    /// doesn't reject on that basis alone — it just can't fully enforce
+    /// membership until the roster catches up. A relay that *does* have the
+    /// roster enforces it exactly like the direct path.
     pub fn ingest_gossiped_channel_frame(
         &mut self,
         channel_id: [u8; 32],
         seq: u64,
         blob: Vec<u8>,
+        identity: [u8; 32],
+        sig: [u8; 64],
         now: u64,
     ) -> bool {
         if blob.len() > MAX_CHANNEL_BLOB_BYTES {
             return false;
+        }
+        if self
+            .verify_channel_post_sig(&channel_id, &identity, &blob, &sig)
+            .is_err()
+        {
+            return false;
+        }
+        if let Some((_, _, members)) = self.channel_rosters.get(&channel_id) {
+            if !members.contains(&identity) {
+                return false;
+            }
         }
         if !self.channels.contains_key(&channel_id) && self.channels.len() >= MAX_CHANNELS {
             return false;
@@ -455,6 +524,27 @@ impl RelayState {
         }
         self.channel_bytes = self.channel_bytes.saturating_add(added) - removed;
         true
+    }
+
+    /// Fold a channel-roster update heard on `dante/chan/<id>` into our
+    /// replica, with the same hijack/replay protection as the direct
+    /// `SetChannelRoster` handler (see [`Self::apply_channel_roster`]).
+    /// Without this, a relay that only ever received channel *content* over
+    /// gossip — never a direct `SetChannelRoster` from a client, which is
+    /// pinned to one relay per channel — could never enforce membership on
+    /// gossiped frames at all.
+    pub fn ingest_gossiped_channel_roster(
+        &mut self,
+        channel_id: [u8; 32],
+        server_root: [u8; 32],
+        version: u64,
+        members: Vec<[u8; 32]>,
+        sig: [u8; 64],
+    ) -> bool {
+        matches!(
+            self.apply_channel_roster(channel_id, server_root, version, members, &sig),
+            Ok(true)
+        )
     }
 
     /// Install a sibling's channel log verbatim (seqs preserved) for a channel
@@ -567,6 +657,97 @@ impl RelayState {
         self.signals.retain(|_, sigs| !sigs.is_empty());
 
         (dropped, evaporated)
+    }
+
+    /// Verify `sig` is `identity`'s own signature over
+    /// [`keypkg_publish_challenge`] for the whole `key_packages` batch, via
+    /// the ledger's current signing key for `identity`. Shared between the
+    /// direct `PublishKeyPackages` handler and gossiped keypkg ingestion.
+    fn verify_keypkg_publish_sig(
+        &self,
+        identity: &[u8; 32],
+        key_packages: &[Vec<u8>],
+        sig: &[u8; 64],
+    ) -> Result<(), &'static str> {
+        let Some(idk_pub) = self.ledger.idk_for_id(identity) else {
+            return Err("unknown identity");
+        };
+        let challenge = keypkg_publish_challenge(identity, key_packages);
+        if SignPublic::from_bytes(&idk_pub)
+            .and_then(|k| k.verify(&challenge, sig))
+            .is_err()
+        {
+            return Err("bad signature");
+        }
+        Ok(())
+    }
+
+    /// Verify `sig` is `identity`'s own signature over
+    /// [`post_to_channel_challenge`] for `(channel_id, blob)`, via the
+    /// ledger's current signing key for `identity`. Shared between the
+    /// direct `PostToChannel` handler and gossiped channel-frame ingestion,
+    /// so both paths enforce authorship identically.
+    fn verify_channel_post_sig(
+        &self,
+        channel_id: &[u8; 32],
+        identity: &[u8; 32],
+        blob: &[u8],
+        sig: &[u8; 64],
+    ) -> Result<(), &'static str> {
+        let Some(idk_pub) = self.ledger.idk_for_id(identity) else {
+            return Err("unknown identity");
+        };
+        let challenge = post_to_channel_challenge(channel_id, identity, blob);
+        if SignPublic::from_bytes(&idk_pub)
+            .and_then(|k| k.verify(&challenge, sig))
+            .is_err()
+        {
+            return Err("bad signature");
+        }
+        Ok(())
+    }
+
+    /// Try to apply a channel-roster update: hijack protection (a channel's
+    /// first roster permanently binds it to whichever `server_root` signed
+    /// it) and replay protection (`version` must strictly increase). Shared
+    /// between the direct `SetChannelRoster` handler and gossiped roster
+    /// ingestion, so both enforce identically.
+    ///
+    /// `Ok(true)` — applied, a genuine change. `Ok(false)` — a stale or
+    /// duplicate version; a normal no-op when gossip redelivers an update
+    /// this relay already has, not an error. `Err` — a real refusal (bad
+    /// signature, a hijack attempt, an oversized list).
+    fn apply_channel_roster(
+        &mut self,
+        channel_id: [u8; 32],
+        server_root: [u8; 32],
+        version: u64,
+        members: Vec<[u8; 32]>,
+        sig: &[u8; 64],
+    ) -> Result<bool, &'static str> {
+        if members.len() > MAX_CHANNEL_ROSTER_MEMBERS {
+            return Err("roster too large");
+        }
+        if let Some((bound_root, cur_version, _)) = self.channel_rosters.get(&channel_id) {
+            if *bound_root != server_root {
+                return Err("channel bound to a different server");
+            }
+            if version <= *cur_version {
+                return Ok(false);
+            }
+        }
+        let challenge = channel_roster_challenge(&channel_id, &server_root, version, &members);
+        if SignPublic::from_bytes(&server_root)
+            .and_then(|k| k.verify(&challenge, sig))
+            .is_err()
+        {
+            return Err("bad signature");
+        }
+        self.channel_rosters.insert(
+            channel_id,
+            (server_root, version, members.into_iter().collect()),
+        );
+        Ok(true)
     }
 
     fn handle(&mut self, req: Request, ip: IpAddr, now: u64) -> Response {
@@ -730,21 +911,25 @@ impl RelayState {
                 // with no matching, valid signature is refused rather than
                 // silently accepted, so a KeyPackage queue can no longer be
                 // flooded or overwritten by anyone but its real owner.
-                let Some(idk_pub) = self.ledger.idk_for_id(&identity) else {
-                    return Response::Error("unknown identity".into());
-                };
-                let challenge = keypkg_publish_challenge(&identity, &key_packages);
-                if SignPublic::from_bytes(&idk_pub)
-                    .and_then(|k| k.verify(&challenge, &sig))
-                    .is_err()
+                if let Err(reason) = self.verify_keypkg_publish_sig(&identity, &key_packages, &sig)
                 {
-                    return Response::Error("bad signature".into());
+                    return Response::Error(reason.into());
                 }
                 if !self.key_packages.contains_key(&identity)
                     && self.key_packages.len() >= MAX_KEYPKG_IDENTITIES
                 {
                     return Response::Error("key package directory full".into());
                 }
+                // Re-broadcast the whole verified request (not just whatever
+                // ends up "last" in our own queue) so a sibling can
+                // independently check the very signature we just verified,
+                // rather than trusting us blindly.
+                let gossip_blob = Request::PublishKeyPackages {
+                    identity,
+                    key_packages: key_packages.clone(),
+                    sig,
+                }
+                .encode();
                 let q = self.key_packages.entry(identity).or_default();
                 for kp in key_packages {
                     q.push_back(kp);
@@ -752,14 +937,9 @@ impl RelayState {
                 while q.len() > MAX_KEYPKGS_PER_IDENTITY {
                     q.pop_front();
                 }
-                // Share only the reusable last-resort KeyPackage with siblings.
-                if let Some(last) = q.back().cloned() {
-                    let mut msg = identity.to_vec();
-                    msg.extend_from_slice(&last);
-                    self.keypkg_outbox.push_back(msg);
-                    while self.keypkg_outbox.len() > LEDGER_OUTBOX_CAP {
-                        self.keypkg_outbox.pop_front();
-                    }
+                self.keypkg_outbox.push_back(gossip_blob);
+                while self.keypkg_outbox.len() > LEDGER_OUTBOX_CAP {
+                    self.keypkg_outbox.pop_front();
                 }
                 Response::Ok
             }
@@ -812,15 +992,10 @@ impl RelayState {
                 if blob.len() > MAX_CHANNEL_BLOB_BYTES {
                     return Response::Error("channel frame too large".into());
                 }
-                let Some(idk_pub) = self.ledger.idk_for_id(&identity) else {
-                    return Response::Error("unknown identity".into());
-                };
-                let challenge = post_to_channel_challenge(&channel_id, &identity, &blob);
-                if SignPublic::from_bytes(&idk_pub)
-                    .and_then(|k| k.verify(&challenge, &sig))
-                    .is_err()
+                if let Err(reason) =
+                    self.verify_channel_post_sig(&channel_id, &identity, &blob, &sig)
                 {
-                    return Response::Error("bad signature".into());
+                    return Response::Error(reason.into());
                 }
                 // The channel's roster (from the host's SetChannelRoster) is
                 // the sole source of truth for who may write here — knowing
@@ -855,7 +1030,8 @@ impl RelayState {
                     }
                 }
                 self.channel_bytes = self.channel_bytes.saturating_add(added) - removed;
-                self.channel_outbox.push_back((channel_id, seq, blob));
+                self.channel_outbox
+                    .push_back((channel_id, seq, blob, identity, sig));
                 while self.channel_outbox.len() > CHANNEL_FED_QUEUE_CAP {
                     self.channel_outbox.pop_front();
                 }
@@ -872,34 +1048,29 @@ impl RelayState {
                 if !self.record_rl.check(&ip, now, 1.0) {
                     return Response::Error("rate limited".into());
                 }
-                if members.len() > MAX_CHANNEL_ROSTER_MEMBERS {
-                    return Response::Error("roster too large".into());
-                }
-                // A channel's first SetChannelRoster permanently binds it to
-                // whichever server_root signed it; every later update for the
-                // same channel_id must come from that same key, so one
-                // server's host can never overwrite another's roster.
-                if let Some((bound_root, cur_version, _)) = self.channel_rosters.get(&channel_id) {
-                    if *bound_root != server_root {
-                        return Response::Error("channel bound to a different server".into());
-                    }
-                    if version <= *cur_version {
-                        return Response::Error("stale roster version".into());
-                    }
-                }
-                let challenge =
-                    channel_roster_challenge(&channel_id, &server_root, version, &members);
-                if SignPublic::from_bytes(&server_root)
-                    .and_then(|k| k.verify(&challenge, &sig))
-                    .is_err()
-                {
-                    return Response::Error("bad signature".into());
-                }
-                self.channel_rosters.insert(
+                match self.apply_channel_roster(
                     channel_id,
-                    (server_root, version, members.into_iter().collect()),
-                );
-                Response::Ok
+                    server_root,
+                    version,
+                    members.clone(),
+                    &sig,
+                ) {
+                    Ok(true) => {
+                        self.channel_roster_outbox.push_back((
+                            channel_id,
+                            server_root,
+                            version,
+                            members,
+                            sig,
+                        ));
+                        while self.channel_roster_outbox.len() > CHANNEL_FED_QUEUE_CAP {
+                            self.channel_roster_outbox.pop_front();
+                        }
+                        Response::Ok
+                    }
+                    Ok(false) => Response::Error("stale roster version".into()),
+                    Err(reason) => Response::Error(reason.into()),
+                }
             }
 
             Request::FetchChannel {
@@ -1113,14 +1284,25 @@ mod tests {
 
     /// A `PostToChannel` request, correctly signed by `identity`.
     fn post_to_channel(identity: &Identity, channel_id: [u8; 32], blob: Vec<u8>) -> Request {
-        let id = *identity.id().as_bytes();
-        let sig = identity.sign(&post_to_channel_challenge(&channel_id, &id, &blob));
+        let (id, sig) = signed_frame(identity, channel_id, &blob);
         Request::PostToChannel {
             channel_id,
             blob,
             identity: id,
             sig,
         }
+    }
+
+    /// `(identity, sig)` for a channel frame, as `ingest_gossiped_channel_frame`
+    /// (the raw gossip-ingest path, not a wrapped `Request`) takes them.
+    fn signed_frame(
+        identity: &Identity,
+        channel_id: [u8; 32],
+        blob: &[u8],
+    ) -> ([u8; 32], [u8; 64]) {
+        let id = *identity.id().as_bytes();
+        let sig = identity.sign(&post_to_channel_challenge(&channel_id, &id, blob));
+        (id, sig)
     }
 
     /// A `SetChannelRoster` request, correctly signed by `server_root`.
@@ -1225,10 +1407,22 @@ mod tests {
             ),
             Response::Posted(1)
         );
-        assert_eq!(a.take_channel_outbox(), vec![(cid, 1, b"frame-1".to_vec())]);
+        let (poster_id, sig1) = signed_frame(&poster, cid, b"frame-1");
+        assert_eq!(
+            a.take_channel_outbox(),
+            vec![(cid, 1, b"frame-1".to_vec(), poster_id, sig1)]
+        );
         // A is the writer: a stale gossiped frame (seq below our next slot) is
         // ignored and A keeps sequencing.
-        assert!(!a.ingest_gossiped_channel_frame(cid, 1, b"dup".to_vec(), 1_000));
+        let (_, dup_sig) = signed_frame(&poster, cid, b"dup");
+        assert!(!a.ingest_gossiped_channel_frame(
+            cid,
+            1,
+            b"dup".to_vec(),
+            poster_id,
+            dup_sig,
+            1_000
+        ));
         assert_eq!(
             a.handle(
                 post_to_channel(&poster, cid, b"frame-2".to_vec()),
@@ -1240,7 +1434,32 @@ mod tests {
         let _ = a.take_channel_outbox();
         // But a sibling frame at/past our next slot means the client set has
         // re-homed the channel: A steps down, folds it, and stops sequencing.
-        assert!(a.ingest_gossiped_channel_frame(cid, 3, b"sibling-3".to_vec(), 1_000));
+        // Signed by a second real member of the roster, standing in for
+        // whichever member the sibling relay actually sequenced it from.
+        let sibling_member = Identity::generate(1);
+        announce(&mut a, &sibling_member);
+        assert_eq!(
+            a.handle(
+                set_channel_roster(
+                    &root,
+                    cid,
+                    2,
+                    vec![poster_id, *sibling_member.id().as_bytes()]
+                ),
+                IP,
+                1_000
+            ),
+            Response::Ok
+        );
+        let (sib_id, sib_sig) = signed_frame(&sibling_member, cid, b"sibling-3");
+        assert!(a.ingest_gossiped_channel_frame(
+            cid,
+            3,
+            b"sibling-3".to_vec(),
+            sib_id,
+            sib_sig,
+            1_000
+        ));
         assert_eq!(
             a.handle(
                 Request::FetchChannel {
@@ -1253,15 +1472,45 @@ mod tests {
             Response::ChannelLog(vec![(3, b"sibling-3".to_vec())])
         );
 
-        // Relay B: pure follower. It folds the gossiped frame in at the same
-        // seq, so a client polling B sees A's ordering verbatim.
+        // Relay B: pure follower with no roster registered locally, and its
+        // own separate ledger — `poster` must be re-announced here too, since
+        // gossip carries identity+sig but ledgers aren't shared between
+        // relays in this test harness (in reality B would learn `poster` via
+        // ledger gossip, exercised in a different test). It folds the
+        // gossiped frame in at the same seq, so a client polling B sees A's
+        // ordering verbatim.
         let mut b = state();
-        assert!(b.ingest_gossiped_channel_frame(cid, 1, b"frame-1".to_vec(), 1_000));
+        announce(&mut b, &poster);
+        let (_, b_sig1) = signed_frame(&poster, cid, b"frame-1");
+        assert!(b.ingest_gossiped_channel_frame(
+            cid,
+            1,
+            b"frame-1".to_vec(),
+            poster_id,
+            b_sig1,
+            1_000
+        ));
+        let (_, b_sig_other) = signed_frame(&poster, cid, b"other");
         assert!(
-            !b.ingest_gossiped_channel_frame(cid, 1, b"other".to_vec(), 1_000),
+            !b.ingest_gossiped_channel_frame(
+                cid,
+                1,
+                b"other".to_vec(),
+                poster_id,
+                b_sig_other,
+                1_000
+            ),
             "seq already present"
         );
-        assert!(b.ingest_gossiped_channel_frame(cid, 3, b"frame-3".to_vec(), 1_000));
+        let (_, b_sig3) = signed_frame(&poster, cid, b"frame-3");
+        assert!(b.ingest_gossiped_channel_frame(
+            cid,
+            3,
+            b"frame-3".to_vec(),
+            poster_id,
+            b_sig3,
+            1_000
+        ));
         match b.handle(
             Request::FetchChannel {
                 channel_id: cid,
@@ -1878,6 +2127,132 @@ mod tests {
             s.handle(set_channel_roster(&owner, ch, 2, vec![]), IP, 0),
             Response::Ok
         );
+    }
+
+    #[test]
+    fn gossiped_channel_frames_need_a_real_signature_and_respect_a_known_roster() {
+        let mut s = state();
+        let ch = [18u8; 32];
+        let member = Identity::generate(0);
+        let stranger = Identity::generate(1);
+        announce(&mut s, &member);
+        announce(&mut s, &stranger);
+
+        // No signature at all (an all-zero identity with no ledger entry):
+        // refused outright, regardless of roster state.
+        assert!(!s.ingest_gossiped_channel_frame(
+            ch,
+            1,
+            b"forged".to_vec(),
+            [0u8; 32],
+            [0u8; 64],
+            0
+        ));
+
+        // A genuine signature from a real identity, but no roster registered
+        // for this channel yet: accepted — gossip delivery order isn't
+        // guaranteed, so a relay that hasn't received the roster yet can't
+        // enforce membership, only authorship.
+        let (mid, sig1) = signed_frame(&member, ch, b"frame-1");
+        assert!(s.ingest_gossiped_channel_frame(ch, 1, b"frame-1".to_vec(), mid, sig1, 0));
+
+        // Once this relay DOES have a roster, it enforces membership on
+        // gossiped frames exactly like the direct path.
+        let root = SignSecret::from_bytes(&[19u8; 32]);
+        assert_eq!(
+            s.handle(set_channel_roster(&root, ch, 1, vec![mid]), IP, 0),
+            Response::Ok
+        );
+        let (sid, sig2) = signed_frame(&stranger, ch, b"spam");
+        assert!(!s.ingest_gossiped_channel_frame(ch, 2, b"spam".to_vec(), sid, sig2, 0));
+    }
+
+    #[test]
+    fn gossiped_channel_rosters_get_the_same_hijack_and_replay_protection() {
+        let mut s = state();
+        let ch = [20u8; 32];
+        let owner = SignSecret::from_bytes(&[21u8; 32]);
+        let attacker = SignSecret::from_bytes(&[22u8; 32]);
+        let victim = Identity::generate(0);
+        announce(&mut s, &victim);
+
+        let sig = owner.sign(&channel_roster_challenge(
+            &ch,
+            &owner.public().to_bytes(),
+            1,
+            &[*victim.id().as_bytes()],
+        ));
+        assert!(s.ingest_gossiped_channel_roster(
+            ch,
+            owner.public().to_bytes(),
+            1,
+            vec![*victim.id().as_bytes()],
+            sig
+        ));
+
+        // A different server_root can't hijack it via gossip either.
+        let atk_sig = attacker.sign(&channel_roster_challenge(
+            &ch,
+            &attacker.public().to_bytes(),
+            2,
+            &[],
+        ));
+        assert!(!s.ingest_gossiped_channel_roster(
+            ch,
+            attacker.public().to_bytes(),
+            2,
+            vec![],
+            atk_sig
+        ));
+
+        // A stale/duplicate version from the real owner is a no-op, not a
+        // panic or a silent downgrade.
+        assert!(!s.ingest_gossiped_channel_roster(
+            ch,
+            owner.public().to_bytes(),
+            1,
+            vec![*victim.id().as_bytes()],
+            sig
+        ));
+    }
+
+    #[test]
+    fn gossiped_keypackages_need_the_original_batch_signature() {
+        let mut s = state();
+        let identity = Identity::generate(0);
+        let attacker = Identity::generate(1);
+        announce(&mut s, &identity);
+        let id = *identity.id().as_bytes();
+        let key_packages = vec![b"kp-a".to_vec(), b"kp-b".to_vec()];
+
+        // A batch "signed" by someone other than the claimed identity is
+        // refused.
+        let bad_sig = attacker.sign(&keypkg_publish_challenge(&id, &key_packages));
+        let forged = Request::PublishKeyPackages {
+            identity: id,
+            key_packages: key_packages.clone(),
+            sig: bad_sig,
+        }
+        .encode();
+        assert!(!s.ingest_gossiped_keypackage(&forged));
+
+        // The real, originally-signed batch is accepted, and only the last
+        // package is kept (matching the direct publish path's semantics).
+        let sig = identity.sign(&keypkg_publish_challenge(&id, &key_packages));
+        let genuine = Request::PublishKeyPackages {
+            identity: id,
+            key_packages: key_packages.clone(),
+            sig,
+        }
+        .encode();
+        assert!(s.ingest_gossiped_keypackage(&genuine));
+        assert_eq!(
+            s.handle(Request::GetKeyPackage(id), IP, 0),
+            Response::KeyPackage(Some(b"kp-b".to_vec()))
+        );
+
+        // Once we hold one of our own, a gossiped fallback doesn't override it.
+        assert!(!s.ingest_gossiped_keypackage(&genuine));
     }
 
     #[test]

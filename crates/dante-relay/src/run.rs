@@ -321,19 +321,46 @@ async fn serve_p2p(
                     handler.state().lock().await.ingest_gossiped_keypackage(&data);
                 }
                 Some(dante_p2p::Event::Message { topic, data, .. }) => {
-                    if let Some((cid, seq, blob)) = parse_chan_gossip(&topic, &data) {
-                        handler
-                            .state()
-                            .lock()
-                            .await
-                            .ingest_gossiped_channel_frame(cid, seq, blob, now_ms());
+                    if let Some(cid) = dante_p2p::parse_channel_topic(&topic) {
+                        match ChanGossip::decode(&data) {
+                            Some(ChanGossip::Frame {
+                                seq,
+                                identity,
+                                sig,
+                                blob,
+                            }) => {
+                                handler.state().lock().await.ingest_gossiped_channel_frame(
+                                    cid,
+                                    seq,
+                                    blob,
+                                    identity,
+                                    sig,
+                                    now_ms(),
+                                );
+                            }
+                            Some(ChanGossip::Roster {
+                                server_root,
+                                version,
+                                members,
+                                sig,
+                            }) => {
+                                handler.state().lock().await.ingest_gossiped_channel_roster(
+                                    cid,
+                                    server_root,
+                                    version,
+                                    members,
+                                    sig,
+                                );
+                            }
+                            None => {}
+                        }
                     }
                 }
                 Some(_) => {}
                 None => return Ok(()), // node event loop stopped
             },
             _ = flush.tick() => {
-                let (records, prekeys, envelopes, keypkgs, frames, backfill) = {
+                let (records, prekeys, envelopes, keypkgs, frames, rosters, backfill) = {
                     let mut st = handler.state().lock().await;
                     (
                         st.take_ledger_outbox(),
@@ -341,6 +368,7 @@ async fn serve_p2p(
                         st.take_mbox_outbox(),
                         st.take_keypkg_outbox(),
                         st.take_channel_outbox(),
+                        st.take_channel_roster_outbox(),
                         st.take_channel_backfill(),
                     )
                 };
@@ -356,12 +384,30 @@ async fn serve_p2p(
                 for blob in keypkgs {
                     let _ = node.publish(dante_p2p::KEYPKG_TOPIC, blob).await;
                 }
-                for (cid, seq, blob) in frames {
+                for (cid, seq, blob, identity, sig) in frames {
                     if chan_subs.len() < MAX_CHAN_SUBS && chan_subs.insert(cid) {
                         let _ = node.subscribe(&chan_gossip_topic(&cid)).await;
                     }
-                    let mut payload = seq.to_le_bytes().to_vec();
-                    payload.extend_from_slice(&blob);
+                    let payload = ChanGossip::Frame {
+                        seq,
+                        identity,
+                        sig,
+                        blob,
+                    }
+                    .encode();
+                    let _ = node.publish(&chan_gossip_topic(&cid), payload).await;
+                }
+                for (cid, server_root, version, members, sig) in rosters {
+                    if chan_subs.len() < MAX_CHAN_SUBS && chan_subs.insert(cid) {
+                        let _ = node.subscribe(&chan_gossip_topic(&cid)).await;
+                    }
+                    let payload = ChanGossip::Roster {
+                        server_root,
+                        version,
+                        members,
+                        sig,
+                    }
+                    .encode();
                     let _ = node.publish(&chan_gossip_topic(&cid), payload).await;
                 }
                 // Subscribe (cheap) here, but do the sibling fetches — which dial
@@ -466,15 +512,108 @@ fn chan_gossip_topic(channel_id: &[u8; 32]) -> String {
     dante_p2p::channel_topic(channel_id)
 }
 
-/// Parse a `dante/chan/<hex>` gossip message into `(channel_id, seq, frame)`.
+/// One message on a channel's gossip topic (`dante/chan/<hex>`, shared with
+/// clients): either a content frame or a roster update. Distinguished by a
+/// leading tag byte so the two payload shapes never collide — a channel's
+/// content and its membership are gossiped on the same per-channel topic to
+/// avoid a second global topic and the extra subscribe bookkeeping that
+/// would need.
 #[cfg(feature = "p2p")]
-fn parse_chan_gossip(topic: &str, data: &[u8]) -> Option<([u8; 32], u64, Vec<u8>)> {
-    let cid = dante_p2p::parse_channel_topic(topic)?;
-    if data.len() < 8 {
-        return None;
+enum ChanGossip {
+    /// Mirrors `Request::PostToChannel`'s fields — `identity`/`sig` ride
+    /// along so a sibling can verify authorship itself (see
+    /// `RelayState::ingest_gossiped_channel_frame`) instead of trusting
+    /// whoever gossiped it.
+    Frame {
+        seq: u64,
+        identity: [u8; 32],
+        sig: [u8; 64],
+        blob: Vec<u8>,
+    },
+    /// Mirrors `Request::SetChannelRoster`'s fields, so a sibling that never
+    /// receives `SetChannelRoster` directly (client requests are pinned to
+    /// one relay per channel) can still build its own copy and enforce
+    /// membership on gossiped frames.
+    Roster {
+        server_root: [u8; 32],
+        version: u64,
+        members: Vec<[u8; 32]>,
+        sig: [u8; 64],
+    },
+}
+
+#[cfg(feature = "p2p")]
+impl ChanGossip {
+    const TAG_FRAME: u8 = 0;
+    const TAG_ROSTER: u8 = 1;
+
+    fn encode(&self) -> Vec<u8> {
+        let mut w = dante_proto::enc::Writer::new();
+        match self {
+            ChanGossip::Frame {
+                seq,
+                identity,
+                sig,
+                blob,
+            } => {
+                w.u8(Self::TAG_FRAME)
+                    .u64(*seq)
+                    .fixed(identity)
+                    .fixed(sig)
+                    .bytes(blob);
+            }
+            ChanGossip::Roster {
+                server_root,
+                version,
+                members,
+                sig,
+            } => {
+                w.u8(Self::TAG_ROSTER)
+                    .fixed(server_root)
+                    .u64(*version)
+                    .fixed(sig)
+                    .u32(members.len() as u32);
+                for m in members {
+                    w.fixed(m);
+                }
+            }
+        }
+        w.into_vec()
     }
-    let seq = u64::from_le_bytes(data[..8].try_into().ok()?);
-    Some((cid, seq, data[8..].to_vec()))
+
+    fn decode(data: &[u8]) -> Option<Self> {
+        let mut r = dante_proto::enc::Reader::new(data);
+        let out = match r.u8().ok()? {
+            Self::TAG_FRAME => ChanGossip::Frame {
+                seq: r.u64().ok()?,
+                identity: r.fixed::<32>().ok()?,
+                sig: r.fixed::<64>().ok()?,
+                blob: r.bytes().ok()?.to_vec(),
+            },
+            Self::TAG_ROSTER => {
+                let server_root = r.fixed::<32>().ok()?;
+                let version = r.u64().ok()?;
+                let sig = r.fixed::<64>().ok()?;
+                let n = r.u32().ok()? as usize;
+                if n > r.remaining() / 32 {
+                    return None;
+                }
+                let mut members = Vec::with_capacity(n.min(1024));
+                for _ in 0..n {
+                    members.push(r.fixed::<32>().ok()?);
+                }
+                ChanGossip::Roster {
+                    server_root,
+                    version,
+                    members,
+                    sig,
+                }
+            }
+            _ => return None,
+        };
+        r.finish().ok()?;
+        Some(out)
+    }
 }
 
 /// Pull one channel's whole log from a sibling relay over `/dante/relay/1`,
@@ -542,4 +681,66 @@ fn parse_seed(hex: &str) -> anyhow::Result<[u8; 32]> {
         *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)?;
     }
     Ok(out)
+}
+
+#[cfg(all(test, feature = "p2p"))]
+mod tests {
+    use super::ChanGossip;
+
+    #[test]
+    fn chan_gossip_frame_roundtrips() {
+        let msg = ChanGossip::Frame {
+            seq: 42,
+            identity: [1u8; 32],
+            sig: [2u8; 64],
+            blob: vec![9, 9, 9],
+        };
+        match ChanGossip::decode(&msg.encode()) {
+            Some(ChanGossip::Frame {
+                seq,
+                identity,
+                sig,
+                blob,
+            }) => {
+                assert_eq!(seq, 42);
+                assert_eq!(identity, [1u8; 32]);
+                assert_eq!(sig, [2u8; 64]);
+                assert_eq!(blob, vec![9, 9, 9]);
+            }
+            _ => panic!("decode failed or wrong variant"),
+        }
+    }
+
+    #[test]
+    fn chan_gossip_roster_roundtrips_including_empty_members() {
+        for members in [vec![[3u8; 32], [4u8; 32]], vec![]] {
+            let msg = ChanGossip::Roster {
+                server_root: [5u8; 32],
+                version: 7,
+                members: members.clone(),
+                sig: [6u8; 64],
+            };
+            match ChanGossip::decode(&msg.encode()) {
+                Some(ChanGossip::Roster {
+                    server_root,
+                    version,
+                    members: got,
+                    sig,
+                }) => {
+                    assert_eq!(server_root, [5u8; 32]);
+                    assert_eq!(version, 7);
+                    assert_eq!(got, members);
+                    assert_eq!(sig, [6u8; 64]);
+                }
+                _ => panic!("decode failed or wrong variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn chan_gossip_rejects_garbage_and_a_bad_tag() {
+        assert!(ChanGossip::decode(&[]).is_none());
+        assert!(ChanGossip::decode(&[9u8; 10]).is_none()); // unknown tag
+        assert!(ChanGossip::decode(&[0u8]).is_none()); // truncated Frame
+    }
 }

@@ -172,7 +172,11 @@ above — it states precisely what is and is not protected.
   [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md#release)).
   What is outstanding: the bundles are unsigned (macOS Gatekeeper and Windows
   SmartScreen both warn), which needs certificates this project does not have
-  yet; and auto-update.
+  yet. The auto-updater is structurally wired (`tauri-plugin-updater`, a
+  "Check for Updates…" menu item) but inert — it needs the same kind of
+  maintainer-held credential signing doesn't have either, plus an
+  install-prompt UI; see
+  [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md#auto-update).
 - Desktop support for the **group-call SFU**: the browser path is wired and
   SFrame-gated (`--sfu`, roster threshold, headless-Chromium-verified), but the
   desktop shell's native audio has no SFrame equivalent, so it is deliberately

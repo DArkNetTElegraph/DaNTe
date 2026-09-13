@@ -653,10 +653,19 @@ DaNTe/
   `.deb`/`.rpm`/`.AppImage`) to the GitHub release — see
   [`apps/dante-desktop/README.md`](../apps/dante-desktop/README.md#release).
   **Still outstanding:** the bundles are unsigned (no Apple/Windows
-  certificates exist for this project) and there is no auto-update. And
-  runtime verification: a green build and a produced installer both say the
-  code is well-formed and packages correctly; **no one has opened the
-  window** — that is a materially different, still-unverified claim.
+  certificates exist for this project). Auto-update is scaffolded —
+  `tauri-plugin-updater` + `tauri-plugin-process` wired, a "Check for
+  Updates…" item on the application menu, `tauri.conf.json`'s
+  `plugins.updater` pointing at the standard
+  `releases/latest/download/latest.json` GitHub convention — but inert: its
+  `pubkey` is an ephemeral placeholder (private key generated once, used only
+  to produce a valid public key, then discarded) so no manifest can ever
+  verify against it, and there is no install-prompt UI yet either. See
+  [`apps/dante-desktop/README.md`](../apps/dante-desktop/README.md#auto-update)
+  for exactly what a maintainer needs to do to make it real. And runtime
+  verification: a green build and a produced installer both say the code is
+  well-formed and packages correctly; **no one has opened the window** — that
+  is a materially different, still-unverified claim.
 - **Settings screen** *(done)*: a ⚙ overlay in the SPA — Identity (recovery
   phrase), Appearance (light/dark/auto theme), Behaviour (typing-broadcast
   toggle, desktop-notification permission), Network (relay list, read-only),

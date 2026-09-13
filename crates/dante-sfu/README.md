@@ -2,13 +2,15 @@
 
 SFU (selective forwarding unit) media component for large DaNTe voice rooms.
 
-> **Status: media plane, relay signalling and the `dante-core` client mode are
-> proven; browser/desktop wiring is not done.** A real three-participant test
+> **Status: media plane, relay signalling, engine mode and browser mode are
+> proven; desktop is deliberately excluded.** A real three-participant test
 > terminates DTLS-SRTP and forwards RTP opaquely, `dante-relay`'s `sfu` feature
-> hosts rooms and carries SDP/ICE over the relay wire, and `Engine::enable_sfu()`
+> hosts rooms and carries SDP/ICE over the relay wire, `Engine::enable_sfu()`
 > gives an engine one SFU leg instead of a mesh (verified by a three-engine
-> e2e). The shipped browser client and the desktop audio bridge still use the
-> mesh. See [`docs/SFU.md`](../../docs/SFU.md) for the design.
+> e2e), and `dante serve --sfu` lets the browser SPA negotiate the same SFU,
+> gated on SFrame support and chosen by a roster threshold. The desktop audio
+> bridge still uses the mesh (no SFrame equivalent in its native path). See
+> [`docs/SFU.md`](../../docs/SFU.md) for the design.
 
 ## What it does
 
@@ -52,14 +54,14 @@ distinct audio payload, all connected only to one `Sfu`:
 
 ## Not done
 
-- **Signalling**: no relay wire request, no authorization binding a slot to a
-  participant identity, no client-side negotiation flow.
-- **Mesh/SFU switch**: no threshold logic in `dante-core`; nothing advertises
-  an SFU to clients.
 - **Renegotiation**: fixed room size at construction rather than dynamic
   membership.
-- **RTCP**: relies on webrtc-rs' internal sender/receiver interceptors; no
-  NACK/PLI propagation between legs (audio-only for now).
+- **RTCP NACK**: registered on every leg — this crate's and `dante-voice`'s —
+  with `nack` feedback capability declared for Opus (upstream's own default
+  only advertises it for video), so a dropped packet is retransmitted from
+  the sender's buffer rather than relying on Opus FEC alone. Not proven for
+  the browser path, which depends on the browser's own SDP declaring it.
+  PLI is video-only and does not apply here.
 - **Video / screen share**: forwards audio; video would take the same opaque
   path but is untested.
 - **Resource limits**: a per-source bitrate cap drops packets a sender pushes

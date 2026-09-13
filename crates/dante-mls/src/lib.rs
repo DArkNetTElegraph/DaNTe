@@ -192,6 +192,25 @@ impl Member {
         ))
     }
 
+    /// The identity bytes embedded in `kp`'s credential, without adding it to
+    /// the group. A KeyPackage's credential names whoever it was published
+    /// for; nothing in this crate enforces that it matches who actually
+    /// signed the (transport-level) publish — callers that fetched `kp` for a
+    /// specific peer should check this equals that peer's id before trusting
+    /// it enough to [`add`](Self::add).
+    pub fn key_package_identity(&self, kp: &KeyPkg) -> Result<Vec<u8>, MlsError> {
+        let parsed = KeyPackageIn::tls_deserialize_exact(&kp.0)
+            .map_err(|e| MlsError::Codec(e.to_string()))?;
+        let validated = parsed
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| MlsError::Group(format!("invalid key package: {e:?}")))?;
+        Ok(validated
+            .leaf_node()
+            .credential()
+            .serialized_content()
+            .to_vec())
+    }
+
     /// Add members from their published KeyPackages. Returns the handshake to
     /// broadcast; the local epoch has already advanced.
     pub fn add(&mut self, key_packages: &[KeyPkg]) -> Result<Handshake, MlsError> {

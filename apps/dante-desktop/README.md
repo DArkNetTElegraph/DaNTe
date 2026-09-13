@@ -147,3 +147,45 @@ them yet — wiring them into `desktop-bundle` as GitHub secrets is a deliberate
 follow-up, not an oversight, because getting the plumbing subtly wrong (a
 secret that's silently never read) is worse than an honestly-unsigned build
 that says so.
+
+## Auto-update
+
+The `tauri-plugin-updater` + `tauri-plugin-process` plumbing is wired
+(`tauri.conf.json`'s `plugins.updater`, `Cargo.toml`, a "Check for
+Updates…" item at the top of the application menu) but **not yet
+functional in a release**, on purpose, for the same reason as
+code-signing above.
+
+Tauri's updater requires a signature on every update it installs — that
+requirement [cannot be disabled](https://tauri.app/plugin/updater/). The
+`pubkey` currently in `tauri.conf.json` is an **ephemeral placeholder**:
+its matching private key was generated once (`cargo tauri signer generate
+--ci`), used only to produce a syntactically valid public key, and
+discarded immediately — nothing ever signs anything with it, and no
+manifest could ever pass its signature check even if one existed. "Check
+for Updates…" is safe to click today; it will report a failure (no
+reachable manifest, or a signature mismatch), never install anything.
+
+To make it real, a maintainer needs to:
+
+1. Generate a real keypair: `cargo tauri signer generate -w
+   ~/.tauri/dante.key` (keep the private key **and its password**; losing
+   either means old installs can never verify a future update).
+2. Replace `pubkey` in `tauri.conf.json` with the real public key.
+3. Add the private key (and its password, if set) as GitHub secrets
+   (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) and
+   wire them into the `desktop-bundle` job in
+   `.github/workflows/release.yml` — `createUpdaterArtifacts: true` (already
+   set) makes `cargo tauri build` also produce the signed update
+   archives once those env vars are present.
+4. Add a step that assembles a `latest.json` manifest (see [the updater
+   guide](https://tauri.app/plugin/updater/#update-artifacts)) from the
+   three platforms' signed archives and uploads it as a release asset
+   named `latest.json` — the endpoint already configured
+   (`https://github.com/DArkNetTElegraph/DaNTe/releases/latest/download/latest.json`)
+   is the standard GitHub-releases convention for exactly that file, so no
+   further endpoint change should be needed once it exists.
+5. Decide on and build an actual "an update is available" UI — right now
+   a found update is only logged to stderr, not offered to the user, since
+   installing without asking is not something this project should do
+   silently.

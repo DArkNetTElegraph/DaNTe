@@ -42,6 +42,15 @@ dante-audio = { path = "../../crates/dante-audio" }
 # the OS notification centre.
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
+# Structurally wired but not yet functional in a release: the pubkey below is
+# an ephemeral placeholder (its matching private key was generated once,
+# never committed, and discarded immediately), so no manifest can ever verify
+# against it. Real use needs a maintainer-held keypair
+# (`cargo tauri signer generate`) wired into the release workflow as a
+# GitHub secret, plus a step producing a signed `latest.json` — see
+# apps/dante-desktop/README.md's "Auto-update" section.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 serde_json = "1"
 anyhow = "1"

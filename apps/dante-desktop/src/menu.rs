@@ -3,14 +3,41 @@
 //! Windows and Linux render it as the window's own menu bar — Tauri 2's
 //! `tauri::menu` API is unified across all three, unlike Tauri 1.
 //!
-//! Every item here is a [`PredefinedMenuItem`]: Tauri wires its behaviour
-//! (quit, close the focused window, cut/copy/paste into the focused webview
-//! element, minimize, fullscreen) into the platform menu itself, so there is
-//! no custom `on_menu_event` handling to get wrong — unlike the tray menu,
-//! which does need one for its own three actions.
+//! Every item except "Check for Updates…" is a [`PredefinedMenuItem`]: Tauri
+//! wires its behaviour (quit, close the focused window, cut/copy/paste into
+//! the focused webview element, minimize, fullscreen) into the platform menu
+//! itself, so there is no custom `on_menu_event` handling to get wrong for
+//! those — unlike the tray menu, which does need one for its own actions.
 
-use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
-use tauri::App;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{App, Manager};
+
+/// Check for an update and log the result. Does not install one: the updater
+/// plugin is wired (see `apps/dante-desktop/Cargo.toml` and `tauri.conf.json`)
+/// but has no real signing key behind it yet — every check will either fail
+/// to reach a real manifest or fail signature verification against the
+/// placeholder pubkey, by design, until a maintainer wires a real keypair
+/// into the release workflow. See the README's "Auto-update" section.
+async fn check_for_updates(app: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("dante-desktop: updater unavailable: {e}");
+            return;
+        }
+    };
+    match updater.check().await {
+        Ok(Some(update)) => {
+            eprintln!(
+                "dante-desktop: update {} available (not installed — no install-prompt UI yet)",
+                update.version
+            );
+        }
+        Ok(None) => eprintln!("dante-desktop: no update available"),
+        Err(e) => eprintln!("dante-desktop: update check failed: {e}"),
+    }
+}
 
 /// Build and attach the application menu bar.
 pub fn install(app: &App) -> tauri::Result<()> {
@@ -20,6 +47,13 @@ pub fn install(app: &App) -> tauri::Result<()> {
     // About/Hide/Quit. Non-macOS folds Quit into File instead, but Tauri's
     // unified menu API places this submenu correctly per platform either way.
     let about = PredefinedMenuItem::about(app, Some("About DaNTe"), None)?;
+    let check_updates = MenuItem::with_id(
+        app,
+        "check_updates",
+        "Check for Updates…",
+        true,
+        None::<&str>,
+    )?;
     let hide = PredefinedMenuItem::hide(app, Some("Hide DaNTe"))?;
     let hide_others = PredefinedMenuItem::hide_others(app, None)?;
     let show_all = PredefinedMenuItem::show_all(app, None)?;
@@ -28,7 +62,16 @@ pub fn install(app: &App) -> tauri::Result<()> {
         app,
         "DaNTe",
         true,
-        &[&about, &sep, &hide, &hide_others, &show_all, &sep, &quit],
+        &[
+            &about,
+            &check_updates,
+            &sep,
+            &hide,
+            &hide_others,
+            &show_all,
+            &sep,
+            &quit,
+        ],
     )?;
 
     // "Close Window" fires the same window-close request the OS titlebar
@@ -57,6 +100,13 @@ pub fn install(app: &App) -> tauri::Result<()> {
 
     let menu = Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &window_menu])?;
     app.set_menu(menu)?;
+
+    app.on_menu_event(|app, event| {
+        if event.id().as_ref() == "check_updates" {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(check_for_updates(handle));
+        }
+    });
 
     Ok(())
 }

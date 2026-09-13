@@ -11,6 +11,7 @@ description = "SFU media component for large DaNTe voice rooms: terminates DTLS-
 [dependencies]
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+dante-net.workspace = true
 webrtc = "0.21.0-rc.2"
 rtc = "0.21.0-rc.2"
 async-trait = "0.1"

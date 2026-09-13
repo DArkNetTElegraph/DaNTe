@@ -1101,6 +1101,7 @@ name = "dante-sfu"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "dante-net",
  "dante-voice",
  "rtc",
  "thiserror 2.0.20",

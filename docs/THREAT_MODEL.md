@@ -270,7 +270,14 @@ provide.
     it only adopts a gossiped KeyPackage when the local queue for that
     identity is empty and never overrides a locally-published one, but a
     malicious relay peer in the gossip mesh can still seed a first
-    KeyPackage for an identity that has never published one itself.
+    KeyPackage for an identity that has never published one itself. The
+    credential-on-use check below narrows this from an identity-forgery risk
+    to a narrower join-denial one: a forged gossip-seeded KeyPackage can
+    still occupy a victim's empty queue slot, but whoever tries to use it now
+    rejects it (credential mismatch) instead of adding the attacker under the
+    victim's name — so the residual harm is the victim's join attempt
+    failing, not impersonation. Signing gossip payloads (closing this
+    fully) is still a real follow-up, not attempted here.
   - **PostToChannel — still open.** The same unauthenticated-write pattern
     lets a removed channel member keep posting to (and, via oldest-first
     eviction past `MAX_CHANNEL_ENTRIES`, destroy the history of) a channel

@@ -267,9 +267,36 @@ pub fn save(path: &Path, identity: &Identity, state: &PersistedState) -> Result<
     file.extend_from_slice(&ciphertext);
 
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, &file)?;
+    write_private(&tmp, &file)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Write `bytes` to `path`, owner-only-readable on Unix (`0600`) instead of
+/// whatever the process umask leaves (typically `0644`, world-readable).
+/// This store is XChaCha20-Poly1305-sealed under a key derived from the
+/// identity's own secret material, so the file mode is defense in depth
+/// rather than the only thing standing between another local account and
+/// the ciphertext — but it costs nothing to close, and `save`'s
+/// write-tmp-then-rename means the mode set here on the tmp file is exactly
+/// the mode the renamed store ends up with.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes)
+    }
 }
 
 /// Load the store at `path` for `identity`. `Ok(None)` if the file is absent.
@@ -953,6 +980,50 @@ mod tests {
         assert_eq!(back.seen_envelopes, state.seen_envelopes);
         assert_eq!(back.last_announce_ms, 100);
         assert_eq!(back.last_fetch_since_ms, 200);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_store_file_is_owner_only_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("dante-store-perm-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.bin");
+        let id = Identity::generate(1);
+        let state = PersistedState {
+            prekeys: PreKeySecrets::generate(0).export(),
+            sessions: vec![],
+            channels: vec![],
+            hosted: vec![],
+            history: vec![],
+            channel_history: vec![],
+            invite_uses: vec![],
+            channel_removed: vec![],
+            server_autokick: vec![],
+            server_join_pw: vec![],
+            server_policies: vec![],
+            channel_reactions: vec![],
+            verified_peers: vec![],
+            contacts: vec![],
+            blocked: vec![],
+            channel_edits: vec![],
+            channel_pins: vec![],
+            dm_msg_ids: vec![],
+            dm_edits: vec![],
+            seen_envelopes: vec![],
+            last_announce_ms: 0,
+            last_fetch_since_ms: 0,
+            server_bans: vec![],
+            server_register_pow: vec![],
+            group_calls: vec![],
+        };
+
+        save(&path, &id, &state).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "store file must be 0600, got {mode:o}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -58,7 +58,7 @@ use tokio::{
     sync::{mpsc, oneshot, Mutex},
 };
 
-use crate::{now_ms, parse_fingerprint};
+use crate::{now_ms, parse_fingerprint, write_keystore_file};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const INBOX_CAP: usize = 500;
@@ -3055,7 +3055,10 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             // Persist the keystore so the next run loads it directly.
             match keystore::seal(&identity, r.passphrase.as_bytes()) {
                 Ok(sealed) => {
-                    if let Err(e) = std::fs::write(&shared.boot.keystore_path, sealed) {
+                    if let Err(e) = write_keystore_file(
+                        std::path::Path::new(&shared.boot.keystore_path),
+                        &sealed,
+                    ) {
                         return respond(&mut stream, 500, "text/plain", e.to_string().as_bytes())
                             .await;
                     }

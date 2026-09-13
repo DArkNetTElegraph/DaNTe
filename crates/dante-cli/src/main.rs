@@ -458,7 +458,8 @@ fn cmd_gen(flags: &HashMap<String, String>) -> Result<()> {
     let pass = passphrase()?;
     let identity = Identity::generate(now_ms());
     let bytes = keystore::seal(&identity, pass.as_bytes())?;
-    std::fs::write(&out, bytes).with_context(|| format!("writing {out}"))?;
+    dante_cli::write_keystore_file(std::path::Path::new(&out), &bytes)
+        .with_context(|| format!("writing {out}"))?;
     println!("identity written to {out}");
     println!("fingerprint (base32): {}", identity.id().to_base32());
     println!("fingerprint (words):  {}", identity.id().to_words());

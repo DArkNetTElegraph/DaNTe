@@ -635,11 +635,14 @@ pub struct Bootstrap {
     pub store_path: Option<PathBuf>,
     pub params: LedgerParams,
     pub pow: Difficulty,
-    /// Set when this client was started with `--also-relay`: the address it
-    /// listens on for other people's clients. Read-only display in the SPA's
-    /// Network settings — flipping it means restarting with/without the flag,
-    /// same as this client's other boot-time `--p2p`-style switches.
-    pub also_relay_listen: Option<String>,
+    /// Set when this client was started with `--also-relay`: the config for
+    /// the relay it embeds. Whether the embedded relay is actually running
+    /// right now lives in `Shared.also_relay` — the SPA's Network settings
+    /// toggle can start/stop it at runtime (`/api/also-relay`) without a
+    /// restart; this field is only the boot-time default (also the config a
+    /// later "turn it on" toggle reuses if the SPA doesn't send its own
+    /// `listen`).
+    pub also_relay_cfg: Option<dante_relay::RunConfig>,
     /// Offer the browser SPA the relay-hosted SFU (`--sfu`). The relay must
     /// be built with its `sfu` feature; the SPA negotiates the relay wire
     /// through `/api/sfu/*` and only uses it when the browser can encrypt its
@@ -730,6 +733,14 @@ struct Shared {
     /// forged `Host` (DNS-rebinding) or a cross-site `Origin` (CSRF). See
     /// [`request_is_local`].
     local_authorities: Vec<String>,
+    /// The embedded `--also-relay` relay's live listen address and task
+    /// handle, if it's running right now. `None` when off (either never
+    /// started, or stopped via `POST /api/also-relay {"on":false}`).
+    /// `JoinHandle::abort()` is enough to fully stop it: `dante_relay::run`
+    /// keeps no detached background tasks of its own, so aborting the task
+    /// this handle names drops its listener (freeing the port) and its
+    /// maintenance loop together.
+    also_relay: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
 }
 
 impl Shared {
@@ -925,7 +936,12 @@ pub async fn run_on(
         boot,
         pending_rx: Mutex::new(Some(cmd_rx)),
         local_authorities,
+        also_relay: Mutex::new(None),
     });
+
+    if let Some(cfg) = shared.boot.also_relay_cfg.clone() {
+        start_also_relay(&shared, cfg).await;
+    }
 
     let http_addr = listener
         .local_addr()
@@ -2994,12 +3010,27 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 .split([',', ' ', '\t'])
                 .filter(|s| !s.is_empty())
                 .collect();
+            let (also_relay_on, also_relay_listen) = {
+                let g = shared.also_relay.lock().await;
+                match &*g {
+                    Some((listen, _)) => (true, Some(listen.clone())),
+                    None => (
+                        false,
+                        shared
+                            .boot
+                            .also_relay_cfg
+                            .as_ref()
+                            .map(|c| c.listen.clone()),
+                    ),
+                }
+            };
             let body = serde_json::json!({
                 "ready": ready,
                 "fingerprint": fp,
                 "has_keystore": shared.boot.keystore_path.exists(),
                 "relays": relays,
-                "also_relay_listen": shared.boot.also_relay_listen,
+                "also_relay_on": also_relay_on,
+                "also_relay_listen": also_relay_listen,
                 "sfu": shared.boot.sfu,
                 "sfu_mesh_limit": shared.boot.sfu_mesh_limit,
                 "gifsearch_available": shared.gif_provider.is_some(),
@@ -4432,6 +4463,57 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             respond(&mut stream, 200, "application/json", b"{\"ok\":\"ok\"}").await
         }
 
+        ("GET", "/api/also-relay") => {
+            let g = shared.also_relay.lock().await;
+            let (on, listen) = match &*g {
+                Some((listen, _)) => (true, Some(listen.clone())),
+                None => (
+                    false,
+                    shared
+                        .boot
+                        .also_relay_cfg
+                        .as_ref()
+                        .map(|c| c.listen.clone()),
+                ),
+            };
+            drop(g);
+            let body = serde_json::json!({ "on": on, "listen": listen }).to_string();
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/also-relay") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                on: bool,
+                /// Only consulted when turning it on from off; ignored to
+                /// stop. Defaults to the boot-time `--also-relay` config (or
+                /// `dante-relay`'s default listen address if this client was
+                /// never started with `--also-relay` at all).
+                listen: Option<String>,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            if r.on {
+                let mut cfg = shared.boot.also_relay_cfg.clone().unwrap_or_default();
+                if let Some(listen) = r.listen {
+                    cfg.listen = listen;
+                }
+                start_also_relay(&shared, cfg).await;
+            } else {
+                stop_also_relay(&shared).await;
+            }
+            let listen = shared
+                .also_relay
+                .lock()
+                .await
+                .as_ref()
+                .map(|(listen, _)| listen.clone());
+            let body = serde_json::json!({ "ok": "ok", "on": listen.is_some(), "listen": listen })
+                .to_string();
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
         ("POST", "/api/unfurl") => {
             #[derive(serde::Deserialize)]
             struct Req {
@@ -4799,6 +4881,36 @@ fn authority_of(url: &str) -> Option<&str> {
         .unwrap_or(s);
     let s = s.split('/').next().unwrap_or(s);
     (!s.is_empty()).then_some(s)
+}
+
+/// Start the embedded `--also-relay` relay if it isn't already running, and
+/// record its handle so it can be stopped again later. Best-effort, matching
+/// the original boot-time behaviour: a bind failure is logged and does not
+/// take down this client's own UI/connection.
+async fn start_also_relay(shared: &Arc<Shared>, cfg: dante_relay::RunConfig) {
+    let mut guard = shared.also_relay.lock().await;
+    if guard.is_some() {
+        return;
+    }
+    let listen = cfg.listen.clone();
+    eprintln!("also acting as a relay on {listen} (for others to connect to)");
+    let handle = tokio::spawn(async move {
+        if let Err(e) = dante_relay::run(cfg).await {
+            eprintln!("embedded relay stopped: {e}");
+        }
+    });
+    *guard = Some((listen, handle));
+}
+
+/// Stop the embedded relay if it's running. Returns whether it was.
+async fn stop_also_relay(shared: &Arc<Shared>) -> bool {
+    match shared.also_relay.lock().await.take() {
+        Some((_, handle)) => {
+            handle.abort();
+            true
+        }
+        None => false,
+    }
 }
 
 /// Guard against the browser being used as a confused deputy against this

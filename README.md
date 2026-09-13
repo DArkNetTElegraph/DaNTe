@@ -131,17 +131,24 @@ above — it states precisely what is and is not protected.
   action: two real `dante serve` browser sessions, host sets a nickname, both
   the host's and the member's own client render it in the channel message
   author label and the member list.
-- **`--also-relay` (2026-09-12): embedded, opt-in, not yet exposed as a live
-  toggle.** `dante-relay`'s run loop (listener, ledger replica, mailbox,
-  optional TURN, optional libp2p federation) was factored out into a plain
-  `dante_relay::run()` library function so `dante serve --also-relay` can
-  spawn the identical relay in-process — no second binary, no separate
-  operator. Verified with an integration test that spawns `dante_relay::run`
-  and drives a real announce + DM round trip through it, exactly the
-  embedding path the flag uses (not the hand-built `RelayHandler` every other
-  test in the suite uses). The SPA's Network settings show whether it's on
-  and its listen address, but flipping it still means restarting with the
-  flag — there is no live start/stop switch yet.
+- **`--also-relay`: embedded, opt-in, live toggle (2026-09-13).**
+  `dante-relay`'s run loop (listener, ledger replica, mailbox, optional TURN,
+  optional libp2p federation) is a plain `dante_relay::run()` library function
+  so `dante serve --also-relay` can spawn the identical relay in-process — no
+  second binary, no separate operator. It can now be started and stopped at
+  runtime without restarting the client: `GET`/`POST /api/also-relay` in
+  `serve.rs`, backed by a `JoinHandle` kept in `Shared.also_relay`. Turning it
+  off just aborts that task — this only works because `dante_relay::run()`'s
+  one background job (periodic maintenance) was moved off a detached
+  `tokio::spawn` into the same future the listener runs in, so nothing is left
+  holding the port after an abort. An integration test
+  (`crates/dante-relay/tests/toggle.rs`) proves exactly that: start, abort,
+  and rebind the same address immediately, which fails if anything leaked.
+  The SPA's Network settings has a real on/off switch now (mirrors the
+  existing `/api/embeds` toggle pattern) instead of a read-only line — backend
+  verified end-to-end with `cargo test --workspace` (379 tests, 0 failures);
+  the button's rendering itself is written but not eyeballed in a browser (no
+  browser in this dev env).
 - **Restart gaps**: *(closed)* channel history persists each message's
   relay-log `seq` (plus `reply_to` / `forwarded_from`), and the plaintext
   backlog a host hands a new member carries the `seq` too, so both restored and

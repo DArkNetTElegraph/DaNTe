@@ -136,7 +136,7 @@ async fn prepare(progress: dante_core::BootProgress) -> Result<Prepared> {
             params,
             pow,
             // Not offered from the desktop shell yet — no UI for it there.
-            also_relay_listen: None,
+            also_relay_cfg: None,
             // Deliberately off, and not read from the environment: the native
             // audio bridge (`dante-audio` -> engine media) has no SFrame
             // equivalent, so an SFU would receive plaintext Opus from this

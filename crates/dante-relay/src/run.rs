@@ -27,6 +27,7 @@ const MAX_CHAN_SUBS: usize = 16_384;
 /// Everything needed to run a relay node — standalone (the `dante-relay`
 /// binary) or embedded (a `dante serve --also-relay` client). Mirrors the
 /// binary's CLI flags one-to-one.
+#[derive(Clone)]
 pub struct RunConfig {
     pub listen: String,
     pub min_pow_bits: Option<u8>,
@@ -176,10 +177,14 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
     }
     let handler = Arc::new(RelayHandler::new(relay_state));
 
-    // Background housekeeping.
-    {
+    // Background housekeeping. Kept as a branch of the `select!` below rather
+    // than a detached `tokio::spawn`: a caller that embeds `run()` (see
+    // `dante serve --also-relay`) and needs to stop it again can just abort
+    // the `JoinHandle` this whole function's task runs as. A detached spawn
+    // would survive that abort and leak.
+    let maintenance = {
         let handler = Arc::clone(&handler);
-        tokio::spawn(async move {
+        async move {
             let mut tick = tokio::time::interval(MAINTENANCE_INTERVAL);
             loop {
                 tick.tick().await;
@@ -189,8 +194,8 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
                     tracing::info!(dropped, evaporated, "maintenance");
                 }
             }
-        });
-    }
+        }
+    };
 
     let listener = TcpListener::bind(&cfg.listen)
         .await
@@ -218,6 +223,7 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
     tokio::select! {
         r = serve(listener, handler) => { r?; }
         r = p2p_task => { r?; }
+        _ = maintenance => {}
     }
     Ok(())
 }

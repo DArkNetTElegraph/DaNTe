@@ -282,7 +282,7 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         _ => None,
     };
 
-    let also_relay_listen = maybe_also_relay(flags);
+    let also_relay_cfg = also_relay_config(flags);
 
     let boot = serve::Bootstrap {
         relay,
@@ -290,7 +290,7 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         store_path,
         params,
         pow,
-        also_relay_listen,
+        also_relay_cfg,
         sfu: flags.contains_key("sfu"),
         sfu_mesh_limit: parse_sfu_mesh_limit(flags),
         // `serve` narrates startup on stderr; the structured sink is for the
@@ -380,13 +380,13 @@ async fn maybe_enable_p2p(_engine: &mut Engine, flags: &HashMap<String, String>)
     }
 }
 
-/// `--also-relay`: spawn the same relay node the `dante-relay` binary runs,
-/// in-process, so this client is also a relay for others — no second
-/// program, no separate operator. Best-effort: a bind failure here is logged
-/// and does not take down the client's own UI/connection.
-/// Returns the relay's listen address if `--also-relay` was given, for
-/// display in the SPA's Network settings.
-fn maybe_also_relay(flags: &HashMap<String, String>) -> Option<String> {
+/// `--also-relay`: build the config for the same relay node the `dante-relay`
+/// binary runs, so `dante serve` can embed it in-process — no second program,
+/// no separate operator. Building the config (rather than spawning here, as
+/// this used to) lets `serve::run_on` hold the resulting task's `JoinHandle`,
+/// which is what makes `POST /api/also-relay {"on":false}` able to stop it
+/// again later instead of only ever running until the process exits.
+fn also_relay_config(flags: &HashMap<String, String>) -> Option<dante_relay::RunConfig> {
     if !flags.contains_key("also-relay") {
         return None;
     }
@@ -396,7 +396,7 @@ fn maybe_also_relay(flags: &HashMap<String, String>) -> Option<String> {
         .unwrap_or_else(|| dante_relay::DEFAULT_LISTEN.to_string());
     #[cfg_attr(not(feature = "p2p"), allow(unused_mut))]
     let mut cfg = dante_relay::RunConfig {
-        listen: listen.clone(),
+        listen,
         ..Default::default()
     };
     #[cfg(feature = "p2p")]
@@ -416,13 +416,7 @@ fn maybe_also_relay(flags: &HashMap<String, String>) -> Option<String> {
              or be discoverable via --relay dht (rebuild with --features p2p for that)"
         );
     }
-    eprintln!("also acting as a relay on {listen} (for others to connect to)");
-    tokio::spawn(async move {
-        if let Err(e) = dante_relay::run(cfg).await {
-            eprintln!("embedded relay stopped: {e}");
-        }
-    });
-    Some(listen)
+    Some(cfg)
 }
 
 async fn cmd_revoke(flags: &HashMap<String, String>) -> Result<()> {

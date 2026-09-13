@@ -28,6 +28,11 @@ dante-core.workspace = true
 dante-crypto.workspace = true
 dante-identity.workspace = true
 dante-ledger.workspace = true
+# Just the token-bucket primitive, for a local rate limit on GIF search (see
+# serve.rs) so a runaway loop can't burn through the operator's metered
+# Tenor/Giphy API quota. dante-net is already in the build graph via
+# dante-core/dante-relay; this makes it a direct dependency too.
+dante-net.workspace = true
 # `--also-relay`: embeds the same relay node the `dante-relay` binary runs,
 # so a desktop user can opt in to being a relay for others without a second
 # process. See dante_relay::run.

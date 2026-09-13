@@ -62,7 +62,7 @@ with no operator who can be compelled to surveil users**. Concretely:
 | Group (channel/voice) content confidentiality | A1, A2, A3, A5, A6, A8 | **Not** against A4 — a member-host is inside the group and sees plaintext by design. |
 | Group forward secrecy | A1–A3, A5, A6, A8; **partial** vs A7 | Channels and group calls each run one MLS group (RFC 9420); the MLS secret tree gives per-message forward secrecy. |
 | Group **post-compromise security** | A7 (after access ends) | MLS rekeys the whole group on every add / remove, and any member can force a rekey by committing an update — a compromised member's key stops being useful once the group next changes. |
-| Removed member loses access | A (the removed member) | The host commits an MLS remove; the group rekeys in O(log n) and the removed member is evicted (cannot process further messages). Re-admission works with a fresh KeyPackage. The host also republishes the channel's relay-side roster (§6) with the member dropped, so they can no longer write to the log either — holding the (non-rotating) `channel_id` is no longer enough on its own. **Residual gap (§6):** the relay-to-relay gossip path for channel frames doesn't check this roster, so a malicious relay in the federation mesh (not an ordinary client) could still inject flooding/eviction frames that way. |
+| Removed member loses access | A (the removed member) | The host commits an MLS remove; the group rekeys in O(log n) and the removed member is evicted (cannot process further messages). Re-admission works with a fresh KeyPackage. The host also republishes the channel's relay-side roster (§6) with the member dropped, so they can no longer write to the log either — holding the (non-rotating) `channel_id` is no longer enough on its own — and that roster update is itself gossiped to every relay in a federated mesh, not just the one the host happened to reach, so the enforcement isn't limited to a single relay. |
 | Group message authorship (insider forgery) | A4 / any member | MLS binds every application message to its sender's leaf signature key; another member cannot forge a message as someone else. Channel membership **commits** are additionally accepted only from the recorded host identity (`process_from`). |
 | Password-protected channel log | A3, and a leak of the `channel_id` capability | A channel created with a password wraps every relay-log frame in an outer XChaCha20-Poly1305 layer keyed by `Argon2id(password; server_root ‖ channel_id)`. A relay, or anyone who obtains only the `channel_id`, sees opaque blobs and cannot strip the wrapper. The wrapper key is static per `(channel, password)` and does not rotate with MLS epochs; a removed member still holds it but is MLS-evicted underneath, so cannot read the inner content. Never against A4 (a member has the password). Weaving the PSK into the MLS key schedule instead would add epoch rotation — a possible future hardening. |
 | Recipient authenticity | A2, A3, A6 | Only after out-of-band fingerprint / safety-number verification. Trust-on-first-use (TOFU) before that is vulnerable to A2/A6. |
@@ -258,72 +258,77 @@ provide.
     even when it's re-signed-in-appearance by keeping the original bundle's
     other fields. `bundle.ik_pub` is also now checked against the ledger's own
     `agreement_key` for the peer before use in `send_content`.
-  - **KeyPackages — the relay-write half is fixed; a credential-binding gap
-    and a gossip-path gap remain.** `PublishKeyPackages` now requires a
-    signature from the claimed identity's ledger-attested key over the
+  - **KeyPackages — the relay-write half and the gossip-path half are both
+    fixed; a credential-binding gap remains.** `PublishKeyPackages` requires
+    a signature from the claimed identity's ledger-attested key over the
     published batch, so an attacker can no longer flood or overwrite a
     victim's KeyPackage queue through the ordinary client-facing wire.
-    Two things are **not** covered by this fix: `dante-mls`'s KeyPackage
-    credential itself still isn't bound to the publishing identity's `idk`
-    (see the next bullet — a separate, still-open issue), and
     `ingest_gossiped_keypackage` (the relay-to-relay federation path a
-    KeyPackage can also arrive over) still has no signature check at all —
-    it only adopts a gossiped KeyPackage when the local queue for that
-    identity is empty and never overrides a locally-published one, but a
-    malicious relay peer in the gossip mesh can still seed a first
-    KeyPackage for an identity that has never published one itself. The
-    credential-on-use check below narrows this from an identity-forgery risk
-    to a narrower join-denial one: a forged gossip-seeded KeyPackage can
-    still occupy a victim's empty queue slot, but whoever tries to use it now
-    rejects it (credential mismatch) instead of adding the attacker under the
-    victim's name — so the residual harm is the victim's join attempt
-    failing, not impersonation. Signing gossip payloads (closing this
-    fully) is still a real follow-up, not attempted here.
+    KeyPackage can also arrive over) used to have no signature check at all
+    — a malicious relay peer in the gossip mesh could seed a first
+    KeyPackage for an identity that had never published one itself. It's now
+    fixed the same way: the gossip payload is the *whole* originally-signed
+    `PublishKeyPackages` request (not just the one item a sibling ends up
+    keeping — the signature covers the batch as a unit and can't be checked
+    piecemeal), and a sibling independently re-verifies that same signature
+    against the ledger before adopting anything from it. What's still **not**
+    covered: `dante-mls`'s KeyPackage credential itself still isn't bound to
+    the publishing identity's `idk` (see the next bullet — a separate,
+    still-open issue). The credential-on-use check described there gives
+    even a hypothetical future signature-check bypass a backstop: a forged
+    KeyPackage would still be rejected at add-time on credential mismatch,
+    not just at publish/gossip-time on signature mismatch.
   - **PostToChannel — fixed via a relay-side channel roster, not just a
-    signature.** A signature alone (`identity` + a per-post signature over
-    `post_to_channel_challenge`, now required and checked against the
-    ledger the same way `PublishKeyPackages` is) proves *who* is posting but
-    not that they're *still a member* — the relay had no notion of channel
-    membership at all before this fix, so it couldn't tell a current member
-    from a removed one even once every poster was individually identifiable.
-    Closing it needed a second, new mechanism: `Request::SetChannelRoster`,
-    sent by the channel's host every time membership changes (an add or a
-    remove — a full replacement of the member set each time, not a delta),
-    signed by the channel's `server_root` key (the same key that already
-    signs `ServerPolicy`, self-verifying, no ledger lookup needed). A
-    channel's first `SetChannelRoster` permanently binds it to that
-    `server_root` — a different key can never overwrite it — and each
-    update's `version` must strictly increase, so an old roster (e.g. one
-    from before a kick) can't be replayed to reinstate a removed member.
-    `PostToChannel` now checks both: a valid signature from a real,
-    ledger-known identity, **and** that identity's presence in the channel's
-    current roster. Knowing `channel_id` — a bare 32-byte value, e.g. one
-    leaked outside the app — is no longer sufficient on its own to write to
-    it, closing the exact gap this section originally described. The engine
-    pushes a fresh roster from the single chokepoint every membership
-    mutation already goes through (`mls_add_member`, `remove_from_channel` —
-    the latter is what `kick_from_server`, `sweep_inactive_members`, and
-    voluntary `Leave` all call for every channel a member is removed from, so
-    a kick already means "removed from every channel roster on the server",
-    not just one), plus once at channel creation. The creation-time push is
-    the one case treated as non-best-effort (propagates its error) rather
-    than best-effort like the later ones — losing it would leave a brand-new
-    channel permanently unpostable by anyone, including its own host, since
-    no later mutation would ever be expected to re-send it.
-    **Residual gap, not closed by this fix:** `ingest_gossiped_channel_frame`
-    — the relay-to-relay federation path a channel frame can also arrive
-    over — still has no signature or roster check of its own; it trusts
-    whatever a sibling relay in the gossip mesh hands it for a `channel_id`.
-    A malicious relay operator in the mesh (a meaningfully higher bar than
-    "any client who knows channel_id", but not impossible) could still
-    inject frames that flood and evict real history via that path. Real
-    members' own MLS processing still rejects a forged frame as
-    unauthenticated ciphertext — it can't forge authorship of real content —
-    so the residual harm is limited to flooding/eviction, the same
-    denial-of-history shape this fix closes for ordinary clients, just via a
-    federation-trust vector instead. Signing gossip payloads (the same
-    follow-up already noted for the KeyPackages gossip path above) would
-    close this too; not attempted here.
+    signature, and the gossip path enforces it too.** A signature alone
+    (`identity` + a per-post signature over `post_to_channel_challenge`, now
+    required and checked against the ledger the same way `PublishKeyPackages`
+    is) proves *who* is posting but not that they're *still a member* — the
+    relay had no notion of channel membership at all before this fix, so it
+    couldn't tell a current member from a removed one even once every poster
+    was individually identifiable. Closing it needed a second, new
+    mechanism: `Request::SetChannelRoster`, sent by the channel's host every
+    time membership changes (an add or a remove — a full replacement of the
+    member set each time, not a delta), signed by the channel's
+    `server_root` key (the same key that already signs `ServerPolicy`,
+    self-verifying, no ledger lookup needed). A channel's first
+    `SetChannelRoster` permanently binds it to that `server_root` — a
+    different key can never overwrite it — and each update's `version` must
+    strictly increase, so an old roster (e.g. one from before a kick) can't
+    be replayed to reinstate a removed member. `PostToChannel` now checks
+    both: a valid signature from a real, ledger-known identity, **and** that
+    identity's presence in the channel's current roster. Knowing
+    `channel_id` — a bare 32-byte value, e.g. one leaked outside the app —
+    is no longer sufficient on its own to write to it, closing the exact gap
+    this section originally described. The engine pushes a fresh roster from
+    the single chokepoint every membership mutation already goes through
+    (`mls_add_member`, `remove_from_channel` — the latter is what
+    `kick_from_server`, `sweep_inactive_members`, and voluntary `Leave` all
+    call for every channel a member is removed from, so a kick already means
+    "removed from every channel roster on the server", not just one), plus
+    once at channel creation. The creation-time push is the one case treated
+    as non-best-effort (propagates its error) rather than best-effort like
+    the later ones — losing it would leave a brand-new channel permanently
+    unpostable by anyone, including its own host, since no later mutation
+    would ever be expected to re-send it.
+
+    `ingest_gossiped_channel_frame` (the relay-to-relay federation path a
+    channel frame can also arrive over) used to trust whatever a sibling
+    relay handed it for a `channel_id`, with no check at all. It's now fixed
+    two ways: (1) a gossiped frame carries the same `identity`/`sig` a direct
+    `PostToChannel` does, verified against the ledger identically before
+    it's accepted; (2) `Request::SetChannelRoster` updates are *also*
+    gossiped (`ingest_gossiped_channel_roster`, same per-channel topic, same
+    hijack/replay protection as the direct handler), so a relay that never
+    receives a roster directly from a client — every client request for a
+    given channel is pinned to one relay — still builds its own copy and can
+    enforce membership on gossiped frames, not just on direct ones. One
+    honest caveat on ordering: gossip delivery across topics isn't
+    guaranteed to arrive in any particular order, so a relay that has a
+    genuine signature for a frame but no roster registered *yet* for that
+    channel accepts it on authorship alone rather than rejecting outright —
+    it enforces membership as soon as it has a roster to enforce, not before.
+    A relay that already holds a roster enforces it on every gossiped frame,
+    same as the direct path.
 - **MLS `KeyPackage`s carry no binding to the DaNTe identity that published
   them (found in the same audit; the "check it on use" half is now fixed,
   the deeper cryptographic binding is not).** `dante-mls`'s
@@ -338,11 +343,11 @@ provide.
   `key_package_identity` and refuses the add if the embedded credential
   doesn't match the peer id it was fetched for — closing the exploit path
   the audit named ("the engine adds a fetched `KeyPackage` to a group with
-  no check that its credential equals the peer id it was fetched for") and
-  giving the still-open `ingest_gossiped_keypackage` gossip-bypass gap above
-  a real backstop: even a gossip-seeded KeyPackage with a forged credential
-  is now rejected at add-time rather than silently trusted. What's *not*
-  fixed: the credential still isn't cryptographically bound to `idk` at
+  no check that its credential equals the peer id it was fetched for"). This
+  is defense in depth alongside the now-also-fixed `ingest_gossiped_keypackage`
+  gossip-bypass gap above: even a hypothetical future signature-check bypass
+  there would still be rejected here, at add-time, on credential mismatch.
+  What's *not* fixed: the credential still isn't cryptographically bound to `idk` at
   publish time — a deeper, openmls-level protocol change (a custom
   extension carrying an `idk` signature over the leaf key, verified by every
   validator, not just DaNTe's own add path) that has not been attempted

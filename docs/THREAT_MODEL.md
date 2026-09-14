@@ -374,19 +374,38 @@ provide.
     on the founder/host side) — this is a wire-incompatible change to
     every previously-minted credential (including persisted, exported
     channel/group-call state, whose already-baked-in `BasicCredential`
-    leaves `credential_identity` can never decode as a `DanteCredential`),
-    acceptable pre-1.0 per this project's stated policy that wire formats
-    change without notice until 1.0. **This verification is adder-side only.** Joining a group via a
-    Welcome (`Pending::join`) does not verify any leaf's credential in the
-    ratchet tree it receives, and processing a group's messages
+    leaves `credential_identity` can never decode as a `DanteCredential`;
+    `Member::import` now refuses to load such a group at all rather than
+    silently restoring one with a dead roster), acceptable pre-1.0 per this
+    project's stated policy that wire formats change without notice until
+    1.0. **Joining is verified the same way, not left as an adder-side-only
+    check.** `Pending::join` inspects every leaf in a Welcome's ratchet tree
+    before ever building a live group from it, refusing the whole Welcome
+    if any leaf's binding doesn't verify; `dante-core` then does the
+    matching ledger cross-check (`Engine::member_bindings_match_ledger`,
+    via `Member::member_bindings`) right after a successful join, refusing
+    the join outright — same as if no KeyPackage had matched — if any
+    member the ledger has ever had a chain for (`Ledger::has_any_entry_for_id`)
+    resolves (`Ledger::idk_for_id`) to a key other than the one their
+    credential claims, or resolves to no key at all (an evaporated or
+    revoked identity does not get the benefit of the doubt below). A member
+    the ledger has genuinely never seen — no chain at all, not merely an
+    unresolvable one — is accepted on self-consistency alone rather than
+    refusing the join outright: strict matching would also refuse any join
+    pulling in an identity whose ledger record simply hasn't propagated to
+    this client yet, which is plausible for someone this client has never
+    interacted with. This is the same posture `dante-mls` itself takes
+    without ledger access.
+    **What's still open**: once joined, a commit that adds someone new
+    isn't re-checked the same way. Processing a group's messages
     (`members()`, `Member::process`) only decodes each sender's identity
     from its credential, it does not re-verify the binding signature. So a
-    host who controls their own group can still add a self-consistent but
-    ledger-invalid leaf, and every joiner of that group currently trusts
-    the identity it's attributed without independently checking it. Closing
-    that gap needs joiner-side verification of every leaf at join time and
-    of newly-added leaves on every subsequent commit, which has not been
-    built yet.
+    host who controls their own already-established group can still add a
+    self-consistent but ledger-invalid leaf via an ordinary commit, and
+    every existing member processing that commit currently trusts the
+    identity it's attributed without independently checking it. Closing
+    that gap needs verifying newly-added leaves on every processed commit,
+    which has not been built yet.
 
 ## 7. Cryptographic posture
 

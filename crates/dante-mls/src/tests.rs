@@ -143,6 +143,52 @@ fn import_refuses_a_group_persisted_before_the_credential_binding_existed() {
     assert!(Member::import(&blob).is_err());
 }
 
+/// A malicious host can still add a leaf whose credential is well-formed
+/// enough to pass `add()` (nothing in `add()` itself checks it) but whose
+/// signature doesn't verify against that leaf's own key — spliced from a
+/// different one, exactly the anti-splice property the credential binding
+/// exists to prevent. Once such a leaf is anywhere in a group's ratchet
+/// tree, a joiner's `Pending::join` must refuse the whole Welcome, not just
+/// silently accept a tree it never inspected.
+#[test]
+fn join_refuses_a_welcome_whose_ratchet_tree_has_any_invalid_leaf() {
+    let (alice_idk, carol_idk) = (idk(1), idk(2));
+    let mut alice = create_member(b"alice", &alice_idk, b"channel-1");
+
+    let provider = OpenMlsRustCrypto::default();
+    let bob_signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
+    bob_signer.store(provider.storage()).unwrap();
+    let other_signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
+    let forger_idk = idk(9);
+    // Signed for `other_signer`'s public key, not `bob_signer`'s -- a
+    // credential spliced onto the wrong leaf.
+    let bad_cred = DanteCredential::new(
+        b"bob",
+        forger_idk.public().to_bytes(),
+        |m| forger_idk.sign(m),
+        &other_signer.to_public_vec(),
+    );
+    let bob_credential = CredentialWithKey {
+        credential: Credential::new(
+            CredentialType::Other(DANTE_CREDENTIAL_TYPE),
+            bad_cred.encode(),
+        ),
+        signature_key: bob_signer.to_public_vec().into(),
+    };
+    let bob_kp = KeyPackage::builder()
+        .leaf_node_capabilities(dante_capabilities())
+        .build(CIPHERSUITE, &provider, &bob_signer, bob_credential)
+        .unwrap();
+    let bob_kp_bytes = bob_kp.key_package().tls_serialize_detached().unwrap();
+
+    let (carol_pending, carol_kp) = publish_kp(b"carol", &carol_idk);
+
+    let hs = alice.add(&[KeyPkg(bob_kp_bytes), carol_kp]).unwrap();
+    let welcome = hs.welcome.unwrap();
+
+    assert!(carol_pending.join(&welcome).is_err());
+}
+
 /// Add two members to a founder's group; everyone lands in the same epoch with
 /// the same group-call key, and it rotates when a member leaves.
 #[test]

@@ -396,16 +396,44 @@ provide.
     this client yet, which is plausible for someone this client has never
     interacted with. This is the same posture `dante-mls` itself takes
     without ledger access.
-    **What's still open**: once joined, a commit that adds someone new
-    isn't re-checked the same way. Processing a group's messages
-    (`members()`, `Member::process`) only decodes each sender's identity
-    from its credential, it does not re-verify the binding signature. So a
-    host who controls their own already-established group can still add a
-    self-consistent but ledger-invalid leaf via an ordinary commit, and
-    every existing member processing that commit currently trusts the
-    identity it's attributed without independently checking it. Closing
-    that gap needs verifying newly-added leaves on every processed commit,
-    which has not been built yet.
+    **A later Commit that adds or updates a member is checked the same way,
+    not left as a residual gap.** `Member::process_from` inspects every Add
+    proposal in a Commit before ever merging it — self-consistency, plus the
+    same `accept_new_member` ledger callback `dante-core` wires in
+    (mirroring `member_bindings`'s split for the join case) — refusing the
+    whole Commit if any proposed new member fails either check. Update
+    proposals and a Commit's own "update path" (ordinary post-compromise-
+    security key rotation) get a different, narrower check: self-consistency,
+    plus that the new credential still names the *same* identity the leaf
+    held before — no ledger involved, since the comparison is against the
+    leaf's own prior state, not the ledger's copy of the identity. That
+    closes the identity-hijack variant of this gap either way: a self-
+    consistent credential swap that changes *who* a leaf claims to be, not
+    just its key, is refused — a host, or any member, disguising an identity
+    takeover as a routine key rotation.
+
+    One more subtlety: the ledger check here (both this Add-proposal case
+    and at join) matches by chain *membership*, not by the ledger's current
+    tip key. A `DanteCredential` embeds whichever `idk_pub` was current when
+    its leaf was minted, and that leaf's binding is immutable for its whole
+    life — but the identity may rotate its `idk` afterward. Requiring tip
+    equality would refuse a perfectly legitimate, long-standing member the
+    moment they ever rotate; checking that the embedded `idk_pub` is *some*
+    key that has ever belonged to that identity's chain preserves the actual
+    property that matters — this is a real `idk`, linked to this identity,
+    not a forgery — without that brittleness. A revoked or evaporated
+    identity is refused regardless of chain membership.
+
+    The host-initiated adds this doesn't cover (`mls_add_member`,
+    `start_group_call`, the `GroupCallJoinRequest` admit path — anywhere
+    `key_package_binds_to` runs, fetching one specific peer's KeyPackage to
+    add them right now) deliberately keep strict tip equality instead: a
+    KeyPackage can sit in `dante-core`'s own unused-publish pool for a while
+    before it's fetched, so this has the same staleness-after-rotation
+    brittleness the Add-proposal case above fixes — accepted knowingly here,
+    not fixed, since loosening a check on an action initiated *right now*
+    trades away more than the immutable-existing-leaf cases above do for the
+    same benefit.
 
 ## 7. Cryptographic posture
 

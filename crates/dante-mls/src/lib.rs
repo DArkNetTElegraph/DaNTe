@@ -40,28 +40,30 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 /// this specific KeyPackage's fresh, per-package MLS signature key, minted
 /// once at [`Member::create`] / [`Member::publish_key_package`] time.
 ///
-/// **This binding is verified when adding a member, and when joining via a
-/// Welcome — but not for a member added by a *later* commit.**
-/// [`Member::key_package_identity`] verifies it (self-consistency; see
-/// below) before a KeyPackage is trusted enough to add its holder to a
-/// group — every `add()` call site in `dante-core` gates on this plus a
-/// ledger cross-check. [`Pending::join`] inspects every leaf in a Welcome's
-/// ratchet tree the same way *before* ever building a live group from it,
-/// refusing the whole Welcome if any leaf's binding doesn't verify;
-/// `dante-core` does the matching ledger cross-check via
-/// [`Member::member_bindings`] right after a successful join. What's still
-/// open: once a member has joined, a commit that adds someone new isn't
-/// re-checked the same way — `members()` / [`Member::process`]'s sender
-/// extraction (`credential_identity`) only decode the identity from
-/// whatever's already in the tree, they do not re-verify the signature. So
-/// a *host* who controls their own already-established group can still add
-/// a leaf whose credential is self-consistent but names a ledger-invalid
-/// identity via an ordinary commit, and every *existing* member processing
-/// that commit will trust `members()`/`process()`'s attribution of it —
-/// this is not a regression (pre-this-type, credentials were equally
-/// unverified), but it is a real, currently-open gap. Closing it needs
-/// verifying newly-added leaves on every processed commit, which has not
-/// been built yet.
+/// **This binding is verified everywhere DaNTe's own code puts a leaf into
+/// a group or lets its credential change**, covering every path this
+/// codebase actually uses (it does not use MLS's separate external-commit
+/// self-join mechanism at all, so that path is out of scope, not silently
+/// unchecked):
+/// - Adding a member: [`Member::key_package_identity`] verifies it
+///   (self-consistency; see below) before a KeyPackage is trusted enough to
+///   add its holder — every `add()` call site in `dante-core` gates on this
+///   plus a ledger cross-check.
+/// - Joining via a Welcome: [`Pending::join`] inspects every leaf in the
+///   ratchet tree the same way *before* ever building a live group from it,
+///   refusing the whole Welcome if any leaf's binding doesn't verify;
+///   `dante-core` does the matching ledger cross-check via
+///   [`Member::member_bindings`] right after a successful join.
+/// - Processing a later Commit: [`Member::process_from`] checks every Add
+///   proposal the same way (self-consistency plus the `accept_new_member`
+///   ledger callback `dante-core` wires in) before ever merging the Commit.
+///   Every Update proposal, and a Commit's own "update path" (ordinary
+///   post-compromise-security key rotation), get a narrower check with no
+///   ledger involved: self-consistency, plus that the new credential still
+///   names the *same* identity the leaf held immediately before this
+///   Commit — refusing a credential swap that's individually self-
+///   consistent but names someone else, an identity hijack disguised as a
+///   routine key rotation.
 ///
 /// The self-consistency property this type DOES give the adding side: proof
 /// that *some* real `idk` vouches for `(identity, this leaf's signature
@@ -160,18 +162,17 @@ impl DanteCredential {
 /// without re-verifying the binding signature.
 ///
 /// This trusts that whoever put this leaf in the tree already had its
-/// binding verified — true for a leaf this client itself added (every
-/// `add()` call site in `dante-core` gates on it) and for every leaf
-/// present when the group was joined (`Pending::join` refuses the whole
-/// Welcome otherwise), but **not** for a leaf added by a commit processed
-/// *after* joining (see [`DANTE_CREDENTIAL_TYPE`]'s doc comment for the
-/// open gap this leaves). The ratchet tree does keep a credential/leaf-key
-/// pairing immutable for the life of the leaf once *accepted*, so
-/// re-verifying the signature on every message would be redundant *if* it
-/// was checked at acceptance — today that's guaranteed for every leaf
-/// except one added by a later commit. Returns an empty `Vec` (matches
-/// nothing real) if the bytes aren't a decodable DanteCredential at all,
-/// rather than panicking.
+/// binding verified — true for every leaf that can currently get into a
+/// tree at all: added locally (every `add()` call site in `dante-core`
+/// gates on it), present at join (`Pending::join` refuses the whole
+/// Welcome otherwise), or added/updated by a later Commit
+/// ([`Member::process_from`] checks every Add and Update proposal, and the
+/// commit's own update path, before merging). The ratchet tree keeps a
+/// credential/leaf-key pairing immutable for the life of the leaf once
+/// *accepted*, which is what makes re-verifying the signature on every
+/// message redundant given it was already checked at acceptance. Returns an
+/// empty `Vec` (matches nothing real) if the bytes aren't a decodable
+/// DanteCredential at all, rather than panicking.
 fn credential_identity(serialized_content: &[u8]) -> Vec<u8> {
     DanteCredential::decode(serialized_content)
         .map(|c| c.identity)
@@ -470,9 +471,12 @@ impl Member {
     }
 
     /// Process an inbound protocol message: an application message, or a Commit
-    /// that advances the epoch. Any member's commit is accepted.
+    /// that advances the epoch. Any member's commit is accepted; any member it
+    /// tries to add is accepted as long as its credential is self-consistent
+    /// (see [`process_from`](Self::process_from) for the fuller ledger-aware
+    /// version `dante-core` actually uses).
     pub fn process(&mut self, wire: &[u8]) -> Result<Processed, MlsError> {
-        self.process_from(wire, None)
+        self.process_from(wire, None, |_, _| true)
     }
 
     /// Like [`process`](Self::process), but if `allowed_committer` is `Some(id)`
@@ -480,10 +484,23 @@ impl Member {
     /// otherwise it is dropped (`Processed::Ignored`) and the epoch does not
     /// advance. Application messages are unaffected. DaNTe uses this so a
     /// channel only honours membership commits from its host.
+    ///
+    /// Every member a Commit tries to add is checked the same way
+    /// [`Pending::join`] checks a Welcome's ratchet tree: the credential must
+    /// be a self-consistent DanteCredential binding (checked against that
+    /// exact new leaf's own MLS signature key), or the whole Commit is
+    /// refused — this is the "closing it needs verifying newly-added leaves
+    /// on every processed commit" gap [`DANTE_CREDENTIAL_TYPE`]'s doc comment
+    /// used to describe as unbuilt. `accept_new_member(identity, idk_pub)` is
+    /// the second layer on top, the ledger cross-check this crate can't do
+    /// itself (mirrors [`Pending::join`]'s split with `dante-core`'s
+    /// `member_bindings`/ledger check) — return `false` to refuse the Commit
+    /// outright if a proposed new member's `idk_pub` isn't acceptable.
     pub fn process_from(
         &mut self,
         wire: &[u8],
         allowed_committer: Option<&[u8]>,
+        accept_new_member: impl Fn(&[u8], [u8; 32]) -> bool,
     ) -> Result<Processed, MlsError> {
         let msg = MlsMessageIn::tls_deserialize_exact(wire)
             .map_err(|e| MlsError::Codec(e.to_string()))?;
@@ -507,6 +524,84 @@ impl Member {
                 if let Some(allowed) = allowed_committer {
                     if sender != allowed {
                         return Ok(Processed::Ignored);
+                    }
+                }
+                // Inspect every member this Commit proposes to add *before*
+                // ever merging it — same sequencing as `Pending::join`
+                // inspecting `StagedWelcome::members()` before `into_group()`.
+                for add in staged.add_proposals() {
+                    let leaf = add.add_proposal().key_package().leaf_node();
+                    let Some(cred) = DanteCredential::decode_and_verify(
+                        leaf.credential().serialized_content(),
+                        leaf.signature_key().as_slice(),
+                    ) else {
+                        return Err(MlsError::Unexpected(
+                            "a commit tried to add a member with no valid DaNTe credential binding",
+                        ));
+                    };
+                    if !accept_new_member(&cred.identity, cred.idk_pub) {
+                        return Err(MlsError::Unexpected(
+                            "a commit tried to add a member this client doesn't accept",
+                        ));
+                    }
+                }
+                // An Update proposal is how a member rotates their own leaf
+                // key (e.g. for post-compromise security) — MLS requires its
+                // sender be the leaf it updates. Nothing about that requires
+                // the *identity* to stay the same, though: a credential swap
+                // that's individually self-consistent but names a different
+                // identity than the leaf held before would let a commit
+                // quietly hijack an existing member's identity mid-group,
+                // not just rotate their key. Refuse any Update that changes
+                // who a leaf claims to be, not just ones with no binding at
+                // all.
+                for update in staged.update_proposals() {
+                    let leaf = update.update_proposal().leaf_node();
+                    let Some(cred) = DanteCredential::decode_and_verify(
+                        leaf.credential().serialized_content(),
+                        leaf.signature_key().as_slice(),
+                    ) else {
+                        return Err(MlsError::Unexpected(
+                            "a commit tried to update a member to a credential with no valid DaNTe binding",
+                        ));
+                    };
+                    let Sender::Member(leaf_index) = update.sender() else {
+                        return Err(MlsError::Unexpected(
+                            "a commit's update proposal had an unexpected sender",
+                        ));
+                    };
+                    let prior_identity = self
+                        .group
+                        .members()
+                        .find(|m| m.index == *leaf_index)
+                        .map(|m| credential_identity(m.credential.serialized_content()));
+                    if prior_identity.as_deref() != Some(cred.identity.as_slice()) {
+                        return Err(MlsError::Unexpected(
+                            "a commit tried to change a member's identity via an update, \
+                             not just rotate their key",
+                        ));
+                    }
+                }
+                // The committer's own leaf can also be rekeyed directly via
+                // the commit's "update path" (ordinary post-compromise-
+                // security ratcheting; nothing to do with the explicit
+                // Update proposals above) — same identity-hijack risk, same
+                // fix: the new credential must still name `sender`, the
+                // identity that authenticated this very commit.
+                if let Some(leaf) = staged.update_path_leaf_node() {
+                    let Some(cred) = DanteCredential::decode_and_verify(
+                        leaf.credential().serialized_content(),
+                        leaf.signature_key().as_slice(),
+                    ) else {
+                        return Err(MlsError::Unexpected(
+                            "a commit's own update path has no valid DaNTe credential binding",
+                        ));
+                    };
+                    if cred.identity != sender {
+                        return Err(MlsError::Unexpected(
+                            "a commit tried to change the committer's own identity via its \
+                             update path, not just rotate their key",
+                        ));
                     }
                 }
                 self.group

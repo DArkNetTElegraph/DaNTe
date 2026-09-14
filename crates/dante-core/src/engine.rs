@@ -437,35 +437,43 @@ fn mls_err(e: mls::MlsError) -> CoreError {
 /// DaNTe credential binding must verify (`key_package_identity`, in
 /// `dante-mls` — self-consistency only, no ledger access there), the
 /// identity it names must equal `peer_id`, and — the check `dante-mls`
-/// can't do itself — the `idk_pub` that signed the binding must be
-/// `ledger_idk`, the ledger's own current signing key for `peer_id` (fetched
-/// by the caller, since some call sites already hold a conflicting `&mut`
-/// borrow by the time this runs). Without this last check, a self-consistent
-/// binding proves nothing: anyone can mint their own real `idk` and sign a
-/// credential claiming to be someone else's identity bytes; only the ledger
-/// says which `idk` is actually authoritative for a given identity.
+/// can't do itself — the `idk_pub` that signed the binding must belong to
+/// `peer_id`'s ledger chain. Without this ledger check at all, a
+/// self-consistent binding would prove nothing: anyone can mint their own
+/// real `idk` and sign a credential claiming to be someone else's identity
+/// bytes; only the ledger says which `idk`s are actually ever linked to a
+/// given identity.
 ///
-/// This is deliberately stricter than [`bindings_match_ledger`]'s chain-
-/// membership check: it requires the *current* tip, not just some key ever
-/// on `peer_id`'s chain. That's a real, known brittleness — a KeyPackage can
-/// sit in `dante-core`'s own unused-publish pool for a while before a host
-/// gets around to fetching and adding it, so a `peer_id` who rotated their
-/// `idk` in the meantime will have this add refused until they publish a
-/// fresh KeyPackage under their new key. Loosening it to chain membership
-/// (matching a join's more permissive posture) would trade that brittleness
-/// for accepting a *known-stale* key on an action initiated right now, where
-/// nothing forces staleness the way an existing leaf's immutability does at
-/// join time — kept strict here on purpose, not an oversight.
+/// This checks chain *membership* — is `idk_pub` some key that has ever
+/// belonged to `peer_id`'s chain, current tip or a historical one from
+/// before a rotation — rather than exact tip equality: a fetched KeyPackage
+/// can sit in `dante-core`'s own unused-publish pool for a while before a
+/// host gets around to adding it, so requiring the exact current tip would
+/// refuse a perfectly legitimate add the moment `peer_id` ever rotated
+/// their `idk` in the meantime. That much matches
+/// [`ledger_accepts_binding`]'s posture elsewhere in this file — but
+/// **unlike** it, `peer_id` having no ledger chain at all is refused here,
+/// not accepted on self-consistency alone: this call is reachable with a
+/// `peer_id` this client has never interacted with before at all (an
+/// invite-link redemption's `ChannelControl::Redeem` handler calls
+/// `mls_add_member` with the redeemer's identity straight from the DM that
+/// redeemed it, first contact by construction), and unlike a join pulling
+/// in an already-established group's existing roster, there is no
+/// pre-existing group membership to weigh against the risk of trusting an
+/// entirely unauthenticated-by-ledger identity outright.
 fn key_package_binds_to(
     mls: &mls::Member,
     kp: &mls::KeyPkg,
     peer_id: &[u8; 32],
-    ledger_idk: Option<[u8; 32]>,
+    ledger_chain_usable_for_id: impl Fn(&[u8; 32]) -> Option<bool>,
+    ledger_identity_id_for_idk: impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
 ) -> bool {
     let Ok((identity, idk_pub)) = mls.key_package_identity(kp) else {
         return false;
     };
-    identity == peer_id.as_slice() && ledger_idk == Some(idk_pub)
+    identity == peer_id.as_slice()
+        && ledger_chain_usable_for_id(peer_id) == Some(true)
+        && ledger_identity_id_for_idk(&idk_pub) == Some(*peer_id)
 }
 
 /// Whether `bindings` (a group's self-consistent `(leaf index, identity,
@@ -2440,8 +2448,13 @@ impl Engine {
                 // Nothing stops a client from publishing a KeyPackage whose
                 // credential names someone other than themselves; only add
                 // it under the roster slot it actually claims to be.
-                let ledger_idk = self.ledger.idk_for_id(m);
-                if !key_package_binds_to(&mls_member, &kp, m, ledger_idk) {
+                if !key_package_binds_to(
+                    &mls_member,
+                    &kp,
+                    m,
+                    |id| self.ledger.chain_usable_for_id(id),
+                    |idk| self.ledger.identity_id(idk).map(|iid| *iid.as_bytes()),
+                ) {
                     continue;
                 }
                 kps.push(kp);
@@ -3341,8 +3354,13 @@ impl Engine {
             // stops a client from publishing one crafted with someone else's
             // identity bytes. Check it here, at the one place this KeyPackage
             // is about to be trusted enough to add its holder to a group.
-            let ledger_idk = self.ledger.idk_for_id(peer_id);
-            if !key_package_binds_to(&ch.mls, &kp, peer_id, ledger_idk) {
+            if !key_package_binds_to(
+                &ch.mls,
+                &kp,
+                peer_id,
+                |id| self.ledger.chain_usable_for_id(id),
+                |idk| self.ledger.identity_id(idk).map(|iid| *iid.as_bytes()),
+            ) {
                 return Err(CoreError::Channel(
                     "fetched KeyPackage's credential doesn't carry a valid DaNTe binding for the identity it was fetched for",
                 ));
@@ -6390,9 +6408,14 @@ impl Engine {
                             sync::get_key_package(&mut self.client, &requester).await
                         {
                             let kp = mls::KeyPkg(kp);
-                            let ledger_idk = self.ledger.idk_for_id(&requester);
                             let hs = self.group_calls.get_mut(&channel_id).and_then(|gc| {
-                                if !key_package_binds_to(&gc.mls, &kp, &requester, ledger_idk) {
+                                if !key_package_binds_to(
+                                    &gc.mls,
+                                    &kp,
+                                    &requester,
+                                    |id| self.ledger.chain_usable_for_id(id),
+                                    |idk| self.ledger.identity_id(idk).map(|iid| *iid.as_bytes()),
+                                ) {
                                     return None;
                                 }
                                 gc.mls.add(&[kp]).ok()
@@ -6720,6 +6743,135 @@ mod bindings_match_ledger_tests {
         };
         let bindings = vec![(0, alice_id.to_vec(), alice_idk)];
         assert!(!check(&ledger, &bindings, 2)); // a second member's credential didn't verify at all
+    }
+}
+
+#[cfg(test)]
+mod key_package_binds_to_tests {
+    use super::{key_package_binds_to, mls};
+    use dante_crypto::sign::SignSecret;
+    use std::collections::HashMap;
+
+    fn idk(seed: u8) -> SignSecret {
+        SignSecret::from_bytes(&[seed; 32])
+    }
+
+    fn checker() -> mls::Member {
+        let a = idk(1);
+        mls::Member::create(b"alice", a.public().to_bytes(), |m| a.sign(m), b"channel").unwrap()
+    }
+
+    fn key_package(identity: &[u8], signer: &SignSecret) -> mls::KeyPkg {
+        mls::Member::publish_key_package(identity, signer.public().to_bytes(), |m| signer.sign(m))
+            .unwrap()
+            .1
+    }
+
+    struct FakeLedger {
+        chains: HashMap<[u8; 32], bool>,
+        idk_owner: HashMap<[u8; 32], [u8; 32]>,
+    }
+
+    fn check(ledger: &FakeLedger, kp: &mls::KeyPkg, peer_id: &[u8; 32]) -> bool {
+        key_package_binds_to(
+            &checker(),
+            kp,
+            peer_id,
+            |id| ledger.chains.get(id).copied(),
+            |idk| ledger.idk_owner.get(idk).copied(),
+        )
+    }
+
+    #[test]
+    fn accepts_a_key_package_the_ledger_agrees_with() {
+        let bob_id = [11u8; 32];
+        let bob_idk = idk(2);
+        let kp = key_package(&bob_id, &bob_idk);
+        let ledger = FakeLedger {
+            chains: HashMap::from([(bob_id, true)]),
+            idk_owner: HashMap::from([(bob_idk.public().to_bytes(), bob_id)]),
+        };
+        assert!(check(&ledger, &kp, &bob_id));
+    }
+
+    /// The whole point of this fix: a KeyPackage published before its
+    /// owner's most recent key rotation still embeds their *old* idk. It
+    /// can sit unused in `dante-core`'s own publish pool across a rotation
+    /// — that old idk is still on the identity's chain, so the add must
+    /// still succeed, not fail until they republish under the new key.
+    #[test]
+    fn accepts_a_key_package_signed_before_the_owners_key_rotation() {
+        let bob_id = [11u8; 32];
+        let bob_old_idk = idk(2);
+        let bob_new_idk_pub = idk(5).public().to_bytes();
+        let kp = key_package(&bob_id, &bob_old_idk);
+        let ledger = FakeLedger {
+            chains: HashMap::from([(bob_id, true)]),
+            idk_owner: HashMap::from([
+                (bob_old_idk.public().to_bytes(), bob_id),
+                (bob_new_idk_pub, bob_id),
+            ]),
+        };
+        assert!(check(&ledger, &kp, &bob_id));
+    }
+
+    #[test]
+    fn refuses_a_key_package_naming_a_different_peer_than_fetched_for() {
+        let bob_id = [11u8; 32];
+        let carol_id = [12u8; 32];
+        let bob_idk = idk(2);
+        let kp = key_package(&bob_id, &bob_idk);
+        let ledger = FakeLedger {
+            chains: HashMap::from([(bob_id, true)]),
+            idk_owner: HashMap::from([(bob_idk.public().to_bytes(), bob_id)]),
+        };
+        // Fetched for carol's roster slot, but the credential names bob.
+        assert!(!check(&ledger, &kp, &carol_id));
+    }
+
+    #[test]
+    fn refuses_a_key_package_signed_by_someone_elses_real_idk() {
+        let bob_id = [11u8; 32];
+        let mallory_id = [13u8; 32];
+        let mallorys_idk = idk(9); // a real idk, just not bob's
+        let kp = key_package(&bob_id, &mallorys_idk);
+        let ledger = FakeLedger {
+            chains: HashMap::from([(bob_id, true), (mallory_id, true)]),
+            idk_owner: HashMap::from([(mallorys_idk.public().to_bytes(), mallory_id)]),
+        };
+        assert!(!check(&ledger, &kp, &bob_id));
+    }
+
+    #[test]
+    fn refuses_a_key_package_for_an_identity_the_ledger_knows_is_revoked() {
+        let bob_id = [11u8; 32];
+        let bob_idk = idk(2);
+        let kp = key_package(&bob_id, &bob_idk);
+        let ledger = FakeLedger {
+            chains: HashMap::from([(bob_id, false)]), // known, but revoked/evaporated
+            idk_owner: HashMap::from([(bob_idk.public().to_bytes(), bob_id)]),
+        };
+        assert!(!check(&ledger, &kp, &bob_id));
+    }
+
+    /// Unlike a join (which can pull in an already-established group's
+    /// existing members this client may never have talked to) or a Commit's
+    /// Add proposal, this add is reachable with a `peer_id` this client has
+    /// never interacted with at all — an invite-link redemption calls
+    /// `mls_add_member` with the redeemer's identity straight from the DM
+    /// that redeemed it. An identity the ledger has never heard of must be
+    /// refused, not given the same "hasn't propagated yet" benefit of the
+    /// doubt a join extends to its own existing roster.
+    #[test]
+    fn refuses_a_key_package_for_an_identity_the_ledger_has_never_seen() {
+        let bob_id = [11u8; 32];
+        let bob_idk = idk(2);
+        let kp = key_package(&bob_id, &bob_idk);
+        let ledger = FakeLedger {
+            chains: HashMap::new(),
+            idk_owner: HashMap::new(),
+        };
+        assert!(!check(&ledger, &kp, &bob_id));
     }
 }
 

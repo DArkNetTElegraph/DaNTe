@@ -146,9 +146,13 @@ above — it states precisely what is and is not protected.
   and rebind the same address immediately, which fails if anything leaked.
   The SPA's Network settings has a real on/off switch now (mirrors the
   existing `/api/embeds` toggle pattern) instead of a read-only line — backend
-  verified end-to-end with `cargo test --workspace` (379 tests, 0 failures);
-  the button's rendering itself is written but not eyeballed in a browser (no
-  browser in this dev env).
+  verified end-to-end with `cargo test --workspace` (379 tests, 0 failures),
+  and the switch itself is now runtime-verified too (2026-09-15): headless
+  Chromium opened the real Settings modal against a live `dante serve`,
+  clicked the "Also relay for others" checkbox, and confirmed both the DOM
+  (the label picks up the live listen address) and a follow-up `GET
+  /api/state` agree the embedded relay actually started — then clicked it
+  again and confirmed both agree it stopped.
 - **Restart gaps**: *(closed)* channel history persists each message's
   relay-log `seq` (plus `reply_to` / `forwarded_from`), and the plaintext
   backlog a host hands a new member carries the `seq` too, so both restored and

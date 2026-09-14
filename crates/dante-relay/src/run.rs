@@ -378,18 +378,16 @@ async fn serve_p2p(
                         st.take_channel_backfill(),
                     )
                 };
-                for blob in records {
-                    let _ = node.publish(dante_p2p::LEDGER_TOPIC, blob).await;
-                }
-                for blob in prekeys {
-                    let _ = node.publish(dante_p2p::PREKEY_TOPIC, blob).await;
-                }
-                for blob in envelopes {
-                    let _ = node.publish(dante_p2p::MAILBOX_TOPIC, blob).await;
-                }
-                for blob in keypkgs {
-                    let _ = node.publish(dante_p2p::KEYPKG_TOPIC, blob).await;
-                }
+                // The items above are already gone from `RelayState` — this is
+                // the only copy left. Encoding channel payloads and deciding
+                // what to (re)subscribe to is synchronous, so do it inline;
+                // the actual `.publish()` awaits go through a detached task
+                // below so that cancelling this `select!` branch (e.g. the
+                // sibling `serve(...)` branch resolving first, or an embedding
+                // client's `--also-relay` toggle aborting this whole future)
+                // can't drop a batch mid-flush and silently lose it — see
+                // CANCELSAFETY-001.
+                let mut chan_payloads: Vec<(String, Vec<u8>)> = Vec::new();
                 for (cid, seq, blob, identity, sig) in frames {
                     if chan_subs.len() < MAX_CHAN_SUBS && chan_subs.insert(cid) {
                         let _ = node.subscribe(&chan_gossip_topic(&cid)).await;
@@ -401,7 +399,7 @@ async fn serve_p2p(
                         blob,
                     }
                     .encode();
-                    let _ = node.publish(&chan_gossip_topic(&cid), payload).await;
+                    chan_payloads.push((chan_gossip_topic(&cid), payload));
                 }
                 for (cid, server_root, version, members, sig) in rosters {
                     if chan_subs.len() < MAX_CHAN_SUBS && chan_subs.insert(cid) {
@@ -414,7 +412,27 @@ async fn serve_p2p(
                         sig,
                     }
                     .encode();
-                    let _ = node.publish(&chan_gossip_topic(&cid), payload).await;
+                    chan_payloads.push((chan_gossip_topic(&cid), payload));
+                }
+                {
+                    let node = node.clone();
+                    tokio::spawn(async move {
+                        for blob in records {
+                            let _ = node.publish(dante_p2p::LEDGER_TOPIC, blob).await;
+                        }
+                        for blob in prekeys {
+                            let _ = node.publish(dante_p2p::PREKEY_TOPIC, blob).await;
+                        }
+                        for blob in envelopes {
+                            let _ = node.publish(dante_p2p::MAILBOX_TOPIC, blob).await;
+                        }
+                        for blob in keypkgs {
+                            let _ = node.publish(dante_p2p::KEYPKG_TOPIC, blob).await;
+                        }
+                        for (topic, payload) in chan_payloads {
+                            let _ = node.publish(&topic, payload).await;
+                        }
+                    });
                 }
                 // Subscribe (cheap) here, but do the sibling fetches — which dial
                 // and round-trip, and stall on an unresponsive peer — off the
@@ -679,7 +697,12 @@ fn peer_pseudo_ip(peer: &dante_p2p::PeerId) -> std::net::IpAddr {
 #[cfg(feature = "p2p")]
 fn parse_seed(hex: &str) -> anyhow::Result<[u8; 32]> {
     let hex = hex.trim();
-    if hex.len() != 64 {
+    // `hex.len()` counts bytes, not chars — a 64-*byte* string containing
+    // multi-byte UTF-8 (fewer than 64 actual chars) would pass this check
+    // and then panic the fixed 2-byte-wide slices below on a non-char
+    // boundary. Requiring every char to be an ASCII hex digit guarantees
+    // 1 byte == 1 char, so byte indexing is safe from here on.
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         anyhow::bail!("expected 64 hex chars, got {}", hex.len());
     }
     let mut out = [0u8; 32];
@@ -691,7 +714,20 @@ fn parse_seed(hex: &str) -> anyhow::Result<[u8; 32]> {
 
 #[cfg(all(test, feature = "p2p"))]
 mod tests {
-    use super::ChanGossip;
+    use super::{parse_seed, ChanGossip};
+
+    /// `--p2p-seed` is operator-supplied but still untrusted-shaped input;
+    /// a 64-*byte* string containing multi-byte UTF-8 used to panic the
+    /// fixed 2-byte-wide hex slices instead of returning a clean error.
+    #[test]
+    fn parse_seed_rejects_non_ascii_without_panicking() {
+        // U+4E2D ('中') is 3 bytes in UTF-8, so a leading one followed by 61
+        // ASCII chars is 64 bytes total but the very first 2-byte-wide slice
+        // (offset 0..2) lands mid-character.
+        let s = format!("中{}", "a".repeat(61));
+        assert_eq!(s.len(), 64);
+        assert!(parse_seed(&s).is_err());
+    }
 
     #[test]
     fn chan_gossip_frame_roundtrips() {

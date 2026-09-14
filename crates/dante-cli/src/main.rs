@@ -147,7 +147,12 @@ fn hex16(id: &[u8; 16]) -> String {
 /// Parse 32 hex chars back to a 16-byte DM message id.
 fn parse_hex16(s: &str) -> Option<[u8; 16]> {
     let s = s.trim();
-    if s.len() != 32 {
+    // `s.len()` counts bytes, not chars — a 32-*byte* string containing
+    // multi-byte UTF-8 (fewer than 32 actual chars) would pass this check
+    // and then panic the fixed 2-byte-wide slices below on a non-char
+    // boundary. Requiring every char to be an ASCII hex digit guarantees
+    // 1 byte == 1 char, so byte indexing is safe from here on.
+    if s.len() != 32 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0u8; 16];
@@ -883,7 +888,9 @@ async fn cmd_bot(flags: &HashMap<String, String>) -> Result<()> {
         }
     }
 
-    let _ = engine.persist();
+    if let Err(e) = engine.persist() {
+        bot_err(&format!("final persist on shutdown failed: {e}"));
+    }
     Ok(())
 }
 
@@ -1918,7 +1925,21 @@ fn bail_soft(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_flags, parse_sfu_mesh_limit};
+    use super::{parse_flags, parse_hex16, parse_sfu_mesh_limit};
+
+    /// A message-id argument (`chat`/`bot` commands) is operator-supplied
+    /// but still untrusted-shaped input; a 32-*byte* string containing
+    /// multi-byte UTF-8 used to panic the fixed 2-byte-wide hex slices
+    /// instead of returning `None`.
+    #[test]
+    fn parse_hex16_rejects_non_ascii_without_panicking() {
+        // U+4E2D ('中') is 3 bytes in UTF-8, so a leading one followed by 29
+        // ASCII chars is 32 bytes total but the very first 2-byte-wide slice
+        // (offset 0..2) lands mid-character.
+        let s = format!("中{}", "a".repeat(29));
+        assert_eq!(s.len(), 32);
+        assert_eq!(parse_hex16(&s), None);
+    }
 
     #[test]
     fn boolean_flags_do_not_swallow_the_next_flag() {

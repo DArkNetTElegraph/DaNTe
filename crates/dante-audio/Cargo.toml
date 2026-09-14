@@ -14,6 +14,9 @@ license = "AGPL-3.0-or-later"
 description = "Opus codec + mic/speaker glue that bridges the OS to dante_core call audio."
 publish = false
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 opus = "0.3"
 cpal = "0.15"

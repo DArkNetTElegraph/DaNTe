@@ -139,6 +139,19 @@ impl FileManifest {
         if ciphertext_chunks.len() != self.chunk_hashes.len() {
             return Err(DmError::FileIntegrity);
         }
+        // `total_size` is signed by the sender but otherwise unchecked on the
+        // wire (unlike `chunk_hashes`, whose length is bounded against the
+        // decoder's remaining bytes) — a malicious sender can claim any u64
+        // here. `ciphertext_chunks` is real data the caller already fetched,
+        // so its actual byte length is a trustworthy upper bound on the
+        // plaintext: AEAD decryption never grows a chunk. Reject a
+        // `total_size` claim that exceeds it before trusting the claim as an
+        // allocation size, so a bogus manifest can't force a
+        // multi-exabyte `Vec::with_capacity` abort.
+        let ciphertext_len: u64 = ciphertext_chunks.iter().map(|c| c.len() as u64).sum();
+        if self.total_size > ciphertext_len {
+            return Err(DmError::FileIntegrity);
+        }
         let mut out = Vec::with_capacity(self.total_size as usize);
         for (i, ct) in ciphertext_chunks.iter().enumerate() {
             if sha256(ct) != self.chunk_hashes[i] {
@@ -259,5 +272,35 @@ mod tests {
         let (m, mut c) = FileManifest::build(&s, "f", &[1u8; CHUNK_SIZE * 2]);
         c.pop();
         assert!(matches!(m.reassemble(&c), Err(DmError::FileIntegrity)));
+    }
+
+    /// A malicious sender signs their own manifest, so `verify()` alone can't
+    /// catch a `total_size` that lies about the real chunk data — this used
+    /// to reach `Vec::with_capacity(self.total_size as usize)` unchecked,
+    /// letting a self-signed manifest with `total_size = u64::MAX` force a
+    /// multi-exabyte allocation (an abort) from a handful of tiny real
+    /// chunks. `reassemble` must reject it before allocating.
+    #[test]
+    fn a_total_size_exceeding_the_real_ciphertext_is_rejected() {
+        let s = Identity::generate(0);
+        let (honest, chunks) = FileManifest::build(&s, "f", &[1u8; 10]);
+        let lying_total_size = u64::MAX;
+        let sig = s.sign(&FileManifest::sig_challenge(
+            &honest.file_key,
+            &honest.filename,
+            lying_total_size,
+            honest.chunk_size,
+            &honest.chunk_hashes,
+        ));
+        let lying = FileManifest {
+            total_size: lying_total_size,
+            sig,
+            ..honest
+        };
+        lying.verify().unwrap(); // self-signed, so the signature alone is valid
+        assert!(matches!(
+            lying.reassemble(&chunks),
+            Err(DmError::FileIntegrity)
+        ));
     }
 }

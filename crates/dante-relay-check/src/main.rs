@@ -369,13 +369,34 @@ fn display_name_for(multiaddr: &str) -> String {
     if multiaddr.len() <= 40 {
         multiaddr.to_string()
     } else {
-        format!("{}…", &multiaddr[..40])
+        // `multiaddr` is remote-supplied (a peer's reported discovery
+        // address) — byte offset 40 is not guaranteed to land on a UTF-8
+        // char boundary (e.g. a non-ASCII `/dns/<hostname>` component), so a
+        // plain range-slice can panic. Walk back to the nearest boundary.
+        let mut end = 40;
+        while !multiaddr.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &multiaddr[..end])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A remote peer's reported multiaddr is untrusted input; byte offset 40
+    /// landing inside a multi-byte char (e.g. non-ASCII `/dns/<hostname>`
+    /// content) used to panic the fixed-offset `&multiaddr[..40]` slice.
+    #[test]
+    fn display_name_for_does_not_panic_on_a_non_char_boundary() {
+        // U+4E2D is 3 bytes in UTF-8, so byte offset 40 (not a multiple of 3)
+        // lands mid-character.
+        let s = "中".repeat(20); // 60 bytes, exceeds the 40-byte threshold
+        let out = display_name_for(&s);
+        assert!(out.ends_with('…'));
+        assert!(out.len() <= 40 + '中'.len_utf8() + '…'.len_utf8());
+    }
 
     #[test]
     fn kind_defaults_to_dedicated_when_absent_or_unrecognised() {

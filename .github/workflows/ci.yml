@@ -33,6 +33,26 @@ jobs:
       - name: test
         run: cargo test --workspace --all-features
 
+  msrv:
+    name: MSRV (rust-version = 1.91)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # Keep in sync with `rust-version` in the root Cargo.toml — the
+          # declared MSRV was previously never actually checked by CI (only
+          # the newer pinned 1.98.1 toolchain above), so a change that only
+          # compiles on a newer compiler could land silently.
+          toolchain: "1.91"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: check
+        run: cargo check --workspace --all-features
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

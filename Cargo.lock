@@ -1014,6 +1014,7 @@ dependencies = [
 name = "dante-mls"
 version = "0.0.1"
 dependencies = [
+ "dante-crypto",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",

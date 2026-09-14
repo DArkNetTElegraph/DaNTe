@@ -1,24 +1,60 @@
 use super::*;
 
-/// `key_package_identity` reads back exactly the identity a KeyPackage was
-/// published with — the check callers use to catch one published for a
-/// different identity than the peer it was fetched for.
+fn idk(seed: u8) -> SignSecret {
+    SignSecret::from_bytes(&[seed; 32])
+}
+
+/// `key_package_identity` reads back the identity a KeyPackage was published
+/// with — the check callers use to catch one published for a different
+/// identity than the peer it was fetched for — the fetched credential's
+/// binding really does verify (a made-up credential is rejected outright).
 #[test]
 fn key_package_identity_reads_back_the_publisher() {
-    let alice = Member::create(b"alice", b"channel-1").unwrap();
-    let (_bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
-    assert_eq!(alice.key_package_identity(&bob_kp).unwrap(), b"bob");
-    assert_ne!(alice.key_package_identity(&bob_kp).unwrap(), b"alice");
+    let (alice_idk, bob_idk) = (idk(1), idk(2));
+    let alice = Member::create(b"alice", &alice_idk, b"channel-1").unwrap();
+    let (_bob_pending, bob_kp) = Member::publish_key_package(b"bob", &bob_idk).unwrap();
+    let (identity, idk_pub) = alice.key_package_identity(&bob_kp).unwrap();
+    assert_eq!(identity, b"bob");
+    assert_eq!(idk_pub, bob_idk.public().to_bytes());
+    assert_ne!(identity, b"alice");
+}
+
+/// `key_package_identity` only proves self-consistency (this `idk_pub` really
+/// did sign for this identity + this exact leaf key) — it can't by itself
+/// catch an attacker's own real `idk` claiming someone else's identity bytes,
+/// since this crate has no ledger to check `idk_pub` against. That cross-check
+/// is `dante-core`'s job. Confirm the self-consistency proof at least reads
+/// back faithfully so that outer check has something correct to check.
+#[test]
+fn key_package_identity_returns_exactly_who_idk_pub_signed_for() {
+    let (alice_idk, attacker_idk) = (idk(1), idk(3));
+    let alice = Member::create(b"alice", &alice_idk, b"channel-1").unwrap();
+    let (_pending, kp) = Member::publish_key_package(b"victim", &attacker_idk).unwrap();
+    let (identity, idk_pub) = alice.key_package_identity(&kp).unwrap();
+    assert_eq!(identity, b"victim");
+    assert_eq!(idk_pub, attacker_idk.public().to_bytes());
+    assert_ne!(idk_pub, alice_idk.public().to_bytes());
+}
+
+/// A key package with a structurally-present but non-decodable /
+/// non-verifying credential (not one of ours) is refused outright rather
+/// than silently trusted.
+#[test]
+fn key_package_identity_rejects_garbage_credentials() {
+    let alice_idk = idk(1);
+    let alice = Member::create(b"alice", &alice_idk, b"channel-1").unwrap();
+    assert!(alice.key_package_identity(&KeyPkg(vec![])).is_err());
 }
 
 /// Add two members to a founder's group; everyone lands in the same epoch with
 /// the same group-call key, and it rotates when a member leaves.
 #[test]
 fn group_shares_a_call_key_that_rekeys_on_leave() {
-    let mut alice = Member::create(b"alice", b"channel-1").unwrap();
+    let (alice_idk, bob_idk, carol_idk) = (idk(1), idk(2), idk(3));
+    let mut alice = Member::create(b"alice", &alice_idk, b"channel-1").unwrap();
 
-    let (bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
-    let (carol_pending, carol_kp) = Member::publish_key_package(b"carol").unwrap();
+    let (bob_pending, bob_kp) = Member::publish_key_package(b"bob", &bob_idk).unwrap();
+    let (carol_pending, carol_kp) = Member::publish_key_package(b"carol", &carol_idk).unwrap();
 
     let hs = alice.add(&[bob_kp, carol_kp]).unwrap();
     let welcome = hs.welcome.clone().unwrap();
@@ -62,8 +98,9 @@ fn group_shares_a_call_key_that_rekeys_on_leave() {
 /// still able to send, receive, and commit membership changes.
 #[test]
 fn member_survives_export_import() {
-    let mut alice = Member::create(b"alice", b"chan").unwrap();
-    let (bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
+    let (alice_idk, bob_idk, carol_idk) = (idk(1), idk(2), idk(3));
+    let mut alice = Member::create(b"alice", &alice_idk, b"chan").unwrap();
+    let (bob_pending, bob_kp) = Member::publish_key_package(b"bob", &bob_idk).unwrap();
     let hs = alice.add(&[bob_kp]).unwrap();
     let mut bob = bob_pending
         .join(&hs.welcome.unwrap())
@@ -83,7 +120,7 @@ fn member_survives_export_import() {
     }
 
     // ...and still drive the group with its signature key.
-    let (carol_pending, carol_kp) = Member::publish_key_package(b"carol").unwrap();
+    let (carol_pending, carol_kp) = Member::publish_key_package(b"carol", &carol_idk).unwrap();
     let hs = alice.add(&[carol_kp]).unwrap();
     assert!(matches!(
         bob.process(&hs.commit).unwrap(),
@@ -98,8 +135,9 @@ fn member_survives_export_import() {
 /// Application messages round-trip through the group.
 #[test]
 fn members_exchange_application_messages() {
-    let mut alice = Member::create(b"alice", b"chan").unwrap();
-    let (bob_pending, bob_kp) = Member::publish_key_package(b"bob").unwrap();
+    let (alice_idk, bob_idk) = (idk(1), idk(2));
+    let mut alice = Member::create(b"alice", &alice_idk, b"chan").unwrap();
+    let (bob_pending, bob_kp) = Member::publish_key_package(b"bob", &bob_idk).unwrap();
 
     let hs = alice.add(&[bob_kp]).unwrap();
     let mut bob = bob_pending

@@ -163,8 +163,15 @@ above — it states precisely what is and is not protected.
   [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md).
 - **Multi-relay channel writes** converge via rendezvous hashing while every
   relay is up; a relay that flaps then recovers can briefly double-sequence one
-  channel (the step-down rule converges it within a few frames). A true network
-  partition needs consensus — out of scope for community relays.
+  channel (the step-down rule converges it within a few frames). A relay that
+  becomes a channel's writer with *no* local history (a restart, or a follower
+  first taking over) still mints its own seq starting at 1, colliding with any
+  real history elsewhere — refusing that post until backfill lands isn't safe,
+  since a standalone relay with no configured siblings would then refuse it
+  forever. What's fixed: that collision no longer permanently blocks recovery
+  — a sibling's real log can still be adopted afterward, filling in every seq
+  the squatting relay is missing (only the one colliding seq stays wrong).
+  A true network partition needs consensus — out of scope for community relays.
 
 ### Not done yet
 

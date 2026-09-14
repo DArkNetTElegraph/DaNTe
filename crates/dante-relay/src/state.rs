@@ -547,34 +547,78 @@ impl RelayState {
         )
     }
 
-    /// Install a sibling's channel log verbatim (seqs preserved) for a channel
-    /// we don't yet have. No-op if we already sequence or hold it.
+    /// Fold a sibling's channel log into ours, filling in any seq we don't
+    /// already hold. Used both for a channel we've never seen (fresh insert)
+    /// and one we already have some state for — the latter matters because a
+    /// relay that becomes a channel's writer with no local history (a
+    /// restart, or a follower first taking over) mints its own seq starting
+    /// at 1 via [`Request::PostToChannel`] before any backfill can land (see
+    /// `dante-backlog-human-vs-solo` memory: minting-on-empty-state is a
+    /// known, deliberately-unfixed gap — refusing that post would deadlock a
+    /// standalone relay with no siblings configured to backfill from).
+    /// Without this merge, that one bogus local entry made
+    /// `self.channels.contains_key` true forever, and the old early-return
+    /// here permanently blocked a sibling's real log from ever repairing it.
+    ///
+    /// A seq we already hold locally is left untouched — this never
+    /// overwrites, so it never has to decide which side of a collision is
+    /// right. That leaves a squatted entry's content wrong forever, but caps
+    /// the damage to that one seq instead of losing the entire rest of the
+    /// sibling's history.
     pub fn adopt_channel_log(
         &mut self,
         channel_id: [u8; 32],
         entries: Vec<(u64, Vec<u8>)>,
         now: u64,
     ) {
-        if self.channels.contains_key(&channel_id) {
+        if !self.channels.contains_key(&channel_id) && self.channels.len() >= MAX_CHANNELS {
             return;
         }
-        if self.channels.len() >= MAX_CHANNELS {
-            return;
-        }
-        let mut rows: Vec<(u64, Vec<u8>, u64)> = entries
+        let mut incoming: Vec<(u64, Vec<u8>, u64)> = entries
             .into_iter()
             .filter(|(_, b)| b.len() <= MAX_CHANNEL_BLOB_BYTES)
             .map(|(s, b)| (s, b, now))
             .collect();
-        rows.sort_by_key(|(s, _, _)| *s);
-        rows.dedup_by_key(|(s, _, _)| *s);
-        let bytes: usize = rows.iter().map(|(_, b, _)| b.len()).sum();
-        if self.channel_bytes.saturating_add(bytes) > CHANNEL_STORE_CAP {
+        incoming.sort_by_key(|(s, _, _)| *s);
+        incoming.dedup_by_key(|(s, _, _)| *s);
+        if incoming.is_empty() {
             return;
         }
-        let next = rows.last().map_or(1, |(s, _, _)| s + 1);
-        self.channel_bytes += bytes;
-        self.channels.insert(channel_id, (next, false, rows));
+        let last_seq = incoming.last().map(|(s, _, _)| *s).unwrap_or(0);
+
+        let entry = self
+            .channels
+            .entry(channel_id)
+            .or_insert((1, false, Vec::new()));
+        let have: std::collections::HashSet<u64> = entry.2.iter().map(|(s, _, _)| *s).collect();
+        let mut added_bytes = 0usize;
+        for (seq, blob, ts) in incoming {
+            if have.contains(&seq) {
+                continue; // never overwrite — see doc comment
+            }
+            added_bytes += blob.len();
+            let pos = entry.2.partition_point(|(s, _, _)| *s < seq);
+            entry.2.insert(pos, (seq, blob, ts));
+        }
+        entry.0 = entry.0.max(last_seq + 1);
+        self.channel_bytes = self.channel_bytes.saturating_add(added_bytes);
+        // Same trim policy as `ingest_gossiped_channel_frame`: an entry-count
+        // cap, oldest first. The byte cap is enforced on the direct-write and
+        // gossip paths before they add anything; a merge can still push past
+        // it (adopting a long sibling log in one shot), so trim on bytes too.
+        let mut removed = 0usize;
+        if entry.2.len() > MAX_CHANNEL_ENTRIES {
+            let excess = entry.2.len() - MAX_CHANNEL_ENTRIES;
+            for (_, b, _) in entry.2.drain(..excess) {
+                removed += b.len();
+            }
+        }
+        while self.channel_bytes.saturating_sub(removed) > CHANNEL_STORE_CAP && !entry.2.is_empty()
+        {
+            let (_, b, _) = entry.2.remove(0);
+            removed += b.len();
+        }
+        self.channel_bytes = self.channel_bytes.saturating_sub(removed);
     }
 
     /// Set the ICE servers this relay advertises for calls.
@@ -1083,15 +1127,29 @@ impl RelayState {
                 // Cap the reply so a large log can't build an unsendable frame.
                 let mut used = 0usize;
                 let out = match self.channels.get(&channel_id) {
-                    Some((_, _, entries)) => entries
-                        .iter()
-                        .filter(|(seq, _, _)| *seq > since_seq)
-                        .take_while(|(_, blob, _)| {
-                            used += blob.len();
-                            used <= MAX_CHANNEL_FETCH_BYTES
-                        })
-                        .map(|(seq, blob, _)| (*seq, blob.clone()))
-                        .collect(),
+                    Some((next_seq, _, entries)) => {
+                        // A client asking past our log's end is evidence we
+                        // might be behind (e.g. we squatted seq 1 on an empty
+                        // restart — see `adopt_channel_log`'s doc comment).
+                        // Re-trigger backfill; harmless if we're actually
+                        // caught up, since a sibling with nothing newer just
+                        // won't reply.
+                        if since_seq >= *next_seq
+                            && self.channel_backfill.len() < CHANNEL_FED_QUEUE_CAP
+                            && self.channel_backfill_set.insert(channel_id)
+                        {
+                            self.channel_backfill.push_back(channel_id);
+                        }
+                        entries
+                            .iter()
+                            .filter(|(seq, _, _)| *seq > since_seq)
+                            .take_while(|(_, blob, _)| {
+                                used += blob.len();
+                                used <= MAX_CHANNEL_FETCH_BYTES
+                            })
+                            .map(|(seq, blob, _)| (*seq, blob.clone()))
+                            .collect()
+                    }
                     None => {
                         // Federation: a channel we've never seen — ask siblings
                         // for it so the next poll can serve it.
@@ -1559,6 +1617,92 @@ mod tests {
         }
     }
 
+    /// A relay that mints a bogus seq-1 locally (e.g. it restarted and lost
+    /// all channel state, then a client posted before backfill landed) used
+    /// to be permanently locked out of ever adopting a sibling's real log —
+    /// `adopt_channel_log`'s old `contains_key` early-return made it a no-op
+    /// forever. It must instead merge: fill the seqs it's missing, leave the
+    /// colliding one alone, and continue minting past the adopted history.
+    #[test]
+    fn adopt_channel_log_merges_into_a_relay_that_already_squatted_a_seq() {
+        let cid = [11u8; 32];
+
+        // Relay A holds the real, authoritative log: seqs 1..3.
+        let mut a = state();
+        a.adopt_channel_log(
+            cid,
+            vec![
+                (1, b"real-1".to_vec()),
+                (2, b"real-2".to_vec()),
+                (3, b"real-3".to_vec()),
+            ],
+            1_000,
+        );
+
+        // Relay B has no state for this channel and mints its own bogus
+        // seq 1 via a direct client post.
+        let mut b = state();
+        let poster = Identity::generate(0);
+        announce(&mut b, &poster);
+        let root = SignSecret::from_bytes(&[9u8; 32]);
+        assert_eq!(
+            b.handle(
+                set_channel_roster(&root, cid, 1, vec![*poster.id().as_bytes()]),
+                IP,
+                1_000
+            ),
+            Response::Ok
+        );
+        assert_eq!(
+            b.handle(
+                post_to_channel(&poster, cid, b"bogus-1".to_vec()),
+                IP,
+                1_000
+            ),
+            Response::Posted(1)
+        );
+
+        // A's real log arrives at B via backfill. B keeps its own colliding
+        // seq 1 (never overwrites) but adopts A's real seqs 2 and 3.
+        b.adopt_channel_log(
+            cid,
+            vec![
+                (1, b"real-1".to_vec()),
+                (2, b"real-2".to_vec()),
+                (3, b"real-3".to_vec()),
+            ],
+            2_000,
+        );
+        match b.handle(
+            Request::FetchChannel {
+                channel_id: cid,
+                since_seq: 0,
+            },
+            IP,
+            2_000,
+        ) {
+            Response::ChannelLog(rows) => assert_eq!(
+                rows,
+                vec![
+                    (1, b"bogus-1".to_vec()), // untouched collision
+                    (2, b"real-2".to_vec()),
+                    (3, b"real-3".to_vec()),
+                ]
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        // B now continues past the adopted history instead of re-colliding.
+        assert_eq!(
+            b.handle(
+                post_to_channel(&poster, cid, b"frame-4".to_vec()),
+                IP,
+                2_000
+            ),
+            Response::Posted(4)
+        );
+    }
+
     #[test]
     fn repeated_fetch_of_an_unknown_channel_queues_one_backfill() {
         let mut c = state();
@@ -1574,6 +1718,39 @@ mod tests {
         }
         // Deduped, not one entry per request.
         assert_eq!(c.take_channel_backfill(), vec![[4u8; 32]]);
+    }
+
+    /// A client asking `FetchChannel` past our log's known end is evidence we
+    /// might be missing history (see `adopt_channel_log`'s doc comment) — it
+    /// should re-trigger backfill even though the channel key already exists
+    /// locally, not just for a wholly unknown channel.
+    #[test]
+    fn fetch_past_our_log_end_re_triggers_backfill() {
+        let cid = [12u8; 32];
+        let mut c = state();
+        c.adopt_channel_log(cid, vec![(1, b"only-entry".to_vec())], 1_000);
+
+        // Asking for since_seq below our end: not behind, no backfill.
+        let _ = c.handle(
+            Request::FetchChannel {
+                channel_id: cid,
+                since_seq: 0,
+            },
+            IP,
+            1_000,
+        );
+        assert_eq!(c.take_channel_backfill(), Vec::<[u8; 32]>::new());
+
+        // Asking for since_seq at/past our next slot: we might be behind.
+        let _ = c.handle(
+            Request::FetchChannel {
+                channel_id: cid,
+                since_seq: 2,
+            },
+            IP,
+            1_000,
+        );
+        assert_eq!(c.take_channel_backfill(), vec![cid]);
     }
 
     #[test]

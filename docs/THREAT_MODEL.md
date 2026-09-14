@@ -330,28 +330,63 @@ provide.
     A relay that already holds a roster enforces it on every gossiped frame,
     same as the direct path.
 - **MLS `KeyPackage`s carry no binding to the DaNTe identity that published
-  them (found in the same audit; the "check it on use" half is now fixed,
-  the deeper cryptographic binding is not).** `dante-mls`'s
-  `publish_key_package` pairs caller-chosen credential bytes with a freshly
-  generated, unrelated signature keypair; nothing signs the credential with
-  the publisher's `idk`, so a client is still free to publish a KeyPackage
-  (under its own correctly-signed `PublishKeyPackages` request) whose
-  embedded credential names a different identity than the signer. What's
-  fixed: every place the engine is about to trust a fetched KeyPackage
-  enough to add its holder to a group (`mls_add_member`, `start_group_call`,
-  the `GroupCallJoinRequest` admit path) now calls `dante-mls`'s
-  `key_package_identity` and refuses the add if the embedded credential
-  doesn't match the peer id it was fetched for — closing the exploit path
-  the audit named ("the engine adds a fetched `KeyPackage` to a group with
-  no check that its credential equals the peer id it was fetched for"). This
-  is defense in depth alongside the now-also-fixed `ingest_gossiped_keypackage`
-  gossip-bypass gap above: even a hypothetical future signature-check bypass
-  there would still be rejected here, at add-time, on credential mismatch.
-  What's *not* fixed: the credential still isn't cryptographically bound to `idk` at
-  publish time — a deeper, openmls-level protocol change (a custom
-  extension carrying an `idk` signature over the leaf key, verified by every
-  validator, not just DaNTe's own add path) that has not been attempted
-  here.
+  them (found in the same audit; now fixed, both the "check it on use" half
+  and the deeper cryptographic binding).** `dante-mls` previously paired
+  caller-chosen credential bytes with a freshly generated, unrelated
+  signature keypair via MLS's plain `BasicCredential` — nothing signed the
+  credential with the publisher's `idk`, so a client could publish a
+  KeyPackage (under its own correctly-signed `PublishKeyPackages` request)
+  whose embedded credential named a different identity than the signer.
+  Fixed in two layers:
+  - **"Check it on use"**: every place the engine is about to trust a
+    fetched KeyPackage enough to add its holder to a group
+    (`mls_add_member`, `start_group_call`, the `GroupCallJoinRequest` admit
+    path) calls `dante-mls`'s `key_package_identity` and refuses the add if
+    the embedded credential doesn't match the peer id it was fetched for —
+    the exploit path the audit named directly ("the engine adds a fetched
+    `KeyPackage` to a group with no check that its credential equals the
+    peer id it was fetched for").
+  - **Deeper cryptographic binding**: `dante-mls` now defines its own MLS
+    credential type (`CredentialType::Other`, RFC 9420 §5.3's own extension
+    point for exactly this — OpenMLS treats every credential type as opaque
+    bytes it "does not look into", so this needed no upstream change). Every
+    credential DaNTe mints carries the identity bytes *and* a binding
+    proof: the identity's own long-term Ed25519 (`idk`) signature over a
+    domain-separated challenge covering that specific KeyPackage's
+    fresh per-package MLS signature key.
+    `Member::create` / `publish_key_package` now take the caller's real
+    `idk` (its public key plus a signing closure, not a raw secret-key
+    reference — matching the closure idiom already used elsewhere for
+    crossing this crate boundary) to mint this. `key_package_identity`
+    verifies the embedded signature for self-consistency (does `idk_pub`
+    really sign for this exact identity + this exact leaf key) before
+    returning anything, and now returns `idk_pub` alongside the identity so
+    the engine can also check it against the ledger's current key for that
+    identity — self-consistency alone only proves *some* real `idk` vouched
+    for the credential, not that it's the *right* one; only the ledger says
+    that. `dante-mls` has no ledger access, so that half stays in
+    `dante-core` (the free function `key_package_binds_to`), layered on top
+    the same way the wire-level checks already layer ledger access on top
+    of self-contained signature verification elsewhere in this codebase.
+    A KeyPackage whose credential doesn't carry a valid DaNTe binding at
+    all is refused outright, not silently trusted as a legacy format, at
+    every point the engine is about to add its holder to a group (`add()`
+    on the founder/host side) — this is a wire-incompatible change to
+    every previously-minted credential (including persisted, exported
+    channel/group-call state, whose already-baked-in `BasicCredential`
+    leaves `credential_identity` can never decode as a `DanteCredential`),
+    acceptable pre-1.0 per this project's stated policy that wire formats
+    change without notice until 1.0. **This verification is adder-side only.** Joining a group via a
+    Welcome (`Pending::join`) does not verify any leaf's credential in the
+    ratchet tree it receives, and processing a group's messages
+    (`members()`, `Member::process`) only decodes each sender's identity
+    from its credential, it does not re-verify the binding signature. So a
+    host who controls their own group can still add a self-consistent but
+    ledger-invalid leaf, and every joiner of that group currently trusts
+    the identity it's attributed without independently checking it. Closing
+    that gap needs joiner-side verification of every leaf at join time and
+    of newly-added leaves on every subsequent commit, which has not been
+    built yet.
 
 ## 7. Cryptographic posture
 

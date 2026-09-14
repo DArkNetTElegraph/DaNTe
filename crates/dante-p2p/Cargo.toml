@@ -19,6 +19,31 @@ description = "libp2p transport for DaNTe: Kademlia key directory + gossipsub fo
 # No "dns" feature on purpose: it pulls hickory-proto 0.25, which carries an
 # unfixed DoS advisory (RUSTSEC / GHSA-q2qq-hmj6-3wpp). Bootstrap peers are
 # configured by IP multiaddr; add "dns" back once libp2p ships hickory >= 0.26.1.
+#
+# Dependabot (2026-09-14, after Dependency graph was enabled on the repo)
+# flagged 3 findings against this crate's transitive tree. Both were verified
+# unreachable, not just theoretically unlikely:
+#   - hickory-proto (GHSA-3v94-mw7p-v465 / GHSA-q2qq-hmj6-3wpp): only reaches
+#     Cargo.lock via libp2p's optional "dns" and "mdns" features, neither of
+#     which is requested below. Confirmed with `cargo tree -i hickory-proto
+#     --all-features --target all` (empty — nothing in the resolved build
+#     graph reaches it) and by deleting Cargo.lock and regenerating from
+#     scratch (it reappears in the lockfile regardless, since Cargo.lock
+#     records the full optional-dependency graph independent of which
+#     features are actually turned on — but `cargo tree -i` reflects what's
+#     actually compiled, and that stays empty). Dead lockfile weight, not
+#     shipped code.
+#   - yamux 0.12.1 (GHSA-vxx9-2994-q338, remote panic on a malformed Data
+#     frame): `libp2p-yamux` 0.47.0 genuinely compiles in BOTH yamux 0.12.1
+#     and 0.13.10 side by side (aliased `yamux012`/`yamux013` in its own
+#     Cargo.toml) as part of a migration — but its public `Config::default()`
+#     (what `yamux::Config::default` below resolves to) builds the safe
+#     `Config013` variant. Only the crate's own deprecated `Config::client()`
+#     / `Config::server()` constructors select the vulnerable `Config012`
+#     path, and nothing in this workspace calls them (verified by grep — the
+#     only yamux config construction anywhere in dante-p2p is
+#     `yamux::Config::default` in src/lib.rs). The vulnerable code is in the
+#     binary but never invoked. Revisit once libp2p-yamux drops 0.12 entirely.
 libp2p = { version = "0.56", features = [
     "tokio", "tcp", "noise", "yamux",
     "kad", "gossipsub", "identify", "ping", "macros", "request-response",

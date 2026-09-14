@@ -106,6 +106,43 @@ fn a_credential_cannot_be_spliced_onto_a_different_leaf_key() {
     assert!(DanteCredential::decode_and_verify(&bytes, b"leaf-key-b").is_none());
 }
 
+/// A group persisted before `DanteCredential` existed — its founder leaf is a
+/// plain `BasicCredential`, the pre-diff shape — must be refused on import,
+/// not silently loaded into a member whose every identity lookup then
+/// quietly returns an empty (matches-nothing) `Vec` instead of an error.
+#[test]
+fn import_refuses_a_group_persisted_before_the_credential_binding_existed() {
+    let provider = OpenMlsRustCrypto::default();
+    let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
+    signer.store(provider.storage()).unwrap();
+    let credential = CredentialWithKey {
+        credential: BasicCredential::new(b"alice".to_vec()).into(),
+        signature_key: signer.to_public_vec().into(),
+    };
+    let config = MlsGroupCreateConfig::builder()
+        .ciphersuite(CIPHERSUITE)
+        .use_ratchet_tree_extension(true)
+        .build(); // default Capabilities: Basic only, the pre-diff shape.
+    let group = MlsGroup::new_with_group_id(
+        &provider,
+        &signer,
+        &config,
+        GroupId::from_slice(b"legacy-channel"),
+        credential.clone(),
+    )
+    .unwrap();
+    let legacy = Member {
+        provider,
+        signer,
+        credential,
+        identity: b"alice".to_vec(),
+        group,
+    };
+
+    let blob = legacy.export().unwrap();
+    assert!(Member::import(&blob).is_err());
+}
+
 /// Add two members to a founder's group; everyone lands in the same epoch with
 /// the same group-call key, and it rotates when a member leaves.
 #[test]

@@ -611,6 +611,26 @@ impl Member {
             .map_err(|e| MlsError::Group(format!("{e:?}")))?
             .ok_or(MlsError::Group("no group in the store".into()))?;
 
+        // A group persisted before this credential type existed has leaves
+        // whose credential is a plain `BasicCredential` — `credential_identity`
+        // can't decode those as a `DanteCredential`, and silently defaulting
+        // every one to an empty (matches-nothing) identity would quietly
+        // empty out the roster and drop incoming messages instead of failing
+        // where the problem actually is. Fail loudly here instead: this is
+        // the wire-incompatible break `THREAT_MODEL.md` already documents as
+        // accepted pre-1.0, so a persisted group from before it should be
+        // refused outright, not imported into a half-broken state.
+        for m in group.members() {
+            if DanteCredential::decode(m.credential.serialized_content()).is_none() {
+                return Err(MlsError::Group(
+                    "this group was persisted before DaNTe's credential binding existed \
+                     and can no longer be imported — its leaves don't carry a decodable \
+                     DanteCredential"
+                        .into(),
+                ));
+            }
+        }
+
         // `credential` is never read back out of a live `Member` (every group
         // operation goes through `self.group`, `self.signer`, `self.provider`
         // — see the `#[allow(dead_code)]` on the field) — the real DaNTe

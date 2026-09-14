@@ -175,7 +175,7 @@ else
   info "Rust not found."
   confirm "Install it now via rustup (https://rustup.rs)?" || die "Rust is required to build DaNTe."
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile default
-  # shellcheck disable=SC1091
+  # shellcheck disable=SC1090,SC1091
   . "$HOME/.cargo/env"
 fi
 # rust-toolchain.toml pins the exact version this repo builds with; rustup

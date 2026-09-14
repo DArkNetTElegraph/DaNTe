@@ -38,6 +38,10 @@
   .\scripts\setup-windows.ps1 -Relay 203.0.113.5:9944
 #>
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidUsingWriteHost', '',
+    Justification = 'Interactive setup script: colored status/warning/error lines to the console are the intended UX for a human running this by hand, not a data stream another command consumes.'
+)]
 param(
     [ValidateSet("cli", "desktop")]
     [string]$Mode,

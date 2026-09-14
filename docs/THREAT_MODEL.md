@@ -353,26 +353,38 @@ provide.
     credential DaNTe mints carries the identity bytes *and* a binding
     proof: the identity's own long-term Ed25519 (`idk`) signature over a
     domain-separated challenge covering that specific KeyPackage's
-    fresh per-package MLS signature key. `Member::create` /
-    `publish_key_package` now take the caller's real `idk` (an
-    `Identity::signing_key()`, not anything generated inside `dante-mls`)
-    to mint this. `key_package_identity` verifies the embedded signature
-    for self-consistency (does `idk_pub` really sign for this exact
-    identity + this exact leaf key) before returning anything, and now
-    returns `idk_pub` alongside the identity so the engine can also check
-    it against the ledger's current key for that identity —
-    self-consistency alone only proves *some* real `idk` vouched for the
-    credential, not that it's the *right* one; only the ledger says that.
-    `dante-mls` has no ledger access, so that half stays in `dante-core`
-    (`Engine::key_package_binding_is_valid`), layered on top the same way
-    the wire-level checks already layer ledger access on top of
-    self-contained signature verification elsewhere in this codebase.
-    A KeyPackage or group whose credential doesn't carry a valid DaNTe
-    binding at all is refused outright, not silently trusted as a legacy
-    format — this is a wire-incompatible change to every previously-minted
-    credential (including persisted, exported channel/group-call state),
-    acceptable pre-1.0 per this project's stated policy that wire formats
-    change without notice until 1.0.
+    fresh per-package MLS signature key.
+    `Member::create` / `publish_key_package` now take the caller's real
+    `idk` (its public key plus a signing closure, not a raw secret-key
+    reference — matching the closure idiom already used elsewhere for
+    crossing this crate boundary) to mint this. `key_package_identity`
+    verifies the embedded signature for self-consistency (does `idk_pub`
+    really sign for this exact identity + this exact leaf key) before
+    returning anything, and now returns `idk_pub` alongside the identity so
+    the engine can also check it against the ledger's current key for that
+    identity — self-consistency alone only proves *some* real `idk` vouched
+    for the credential, not that it's the *right* one; only the ledger says
+    that. `dante-mls` has no ledger access, so that half stays in
+    `dante-core` (the free function `key_package_binds_to`), layered on top
+    the same way the wire-level checks already layer ledger access on top
+    of self-contained signature verification elsewhere in this codebase.
+    A KeyPackage whose credential doesn't carry a valid DaNTe binding at
+    all is refused outright, not silently trusted as a legacy format, at
+    every point the engine is about to add its holder to a group (`add()`
+    on the founder/host side) — this is a wire-incompatible change to
+    every previously-minted credential, acceptable pre-1.0 per this
+    project's stated policy that wire formats change without notice until
+    1.0. **This verification is adder-side only.** Joining a group via a
+    Welcome (`Pending::join`) does not verify any leaf's credential in the
+    ratchet tree it receives, and processing a group's messages
+    (`members()`, `Member::process`) only decodes each sender's identity
+    from its credential, it does not re-verify the binding signature. So a
+    host who controls their own group can still add a self-consistent but
+    ledger-invalid leaf, and every joiner of that group currently trusts
+    the identity it's attributed without independently checking it. Closing
+    that gap needs joiner-side verification of every leaf at join time and
+    of newly-added leaves on every subsequent commit, which has not been
+    built yet.
 
 ## 7. Cryptographic posture
 

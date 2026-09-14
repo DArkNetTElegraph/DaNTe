@@ -433,6 +433,29 @@ fn mls_err(e: mls::MlsError) -> CoreError {
     CoreError::Voice(format!("mls: {e}"))
 }
 
+/// Whether `kp` is safe to trust enough to add its holder as `peer_id`: its
+/// DaNTe credential binding must verify (`key_package_identity`, in
+/// `dante-mls` — self-consistency only, no ledger access there), the
+/// identity it names must equal `peer_id`, and — the check `dante-mls`
+/// can't do itself — the `idk_pub` that signed the binding must be
+/// `ledger_idk`, the ledger's own current signing key for `peer_id` (fetched
+/// by the caller, since some call sites already hold a conflicting `&mut`
+/// borrow by the time this runs). Without this last check, a self-consistent
+/// binding proves nothing: anyone can mint their own real `idk` and sign a
+/// credential claiming to be someone else's identity bytes; only the ledger
+/// says which `idk` is actually authoritative for a given identity.
+fn key_package_binds_to(
+    mls: &mls::Member,
+    kp: &mls::KeyPkg,
+    peer_id: &[u8; 32],
+    ledger_idk: Option<[u8; 32]>,
+) -> bool {
+    let Ok((identity, idk_pub)) = mls.key_package_identity(kp) else {
+        return false;
+    };
+    identity == peer_id.as_slice() && ledger_idk == Some(idk_pub)
+}
+
 /// One channel this client belongs to, backed by an MLS group.
 pub(crate) struct ChannelSession {
     pub info: ChannelInfo,
@@ -2219,8 +2242,12 @@ impl Engine {
         let me = self.my_member_id();
         let mut fresh = Vec::new();
         while self.mls_pending.len() + fresh.len() < Self::MLS_KEYPKG_POOL {
-            let (pending, kp) = mls::Member::publish_key_package(&me, self.identity.signing_key())
-                .map_err(mls_err)?;
+            let (pending, kp) = mls::Member::publish_key_package(
+                &me,
+                self.identity.sign_public().to_bytes(),
+                |m| self.identity.sign(m),
+            )
+            .map_err(mls_err)?;
             self.mls_pending.push(pending);
             fresh.push(kp.0);
         }
@@ -2257,8 +2284,13 @@ impl Engine {
             .filter(|m| *m != me)
             .collect();
 
-        let mut mls_member =
-            mls::Member::create(&me, self.identity.signing_key(), channel_id).map_err(mls_err)?;
+        let mut mls_member = mls::Member::create(
+            &me,
+            self.identity.sign_public().to_bytes(),
+            |m| self.identity.sign(m),
+            channel_id,
+        )
+        .map_err(mls_err)?;
 
         let mut kps: Vec<mls::KeyPkg> = Vec::new();
         let mut invited: Vec<[u8; 32]> = Vec::new();
@@ -2268,7 +2300,8 @@ impl Engine {
                 // Nothing stops a client from publishing a KeyPackage whose
                 // credential names someone other than themselves; only add
                 // it under the roster slot it actually claims to be.
-                if !self.key_package_binding_is_valid(&mls_member, &kp, m) {
+                let ledger_idk = self.ledger.idk_for_id(m);
+                if !key_package_binds_to(&mls_member, &kp, m, ledger_idk) {
                     continue;
                 }
                 kps.push(kp);
@@ -2569,8 +2602,13 @@ impl Engine {
             // Open the room *solo* — unlike `start_group_call`, a voice channel
             // does not pre-invite every member; they join on demand and are
             // added via `GroupCallJoinRequest`.
-            let member = mls::Member::create(&me, self.identity.signing_key(), channel_id)
-                .map_err(mls_err)?;
+            let member = mls::Member::create(
+                &me,
+                self.identity.sign_public().to_bytes(),
+                |m| self.identity.sign(m),
+                channel_id,
+            )
+            .map_err(mls_err)?;
             self.group_calls
                 .insert(*channel_id, GroupCall { mls: member });
             let _ = self.refresh_mls_key_package().await;
@@ -2972,8 +3010,13 @@ impl Engine {
             .clone();
         let channel_id = random_array::<32>();
         let me = self.my_member_id();
-        let mls =
-            mls::Member::create(&me, self.identity.signing_key(), &channel_id).map_err(mls_err)?;
+        let mls = mls::Member::create(
+            &me,
+            self.identity.sign_public().to_bytes(),
+            |m| self.identity.sign(m),
+            &channel_id,
+        )
+        .map_err(mls_err)?;
         let log_key = password
             .filter(|p| !p.is_empty())
             .map(|p| channel::derive_log_key(server_root, &channel_id, p));
@@ -3114,28 +3157,6 @@ impl Engine {
             .collect()
     }
 
-    /// Whether `kp` is safe to trust enough to add its holder as `peer_id`:
-    /// its DaNTe credential binding must verify (`key_package_identity`, in
-    /// `dante-mls` — self-consistency only, no ledger access there), the
-    /// identity it names must equal `peer_id`, and — the check `dante-mls`
-    /// can't do itself — the `idk_pub` that signed the binding must be the
-    /// ledger's own current signing key for `peer_id`. Without this last
-    /// step, a self-consistent binding proves nothing: anyone can mint their
-    /// own real `idk` and sign a credential claiming to be someone else's
-    /// identity bytes; only the ledger says which `idk` is actually
-    /// authoritative for a given identity.
-    fn key_package_binding_is_valid(
-        &self,
-        mls: &mls::Member,
-        kp: &mls::KeyPkg,
-        peer_id: &[u8; 32],
-    ) -> bool {
-        let Ok((identity, idk_pub)) = mls.key_package_identity(kp) else {
-            return false;
-        };
-        identity == peer_id.as_slice() && self.ledger.idk_for_id(peer_id) == Some(idk_pub)
-    }
-
     /// Host side of adding one member: fetch their KeyPackage, commit the MLS
     /// add to the channel log, and DM them the Welcome + policy.
     async fn mls_add_member(
@@ -3179,17 +3200,11 @@ impl Engine {
             // credential the published KeyPackage itself names — nothing
             // stops a client from publishing one crafted with someone else's
             // identity bytes. Check it here, at the one place this KeyPackage
-            // is about to be trusted enough to add its holder to a group:
-            // the credential's own binding must verify, name this exact
-            // peer, and be signed by the ledger's own current key for them
-            // (a self-consistent binding alone just proves *some* real idk
-            // vouched for it — the ledger says which idk actually is that
-            // peer).
-            let (credential, idk_pub) = ch.mls.key_package_identity(&kp).map_err(mls_err)?;
+            // is about to be trusted enough to add its holder to a group.
             let ledger_idk = self.ledger.idk_for_id(peer_id);
-            if credential != peer_id.as_slice() || ledger_idk != Some(idk_pub) {
+            if !key_package_binds_to(&ch.mls, &kp, peer_id, ledger_idk) {
                 return Err(CoreError::Channel(
-                    "fetched KeyPackage's credential doesn't match the identity it was fetched for",
+                    "fetched KeyPackage's credential doesn't carry a valid DaNTe binding for the identity it was fetched for",
                 ));
             }
             let hs = ch.mls.add(&[kp]).map_err(mls_err)?;
@@ -6228,11 +6243,7 @@ impl Engine {
                             let kp = mls::KeyPkg(kp);
                             let ledger_idk = self.ledger.idk_for_id(&requester);
                             let hs = self.group_calls.get_mut(&channel_id).and_then(|gc| {
-                                let Ok((identity, idk_pub)) = gc.mls.key_package_identity(&kp)
-                                else {
-                                    return None;
-                                };
-                                if identity != requester.as_slice() || ledger_idk != Some(idk_pub) {
+                                if !key_package_binds_to(&gc.mls, &kp, &requester, ledger_idk) {
                                     return None;
                                 }
                                 gc.mls.add(&[kp]).ok()

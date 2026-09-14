@@ -16,7 +16,7 @@
 //!
 //! [OpenMLS]: https://openmls.tech
 
-use dante_crypto::sign::{SignPublic, SignSecret};
+use dante_crypto::sign::SignPublic;
 use openmls::prelude::{
     tls_codec::{Deserialize as _, Serialize as _},
     *,
@@ -38,24 +38,39 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 /// identity bytes, plus a binding proof — the identity's own long-term
 /// Ed25519 ("`idk`") signature over a domain-separated challenge covering
 /// this specific KeyPackage's fresh, per-package MLS signature key, minted
-/// once at [`Member::create`] / [`Member::publish_key_package`] time and
-/// self-checked by every consumer of the credential (`members()`,
-/// [`Member::process`]'s sender extraction, [`Member::key_package_identity`]).
+/// once at [`Member::create`] / [`Member::publish_key_package`] time.
 ///
-/// This only proves internal self-consistency — "whoever holds this idk
-/// vouches for this leaf key" — not that the embedded `idk_pub` is really
-/// the current key for the claimed identity on DaNTe's ledger. That
-/// cross-check needs the ledger, which this crate has no access to; callers
-/// (`dante-core`) do it on top, the same way the relay's own signature
-/// checks and the engine's credential-on-use check already do for the
-/// wire-level publish path.
+/// **This binding is verified on the *adding* side only, not the *joining*
+/// side.** [`Member::key_package_identity`] verifies it (self-consistency;
+/// see below) before a KeyPackage is trusted enough to add its holder to a
+/// group — every `add()` call site in `dante-core` gates on this plus a
+/// ledger cross-check. But `Pending::join` performs no credential check at
+/// all on any leaf in a Welcome's ratchet tree, and `members()` /
+/// [`Member::process`]'s sender extraction (`credential_identity`) only
+/// decode the identity, they do not re-verify the signature. So a
+/// *host* who controls their own group can still add a leaf whose credential
+/// is self-consistent but names a ledger-invalid identity, and every
+/// *joiner* of that group will trust `members()`/`process()`'s attribution
+/// of it — this is not a regression (pre-this-type, credentials were
+/// equally unverified), but it is a real, currently-open gap, not closed by
+/// this type on its own. Closing it needs joiner-side verification (of
+/// every leaf at join time, and of newly-added leaves on every commit),
+/// which has not been built yet.
 ///
-/// This is registered as a private-use `CredentialType::Other` — OpenMLS
-/// treats every credential type as opaque bytes it merely stores and passes
-/// along ("OpenMLS does not look into credentials"), so this is exactly the
-/// extension point RFC 9420 leaves for exactly this purpose, not a hack.
-const DANTE_CREDENTIAL_TYPE: u16 = 0xDA47; // "DAnTe", picked to avoid the
-                                           // GREASE range OpenMLS reserves.
+/// The self-consistency property this type DOES give the adding side: proof
+/// that *some* real `idk` vouches for `(identity, this leaf's signature
+/// key)` — not that the embedded `idk_pub` is really the current key for
+/// that identity on DaNTe's ledger. That cross-check needs the ledger,
+/// which this crate has no access to; `dante-core` does it on top, the same
+/// way the relay's own signature checks and the engine's credential-on-use
+/// check already do for the wire-level publish path.
+///
+/// This is registered in RFC 9420's private-use `CredentialType` range
+/// (0xF000–0xFFFF) as `CredentialType::Other` — OpenMLS treats every
+/// credential type as opaque bytes it merely stores and passes along
+/// ("OpenMLS does not look into credentials"), so this is exactly the
+/// extension point the RFC leaves for exactly this purpose, not a hack.
+const DANTE_CREDENTIAL_TYPE: u16 = 0xF0DA; // "DAnTe", inside the private-use block.
 
 /// Domain-separated so a signature minted for this can't be replayed as a
 /// signature over anything else this identity signs elsewhere in DaNTe.
@@ -76,10 +91,18 @@ struct DanteCredential {
 impl DanteCredential {
     /// Mint a new credential for `identity`, binding it to `mls_signature_pub`
     /// (the fresh per-package/per-group MLS signature key this credential
-    /// will be paired with) via `idk`'s own signature.
-    fn new(identity: &[u8], idk: &SignSecret, mls_signature_pub: &[u8]) -> Self {
-        let idk_pub = idk.public().to_bytes();
-        let sig = idk.sign(&credential_binding_challenge(identity, mls_signature_pub));
+    /// will be paired with) via `idk_sign` — the caller's own long-term
+    /// signing capability, taken as `idk_pub` + a signing closure rather
+    /// than a raw secret-key reference, matching this codebase's existing
+    /// idiom for handing signing capability across a crate boundary without
+    /// handing out the secret itself.
+    fn new(
+        identity: &[u8],
+        idk_pub: [u8; 32],
+        idk_sign: impl Fn(&[u8]) -> [u8; 64],
+        mls_signature_pub: &[u8],
+    ) -> Self {
+        let sig = idk_sign(&credential_binding_challenge(identity, mls_signature_pub));
         Self {
             identity: identity.to_vec(),
             idk_pub,
@@ -87,30 +110,23 @@ impl DanteCredential {
         }
     }
 
-    /// `identity(4-byte-LE-length-prefixed) || idk_pub(32) || sig(64)`.
-    /// Hand-rolled rather than pulling in a wire-encoding crate for one
-    /// struct — this never leaves `dante-mls`'s own encode/decode pair.
+    /// Uses `dante-proto`'s canonical `Writer`/`Reader` — the same
+    /// length-prefixed-bytes-plus-fixed-fields encoding used throughout the
+    /// rest of this codebase, rather than a bespoke one-off format.
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(4 + self.identity.len() + 32 + 64);
-        out.extend_from_slice(&(self.identity.len() as u32).to_le_bytes());
-        out.extend_from_slice(&self.identity);
-        out.extend_from_slice(&self.idk_pub);
-        out.extend_from_slice(&self.sig);
-        out
+        let mut w = dante_proto::enc::Writer::with_capacity(4 + self.identity.len() + 32 + 64);
+        w.bytes(&self.identity)
+            .fixed(&self.idk_pub)
+            .fixed(&self.sig);
+        w.into_vec()
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 4 {
-            return None;
-        }
-        let len = u32::from_le_bytes(bytes[..4].try_into().ok()?) as usize;
-        let rest = &bytes[4..];
-        if rest.len() != len + 32 + 64 {
-            return None;
-        }
-        let identity = rest[..len].to_vec();
-        let idk_pub: [u8; 32] = rest[len..len + 32].try_into().ok()?;
-        let sig: [u8; 64] = rest[len + 32..].try_into().ok()?;
+        let mut r = dante_proto::enc::Reader::new(bytes);
+        let identity = r.bytes().ok()?.to_vec();
+        let idk_pub = r.fixed::<32>().ok()?;
+        let sig = r.fixed::<64>().ok()?;
+        r.finish().ok()?;
         Some(Self {
             identity,
             idk_pub,
@@ -135,15 +151,20 @@ impl DanteCredential {
 }
 
 /// Extract just the identity bytes from a credential's serialized content,
-/// without re-verifying the binding signature. Safe to use for an
-/// already-established group member: MLS itself only ever accepted this
-/// credential paired with that leaf's signature key once, at whichever
-/// add/join time [`Member::key_package_identity`]'s `decode_and_verify`
-/// (or, for the group's founder, [`Member::create`] minting its own valid
-/// credential by construction) already checked it — the ratchet tree keeps
-/// that pairing immutable for the life of the leaf. Returns an empty `Vec`
-/// (matches nothing real) if the bytes aren't a decodable DanteCredential at
-/// all, rather than panicking.
+/// without re-verifying the binding signature.
+///
+/// This trusts that whoever *added* this leaf already ran
+/// `key_package_identity`'s `decode_and_verify` — true for a leaf this
+/// client itself added (every `add()` call site in `dante-core` gates on
+/// it), but **not** verified for a leaf that arrived via `Pending::join`'s
+/// Welcome (no credential check happens there at all yet — see
+/// [`DANTE_CREDENTIAL_TYPE`]'s doc comment for the open gap this leaves).
+/// The ratchet tree does keep a credential/leaf-key pairing immutable for
+/// the life of the leaf once *accepted*, so re-verifying the signature on
+/// every message would be redundant *if* it was checked at acceptance —
+/// today that's only actually guaranteed for locally-initiated adds.
+/// Returns an empty `Vec` (matches nothing real) if the bytes aren't a
+/// decodable DanteCredential at all, rather than panicking.
 fn credential_identity(serialized_content: &[u8]) -> Vec<u8> {
     DanteCredential::decode(serialized_content)
         .map(|c| c.identity)
@@ -260,12 +281,19 @@ pub struct Member {
 impl Member {
     /// Create a brand-new group containing only this member. `identity` is the
     /// member's stable name inside the group (DaNTe passes the identity-key
-    /// fingerprint); `group_id` is the channel id. `idk` signs the credential
-    /// binding (see [`DANTE_CREDENTIAL_TYPE`]) — the caller's own long-term
-    /// Ed25519 identity key, not anything generated here.
-    pub fn create(identity: &[u8], idk: &SignSecret, group_id: &[u8]) -> Result<Self, MlsError> {
+    /// fingerprint); `group_id` is the channel id. `idk_pub` + `idk_sign` sign
+    /// the credential binding (see [`DANTE_CREDENTIAL_TYPE`]) — the caller's
+    /// own long-term Ed25519 identity key, not anything generated here, taken
+    /// as a public key plus a signing closure rather than a raw secret-key
+    /// reference.
+    pub fn create(
+        identity: &[u8],
+        idk_pub: [u8; 32],
+        idk_sign: impl Fn(&[u8]) -> [u8; 64],
+        group_id: &[u8],
+    ) -> Result<Self, MlsError> {
         let provider = OpenMlsRustCrypto::default();
-        let (signer, credential) = new_credential(identity, idk, &provider)?;
+        let (signer, credential) = new_credential(identity, idk_pub, idk_sign, &provider)?;
 
         let config = MlsGroupCreateConfig::builder()
             .ciphersuite(CIPHERSUITE)
@@ -291,14 +319,16 @@ impl Member {
     }
 
     /// Publish a [`KeyPkg`] so an existing member can add this identity.
-    /// Returns the [`Pending`] half to keep until the Welcome arrives. `idk`
-    /// signs the credential binding — see [`Member::create`].
+    /// Returns the [`Pending`] half to keep until the Welcome arrives.
+    /// `idk_pub` + `idk_sign` sign the credential binding — see
+    /// [`Member::create`].
     pub fn publish_key_package(
         identity: &[u8],
-        idk: &SignSecret,
+        idk_pub: [u8; 32],
+        idk_sign: impl Fn(&[u8]) -> [u8; 64],
     ) -> Result<(Pending, KeyPkg), MlsError> {
         let provider = OpenMlsRustCrypto::default();
-        let (signer, credential) = new_credential(identity, idk, &provider)?;
+        let (signer, credential) = new_credential(identity, idk_pub, idk_sign, &provider)?;
 
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(dante_capabilities())
@@ -581,6 +611,13 @@ impl Member {
             .map_err(|e| MlsError::Group(format!("{e:?}")))?
             .ok_or(MlsError::Group("no group in the store".into()))?;
 
+        // `credential` is never read back out of a live `Member` (every group
+        // operation goes through `self.group`, `self.signer`, `self.provider`
+        // — see the `#[allow(dead_code)]` on the field) — the real DaNTe
+        // credential this member published is durable inside `self.group`'s
+        // own persisted ratchet-tree state, not reconstructed here. This
+        // `BasicCredential` placeholder only needs to type-check the field;
+        // it is deliberately not a `DanteCredential`.
         let credential = CredentialWithKey {
             credential: BasicCredential::new(identity.clone()).into(),
             signature_key: signer.to_public_vec().into(),
@@ -634,7 +671,8 @@ fn dante_capabilities() -> Capabilities {
 
 fn new_credential(
     identity: &[u8],
-    idk: &SignSecret,
+    idk_pub: [u8; 32],
+    idk_sign: impl Fn(&[u8]) -> [u8; 64],
     provider: &OpenMlsRustCrypto,
 ) -> Result<(SignatureKeyPair, CredentialWithKey), MlsError> {
     let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())
@@ -643,7 +681,7 @@ fn new_credential(
         .store(provider.storage())
         .map_err(|e| MlsError::Group(format!("storing signer: {e:?}")))?;
     let mls_pub = signer.to_public_vec();
-    let dante_cred = DanteCredential::new(identity, idk, &mls_pub);
+    let dante_cred = DanteCredential::new(identity, idk_pub, idk_sign, &mls_pub);
     let credential = CredentialWithKey {
         credential: Credential::new(
             CredentialType::Other(DANTE_CREDENTIAL_TYPE),

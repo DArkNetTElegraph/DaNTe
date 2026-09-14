@@ -89,13 +89,6 @@ impl Identity {
         self.ik.clone()
     }
 
-    /// The long-term Ed25519 signing key itself, for operations that need to
-    /// hand it to another crate (e.g. `dante-mls` binding an MLS credential to
-    /// this identity) rather than just calling [`Identity::sign`] directly.
-    pub fn signing_key(&self) -> &SignSecret {
-        &self.idk
-    }
-
     /// The local message-store key.
     pub fn ratchet_db_key(&self) -> &[u8; 32] {
         &self.ratchet_db_key

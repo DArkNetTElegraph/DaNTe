@@ -314,11 +314,24 @@ impl<S: RecordStore> Ledger<S> {
 
     /// The current signing key (chain tip) for the identity whose stable
     /// [`IdentityId`] bytes are `identity_id` — i.e. resolve a fingerprint to a
-    /// usable key. `None` if unknown or evaporated.
+    /// usable key. `None` if unknown or evaporated/revoked — which of those it
+    /// was isn't distinguishable from this alone; see
+    /// [`has_any_entry_for_id`](Self::has_any_entry_for_id) for that.
     pub fn idk_for_id(&self, identity_id: &[u8; 32]) -> Option<[u8; 32]> {
         let &chain_id = self.id_to_chain.get(identity_id)?;
         let c = &self.chains[chain_id];
         c.usable().then_some(c.tip_idk)
+    }
+
+    /// Whether the ledger has a chain for `identity_id` at all, usable or
+    /// not — i.e. whether this identity is *known but currently unusable*
+    /// (evaporated or revoked) as opposed to genuinely never seen. Callers
+    /// that treat [`idk_for_id`](Self::idk_for_id)'s `None` as "give this
+    /// identity the benefit of the doubt, the ledger just hasn't caught up
+    /// yet" need this to rule out the other `None` case: a revoked or
+    /// evaporated identity should never get that benefit of the doubt.
+    pub fn has_any_entry_for_id(&self, identity_id: &[u8; 32]) -> bool {
+        self.id_to_chain.contains_key(identity_id)
     }
 
     /// The current signing key (chain tip) for a live identity.

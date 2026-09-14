@@ -456,6 +456,44 @@ fn key_package_binds_to(
     identity == peer_id.as_slice() && ledger_idk == Some(idk_pub)
 }
 
+/// Whether `bindings` (a group's self-consistent `(leaf index, identity,
+/// idk_pub)` triples — see [`mls::Member::member_bindings`]) are all
+/// consistent with what the ledger currently knows, via `ledger_idk_for_id`
+/// (`Ledger::idk_for_id`) and `ledger_has_any_entry_for_id`
+/// (`Ledger::has_any_entry_for_id`), both passed in as plain functions so
+/// this stays a pure, unit-testable check. `total_members` guards against
+/// `member_bindings` silently dropping an unverified leaf — see its own doc
+/// comment — by requiring every member came back with a binding at all, not
+/// just that the ones that did all check out.
+///
+/// `ledger_idk_for_id` returning `None` is ambiguous on its own — the
+/// ledger's own doc says so — between "never seen this identity" and "this
+/// identity is known but currently unusable" (evaporated or revoked), and
+/// only the first should get the benefit of the doubt a join into an
+/// unfamiliar group needs (a ledger record that simply hasn't propagated
+/// yet). `ledger_has_any_entry_for_id` resolves that: no entry at all →
+/// accept on self-consistency alone; an entry that exists but didn't
+/// resolve to a key → refuse, same as an outright mismatch. See
+/// [`Engine::member_bindings_match_ledger`]'s doc comment for the full
+/// reasoning.
+fn bindings_match_ledger(
+    bindings: &[(u32, Vec<u8>, [u8; 32])],
+    total_members: usize,
+    ledger_idk_for_id: impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
+    ledger_has_any_entry_for_id: impl Fn(&[u8; 32]) -> bool,
+) -> bool {
+    bindings.len() == total_members
+        && bindings.iter().all(|(_, identity, idk_pub)| {
+            let Ok(id) = <[u8; 32]>::try_from(identity.as_slice()) else {
+                return false;
+            };
+            match ledger_idk_for_id(&id) {
+                Some(ledger_idk) => ledger_idk == *idk_pub,
+                None => !ledger_has_any_entry_for_id(&id),
+            }
+        })
+}
+
 /// One channel this client belongs to, backed by an MLS group.
 pub(crate) struct ChannelSession {
     pub info: ChannelInfo,
@@ -2218,6 +2256,16 @@ impl Engine {
 
     /// Try every outstanding published-KeyPackage private half against a
     /// Welcome, returning the joined [`mls::Member`] and keeping the rest.
+    ///
+    /// `dante-mls`'s own `Pending::join` already refuses the whole Welcome if
+    /// any leaf's credential isn't a self-consistent DanteCredential binding
+    /// — but self-consistency alone doesn't prove an `idk_pub` is really the
+    /// ledger's current key for the identity it claims, only that *some*
+    /// real `idk` vouched for it (the same gap `key_package_binds_to` closes
+    /// for adding members ourselves). So a successful join is checked again
+    /// here before being trusted: every member's `idk_pub` must match the
+    /// ledger's key for their identity, or the whole join is refused, same
+    /// as if no Pending had matched at all.
     fn try_join_pending(&mut self, welcome: &[u8]) -> Option<mls::Member> {
         let mut kept: Vec<mls::Pending> = Vec::with_capacity(self.mls_pending.len());
         let mut joined: Option<mls::Member> = None;
@@ -2227,12 +2275,46 @@ impl Engine {
                 continue;
             }
             match pending.join(welcome) {
-                Ok(m) => joined = Some(m),
+                Ok(m) if self.member_bindings_match_ledger(&m) => joined = Some(m),
+                Ok(_) => {
+                    tracing::warn!(
+                        "refusing a Welcome: a member's DaNTe credential isn't signed by \
+                         the ledger's current key for their identity"
+                    );
+                }
                 Err((p, _)) => kept.push(*p),
             }
         }
         self.mls_pending = kept;
         joined
+    }
+
+    /// Whether every member of `mls` (as reported by
+    /// [`mls::Member::member_bindings`]) is consistent with what the ledger
+    /// currently knows about their identity. `member_bindings` already only
+    /// returns self-consistent bindings, so this is purely the ledger half
+    /// of the same two-layer check `key_package_binds_to` applies elsewhere
+    /// — with one deliberate difference: `key_package_binds_to` is checking
+    /// one specific contact this client is actively adding (whose ledger
+    /// entry should already exist), but a join can pull in members this
+    /// client has never interacted with before, whose ledger entry may
+    /// simply not have propagated yet — refusing every such join would make
+    /// joining any group with an unfamiliar member impossible. So a member
+    /// the ledger has genuinely never seen passes (self-consistency is all
+    /// we have yet); a member the ledger *does* have any chain for — even an
+    /// evaporated or revoked one, which resolves to no usable key rather
+    /// than no entry — must match the key on record, or the whole join is
+    /// refused. This still closes the attack that matters, a forged binding
+    /// for an identity this client can already verify, without quietly
+    /// giving a revoked identity the "not yet propagated" benefit of the
+    /// doubt a genuine stranger gets.
+    fn member_bindings_match_ledger(&self, mls: &mls::Member) -> bool {
+        bindings_match_ledger(
+            &mls.member_bindings(),
+            mls.member_indices().len(),
+            |id| self.ledger.idk_for_id(id),
+            |id| self.ledger.has_any_entry_for_id(id),
+        )
     }
 
     /// Top the published-KeyPackage pool back up to [`MLS_KEYPKG_POOL`]. Each
@@ -6433,6 +6515,116 @@ impl Engine {
     /// Whether `peer_idk` is a live identity in the local replica.
     pub fn knows(&self, peer_idk: &[u8; 32]) -> bool {
         self.ledger.is_live(peer_idk)
+    }
+}
+
+#[cfg(test)]
+mod bindings_match_ledger_tests {
+    use super::bindings_match_ledger;
+    use std::collections::{HashMap, HashSet};
+
+    /// Models the ledger's real three states for an identity: a genuine
+    /// stranger (no entry anywhere), a known-and-resolvable identity (an
+    /// entry in both maps, `idk_for_id` returns its key), and a
+    /// known-but-currently-unusable one — evaporated or revoked — which has
+    /// an entry (`has_any_entry_for_id` is true) but resolves to no key
+    /// (`idk_for_id` is `None`), exactly like `Ledger` itself.
+    struct FakeLedger {
+        resolvable: HashMap<[u8; 32], [u8; 32]>,
+        known_unusable: HashSet<[u8; 32]>,
+    }
+
+    impl FakeLedger {
+        fn idk_for_id(&self, id: &[u8; 32]) -> Option<[u8; 32]> {
+            self.resolvable.get(id).copied()
+        }
+        fn has_any_entry_for_id(&self, id: &[u8; 32]) -> bool {
+            self.resolvable.contains_key(id) || self.known_unusable.contains(id)
+        }
+    }
+
+    fn check(ledger: &FakeLedger, bindings: &[(u32, Vec<u8>, [u8; 32])], total: usize) -> bool {
+        bindings_match_ledger(
+            bindings,
+            total,
+            |id| ledger.idk_for_id(id),
+            |id| ledger.has_any_entry_for_id(id),
+        )
+    }
+
+    #[test]
+    fn accepts_a_member_the_ledger_agrees_with() {
+        let alice_id = [1u8; 32];
+        let alice_idk = [2u8; 32];
+        let ledger = FakeLedger {
+            resolvable: HashMap::from([(alice_id, alice_idk)]),
+            known_unusable: HashSet::new(),
+        };
+        let bindings = vec![(0, alice_id.to_vec(), alice_idk)];
+        assert!(check(&ledger, &bindings, 1));
+    }
+
+    #[test]
+    fn refuses_a_member_the_ledger_disagrees_with() {
+        let alice_id = [1u8; 32];
+        let forged_idk = [9u8; 32];
+        let real_idk = [2u8; 32];
+        let ledger = FakeLedger {
+            resolvable: HashMap::from([(alice_id, real_idk)]),
+            known_unusable: HashSet::new(),
+        };
+        let bindings = vec![(0, alice_id.to_vec(), forged_idk)];
+        assert!(!check(&ledger, &bindings, 1));
+    }
+
+    /// A join can pull in identities this client has never interacted with,
+    /// whose ledger record may simply not have propagated yet — that must
+    /// not brick the join; self-consistency (already guaranteed by
+    /// `member_bindings` only ever returning verified entries) is accepted
+    /// on its own until the ledger catches up.
+    #[test]
+    fn accepts_a_member_the_ledger_has_never_seen() {
+        let stranger_id = [7u8; 32];
+        let stranger_idk = [8u8; 32];
+        let ledger = FakeLedger {
+            resolvable: HashMap::new(),
+            known_unusable: HashSet::new(),
+        };
+        let bindings = vec![(0, stranger_id.to_vec(), stranger_idk)];
+        assert!(check(&ledger, &bindings, 1));
+    }
+
+    /// A revoked or evaporated identity resolves to `None` from
+    /// `idk_for_id`, same as a genuine stranger — but it must NOT get the
+    /// "hasn't propagated yet" benefit of the doubt: `has_any_entry_for_id`
+    /// says the ledger has seen this identity before, so any credential
+    /// claiming to be them now is refused.
+    #[test]
+    fn refuses_a_member_the_ledger_knows_is_revoked_or_evaporated() {
+        let revoked_id = [3u8; 32];
+        let claimed_idk = [4u8; 32];
+        let ledger = FakeLedger {
+            resolvable: HashMap::new(),
+            known_unusable: HashSet::from([revoked_id]),
+        };
+        let bindings = vec![(0, revoked_id.to_vec(), claimed_idk)];
+        assert!(!check(&ledger, &bindings, 1));
+    }
+
+    /// If `member_bindings` ever silently drops an unverified leaf (its own
+    /// doc comment says this can happen for a leaf added by a later,
+    /// unchecked commit), the mismatched count must refuse the whole group
+    /// rather than approve based on only the leaves that did verify.
+    #[test]
+    fn refuses_when_fewer_bindings_came_back_than_there_are_members() {
+        let alice_id = [1u8; 32];
+        let alice_idk = [2u8; 32];
+        let ledger = FakeLedger {
+            resolvable: HashMap::from([(alice_id, alice_idk)]),
+            known_unusable: HashSet::new(),
+        };
+        let bindings = vec![(0, alice_id.to_vec(), alice_idk)];
+        assert!(!check(&ledger, &bindings, 2)); // a second member's credential didn't verify at all
     }
 }
 

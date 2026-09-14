@@ -40,22 +40,28 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_
 /// this specific KeyPackage's fresh, per-package MLS signature key, minted
 /// once at [`Member::create`] / [`Member::publish_key_package`] time.
 ///
-/// **This binding is verified on the *adding* side only, not the *joining*
-/// side.** [`Member::key_package_identity`] verifies it (self-consistency;
-/// see below) before a KeyPackage is trusted enough to add its holder to a
+/// **This binding is verified when adding a member, and when joining via a
+/// Welcome — but not for a member added by a *later* commit.**
+/// [`Member::key_package_identity`] verifies it (self-consistency; see
+/// below) before a KeyPackage is trusted enough to add its holder to a
 /// group — every `add()` call site in `dante-core` gates on this plus a
-/// ledger cross-check. But `Pending::join` performs no credential check at
-/// all on any leaf in a Welcome's ratchet tree, and `members()` /
-/// [`Member::process`]'s sender extraction (`credential_identity`) only
-/// decode the identity, they do not re-verify the signature. So a
-/// *host* who controls their own group can still add a leaf whose credential
-/// is self-consistent but names a ledger-invalid identity, and every
-/// *joiner* of that group will trust `members()`/`process()`'s attribution
-/// of it — this is not a regression (pre-this-type, credentials were
-/// equally unverified), but it is a real, currently-open gap, not closed by
-/// this type on its own. Closing it needs joiner-side verification (of
-/// every leaf at join time, and of newly-added leaves on every commit),
-/// which has not been built yet.
+/// ledger cross-check. [`Pending::join`] inspects every leaf in a Welcome's
+/// ratchet tree the same way *before* ever building a live group from it,
+/// refusing the whole Welcome if any leaf's binding doesn't verify;
+/// `dante-core` does the matching ledger cross-check via
+/// [`Member::member_bindings`] right after a successful join. What's still
+/// open: once a member has joined, a commit that adds someone new isn't
+/// re-checked the same way — `members()` / [`Member::process`]'s sender
+/// extraction (`credential_identity`) only decode the identity from
+/// whatever's already in the tree, they do not re-verify the signature. So
+/// a *host* who controls their own already-established group can still add
+/// a leaf whose credential is self-consistent but names a ledger-invalid
+/// identity via an ordinary commit, and every *existing* member processing
+/// that commit will trust `members()`/`process()`'s attribution of it —
+/// this is not a regression (pre-this-type, credentials were equally
+/// unverified), but it is a real, currently-open gap. Closing it needs
+/// verifying newly-added leaves on every processed commit, which has not
+/// been built yet.
 ///
 /// The self-consistency property this type DOES give the adding side: proof
 /// that *some* real `idk` vouches for `(identity, this leaf's signature
@@ -153,18 +159,19 @@ impl DanteCredential {
 /// Extract just the identity bytes from a credential's serialized content,
 /// without re-verifying the binding signature.
 ///
-/// This trusts that whoever *added* this leaf already ran
-/// `key_package_identity`'s `decode_and_verify` — true for a leaf this
-/// client itself added (every `add()` call site in `dante-core` gates on
-/// it), but **not** verified for a leaf that arrived via `Pending::join`'s
-/// Welcome (no credential check happens there at all yet — see
-/// [`DANTE_CREDENTIAL_TYPE`]'s doc comment for the open gap this leaves).
-/// The ratchet tree does keep a credential/leaf-key pairing immutable for
-/// the life of the leaf once *accepted*, so re-verifying the signature on
-/// every message would be redundant *if* it was checked at acceptance —
-/// today that's only actually guaranteed for locally-initiated adds.
-/// Returns an empty `Vec` (matches nothing real) if the bytes aren't a
-/// decodable DanteCredential at all, rather than panicking.
+/// This trusts that whoever put this leaf in the tree already had its
+/// binding verified — true for a leaf this client itself added (every
+/// `add()` call site in `dante-core` gates on it) and for every leaf
+/// present when the group was joined (`Pending::join` refuses the whole
+/// Welcome otherwise), but **not** for a leaf added by a commit processed
+/// *after* joining (see [`DANTE_CREDENTIAL_TYPE`]'s doc comment for the
+/// open gap this leaves). The ratchet tree does keep a credential/leaf-key
+/// pairing immutable for the life of the leaf once *accepted*, so
+/// re-verifying the signature on every message would be redundant *if* it
+/// was checked at acceptance — today that's guaranteed for every leaf
+/// except one added by a later commit. Returns an empty `Vec` (matches
+/// nothing real) if the bytes aren't a decodable DanteCredential at all,
+/// rather than panicking.
 fn credential_identity(serialized_content: &[u8]) -> Vec<u8> {
     DanteCredential::decode(serialized_content)
         .map(|c| c.identity)
@@ -253,6 +260,34 @@ impl Pending {
             Ok(s) => s,
             Err(e) => return Err((Box::new(self), MlsError::Group(e.to_string()))),
         };
+
+        // Inspect the Welcome's ratchet tree *before* ever creating a live
+        // group from it: every leaf's credential must be a self-consistent
+        // DanteCredential binding, checked against that exact leaf's own MLS
+        // signature key. `StagedWelcome::members()` exposes this without
+        // needing `into_group()` first, so a Welcome carrying even one
+        // leaf with no valid binding (or a legacy `BasicCredential`) is
+        // refused outright — no live `MlsGroup` is ever built from it, let
+        // alone joined. This only proves self-consistency, not that each
+        // `idk_pub` is the ledger's real current key for its identity;
+        // `dante-core` does that check on top via `member_bindings` once
+        // joined, the same layering used for adding members ourselves.
+        for m in staged.members() {
+            if DanteCredential::decode_and_verify(
+                m.credential.serialized_content(),
+                &m.signature_key,
+            )
+            .is_none()
+            {
+                return Err((
+                    Box::new(self),
+                    MlsError::Unexpected(
+                        "a member in this Welcome's ratchet tree has no valid DaNTe credential binding",
+                    ),
+                ));
+            }
+        }
+
         let group = match staged.into_group(&self.provider) {
             Ok(g) => g,
             Err(e) => return Err((Box::new(self), MlsError::Group(e.to_string()))),
@@ -515,6 +550,34 @@ impl Member {
                     m.index.u32(),
                     credential_identity(m.credential.serialized_content()),
                 )
+            })
+            .collect()
+    }
+
+    /// `(leaf index, identity, idk_pub)` for every current member whose
+    /// credential is a self-consistent DanteCredential — checked (again;
+    /// see the doc comment on [`Pending::join`]) against that exact leaf's
+    /// own MLS signature key. A member with no valid binding is silently
+    /// omitted rather than erroring, since after a fresh join every leaf is
+    /// already known-valid (`Pending::join` refuses the whole Welcome
+    /// otherwise) and the only way to reach one here is a leaf added by a
+    /// *later* commit — not yet gated the same way (see
+    /// [`DANTE_CREDENTIAL_TYPE`]'s doc comment).
+    ///
+    /// Callers with ledger access (`dante-core`) should check every
+    /// returned `idk_pub` against the ledger's current key for that
+    /// identity before trusting a freshly-joined group's roster —
+    /// self-consistency alone doesn't prove that; it's the same second
+    /// layer `key_package_binds_to` already applies when *we* add someone.
+    pub fn member_bindings(&self) -> Vec<(u32, Vec<u8>, [u8; 32])> {
+        self.group
+            .members()
+            .filter_map(|m| {
+                DanteCredential::decode_and_verify(
+                    m.credential.serialized_content(),
+                    &m.signature_key,
+                )
+                .map(|c| (m.index.u32(), c.identity, c.idk_pub))
             })
             .collect()
     }

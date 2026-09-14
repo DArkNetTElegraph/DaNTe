@@ -316,22 +316,29 @@ impl<S: RecordStore> Ledger<S> {
     /// [`IdentityId`] bytes are `identity_id` — i.e. resolve a fingerprint to a
     /// usable key. `None` if unknown or evaporated/revoked — which of those it
     /// was isn't distinguishable from this alone; see
-    /// [`has_any_entry_for_id`](Self::has_any_entry_for_id) for that.
+    /// [`chain_usable_for_id`](Self::chain_usable_for_id) for that. Note this
+    /// is the chain's *current tip* — a credential minted before this
+    /// identity's most recent [`KeyRotation`](dante_identity::records::KeyRotation)
+    /// embeds an older, still-valid-for-that-identity key that will no
+    /// longer equal this. Checking whether some `idk` belongs to `identity_id`
+    /// at all (current or historical) needs [`identity_id`](Self::identity_id)
+    /// instead, resolved the other way around.
     pub fn idk_for_id(&self, identity_id: &[u8; 32]) -> Option<[u8; 32]> {
         let &chain_id = self.id_to_chain.get(identity_id)?;
         let c = &self.chains[chain_id];
         c.usable().then_some(c.tip_idk)
     }
 
-    /// Whether the ledger has a chain for `identity_id` at all, usable or
-    /// not — i.e. whether this identity is *known but currently unusable*
-    /// (evaporated or revoked) as opposed to genuinely never seen. Callers
-    /// that treat [`idk_for_id`](Self::idk_for_id)'s `None` as "give this
-    /// identity the benefit of the doubt, the ledger just hasn't caught up
-    /// yet" need this to rule out the other `None` case: a revoked or
-    /// evaporated identity should never get that benefit of the doubt.
-    pub fn has_any_entry_for_id(&self, identity_id: &[u8; 32]) -> bool {
-        self.id_to_chain.contains_key(identity_id)
+    /// Whether the chain for `identity_id` is currently usable (neither
+    /// evaporated nor revoked). `None` if the ledger has no chain for this
+    /// identity at all — genuinely never seen, as opposed to known but
+    /// currently unusable. Callers that treat some other lookup's `None` as
+    /// "give this identity the benefit of the doubt, the ledger just hasn't
+    /// caught up yet" need this to rule out the other `None` case: a revoked
+    /// or evaporated identity should never get that benefit of the doubt.
+    pub fn chain_usable_for_id(&self, identity_id: &[u8; 32]) -> Option<bool> {
+        let &chain_id = self.id_to_chain.get(identity_id)?;
+        Some(self.chains[chain_id].usable())
     }
 
     /// The current signing key (chain tip) for a live identity.

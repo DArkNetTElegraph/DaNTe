@@ -189,6 +189,102 @@ fn join_refuses_a_welcome_whose_ratchet_tree_has_any_invalid_leaf() {
     assert!(carol_pending.join(&welcome).is_err());
 }
 
+/// The join-time check above closes the Welcome side of the gap; this
+/// closes the other side. A member already in a group must also refuse a
+/// *later* Commit that tries to add someone with an invalid credential —
+/// not just accept it because it arrived after joining, when it's already
+/// trusting the group's ongoing membership changes.
+#[test]
+fn process_refuses_a_commit_that_adds_a_member_with_an_invalid_credential() {
+    let (alice_idk, bob_idk) = (idk(1), idk(2));
+    let mut alice = create_member(b"alice", &alice_idk, b"channel-1");
+    let (bob_pending, bob_kp) = publish_kp(b"bob", &bob_idk);
+    let hs = alice.add(&[bob_kp]).unwrap();
+    let mut bob = bob_pending
+        .join(&hs.welcome.unwrap())
+        .unwrap_or_else(|(_, e)| panic!("join: {e}"));
+
+    let provider = OpenMlsRustCrypto::default();
+    let evil_signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
+    evil_signer.store(provider.storage()).unwrap();
+    let other_signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
+    let forger_idk = idk(9);
+    let bad_cred = DanteCredential::new(
+        b"carol",
+        forger_idk.public().to_bytes(),
+        |m| forger_idk.sign(m),
+        &other_signer.to_public_vec(), // signed for a different leaf key
+    );
+    let evil_credential = CredentialWithKey {
+        credential: Credential::new(
+            CredentialType::Other(DANTE_CREDENTIAL_TYPE),
+            bad_cred.encode(),
+        ),
+        signature_key: evil_signer.to_public_vec().into(),
+    };
+    let evil_kp = KeyPackage::builder()
+        .leaf_node_capabilities(dante_capabilities())
+        .build(CIPHERSUITE, &provider, &evil_signer, evil_credential)
+        .unwrap();
+    let evil_kp_bytes = evil_kp.key_package().tls_serialize_detached().unwrap();
+
+    let hs2 = alice.add(&[KeyPkg(evil_kp_bytes)]).unwrap();
+    assert!(bob.process(&hs2.commit).is_err());
+}
+
+/// A commit's Update proposal is meant to be a member rotating their own
+/// leaf key -- MLS requires its sender be the leaf it updates. Nothing in
+/// the protocol itself stops the new credential from naming a *different*
+/// identity than the leaf held before, though: an attacker running their
+/// own client instead of `dante-mls` can build exactly that commit, self-
+/// consistent on its own (a real `idk` signed it) but hijacking an existing
+/// leaf's identity mid-group rather than legitimately rotating its key.
+/// Alice, processing that commit, must refuse it.
+#[test]
+fn process_refuses_a_commit_that_hijacks_a_members_identity_via_update() {
+    let (alice_idk, bob_idk) = (idk(1), idk(2));
+    let mut alice = create_member(b"alice", &alice_idk, b"channel-1");
+    let (bob_pending, bob_kp) = publish_kp(b"bob", &bob_idk);
+    let hs = alice.add(&[bob_kp]).unwrap();
+    let mut bob = bob_pending
+        .join(&hs.welcome.unwrap())
+        .unwrap_or_else(|(_, e)| panic!("join: {e}"));
+
+    let mallory_idk = idk(9);
+    let new_signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).unwrap();
+    let hijack_cred = DanteCredential::new(
+        b"mallory",
+        mallory_idk.public().to_bytes(),
+        |m| mallory_idk.sign(m),
+        &new_signer.to_public_vec(),
+    );
+    let credential_with_key = CredentialWithKey {
+        credential: Credential::new(
+            CredentialType::Other(DANTE_CREDENTIAL_TYPE),
+            hijack_cred.encode(),
+        ),
+        signature_key: new_signer.to_public_vec().into(),
+    };
+    let leaf_params = LeafNodeParameters::builder()
+        .with_credential_with_key(credential_with_key.clone())
+        .build();
+    let bundle = bob
+        .group
+        .self_update_with_new_signer(
+            &bob.provider,
+            &bob.signer,
+            NewSignerBundle {
+                signer: &new_signer,
+                credential_with_key,
+            },
+            leaf_params,
+        )
+        .unwrap();
+    let commit = bundle.commit().tls_serialize_detached().unwrap();
+
+    assert!(alice.process(&commit).is_err());
+}
+
 /// Add two members to a founder's group; everyone lands in the same epoch with
 /// the same group-call key, and it rotates when a member leaves.
 #[test]

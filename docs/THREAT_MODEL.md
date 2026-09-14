@@ -361,7 +361,7 @@ provide.
     verifies the embedded signature for self-consistency (does `idk_pub`
     really sign for this exact identity + this exact leaf key) before
     returning anything, and now returns `idk_pub` alongside the identity so
-    the engine can also check it against the ledger's current key for that
+    the engine can also check it against what the ledger knows about that
     identity — self-consistency alone only proves *some* real `idk` vouched
     for the credential, not that it's the *right* one; only the ledger says
     that. `dante-mls` has no ledger access, so that half stays in
@@ -412,28 +412,37 @@ provide.
     just its key, is refused — a host, or any member, disguising an identity
     takeover as a routine key rotation.
 
-    One more subtlety: the ledger check here (both this Add-proposal case
-    and at join) matches by chain *membership*, not by the ledger's current
-    tip key. A `DanteCredential` embeds whichever `idk_pub` was current when
-    its leaf was minted, and that leaf's binding is immutable for its whole
-    life — but the identity may rotate its `idk` afterward. Requiring tip
-    equality would refuse a perfectly legitimate, long-standing member the
+    One more subtlety, now resolved consistently everywhere a credential
+    is checked against the ledger — the Add-proposal case above, at join,
+    and every host-initiated add (`mls_add_member`, `start_group_call`, the
+    `GroupCallJoinRequest` admit path, via `key_package_binds_to`): the
+    check matches by chain *membership*, not by the ledger's current tip
+    key. A `DanteCredential` embeds whichever `idk_pub` was current when its
+    leaf was minted; an existing leaf's binding is then immutable for its
+    whole life, and even a freshly-fetched KeyPackage can sit unused in
+    `dante-core`'s own publish pool for a while before a host gets around to
+    adding it — either way, the identity may have rotated its `idk` since
+    that credential was signed. Requiring tip equality would refuse a
+    perfectly legitimate, long-standing member (or a delayed add) the
     moment they ever rotate; checking that the embedded `idk_pub` is *some*
-    key that has ever belonged to that identity's chain preserves the actual
-    property that matters — this is a real `idk`, linked to this identity,
-    not a forgery — without that brittleness. A revoked or evaporated
-    identity is refused regardless of chain membership.
+    key that has ever belonged to that identity's chain preserves the
+    actual property that matters — this is a real `idk`, linked to this
+    identity, not a forgery — without that brittleness. A revoked or
+    evaporated identity is refused regardless of chain membership.
 
-    The host-initiated adds this doesn't cover (`mls_add_member`,
-    `start_group_call`, the `GroupCallJoinRequest` admit path — anywhere
-    `key_package_binds_to` runs, fetching one specific peer's KeyPackage to
-    add them right now) deliberately keep strict tip equality instead: a
-    KeyPackage can sit in `dante-core`'s own unused-publish pool for a while
-    before it's fetched, so this has the same staleness-after-rotation
-    brittleness the Add-proposal case above fixes — accepted knowingly here,
-    not fixed, since loosening a check on an action initiated *right now*
-    trades away more than the immutable-existing-leaf cases above do for the
-    same benefit.
+    Whether an identity the ledger has *never heard of at all* still passes
+    on self-consistency alone differs by call site, deliberately: at join
+    and in the Add-proposal case, yes — both can pull in members from an
+    already-established group's existing roster that this client may never
+    have interacted with directly, so refusing outright would make joining
+    or processing commits for any group with an unfamiliar member
+    impossible. `key_package_binds_to`'s host-initiated adds refuse instead
+    — that path is reachable with a `peer_id` this client has never
+    interacted with *at all*, not merely one absent from a roster it
+    already trusts (an invite-link redemption calls `mls_add_member` with
+    the redeemer's identity straight from the DM that redeemed it, first
+    contact by construction), so there is no comparable pre-existing trust
+    to weigh against extending the same benefit of the doubt.
 
 ## 7. Cryptographic posture
 

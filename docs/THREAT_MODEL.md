@@ -372,9 +372,11 @@ provide.
     all is refused outright, not silently trusted as a legacy format, at
     every point the engine is about to add its holder to a group (`add()`
     on the founder/host side) — this is a wire-incompatible change to
-    every previously-minted credential, acceptable pre-1.0 per this
-    project's stated policy that wire formats change without notice until
-    1.0. **This verification is adder-side only.** Joining a group via a
+    every previously-minted credential (including persisted, exported
+    channel/group-call state, whose already-baked-in `BasicCredential`
+    leaves `credential_identity` can never decode as a `DanteCredential`),
+    acceptable pre-1.0 per this project's stated policy that wire formats
+    change without notice until 1.0. **This verification is adder-side only.** Joining a group via a
     Welcome (`Pending::join`) does not verify any leaf's credential in the
     ratchet tree it receives, and processing a group's messages
     (`members()`, `Member::process`) only decodes each sender's identity

@@ -221,6 +221,12 @@ const MAX_PREKEY_IDENTITIES: usize = 100_000;
 const MAX_KEYPKG_IDENTITIES: usize = 100_000;
 /// Cap on distinct channels the relay logs for.
 const MAX_CHANNELS: usize = 100_000;
+/// Cap on distinct channels the relay holds a roster for. A roster is set by
+/// a self-signed `server_root` with no allow-list — anyone can mint a
+/// keypair, pick an unused `channel_id`, and bind it — so without this cap
+/// `channel_rosters` would grow without bound the same way `channels` would
+/// without `MAX_CHANNELS`.
+const MAX_CHANNEL_ROSTERS: usize = 100_000;
 /// Largest membership list a single `SetChannelRoster` may carry.
 const MAX_CHANNEL_ROSTER_MEMBERS: usize = 50_000;
 /// Largest accepted single channel-log frame.
@@ -779,6 +785,8 @@ impl RelayState {
             if version <= *cur_version {
                 return Ok(false);
             }
+        } else if self.channel_rosters.len() >= MAX_CHANNEL_ROSTERS {
+            return Err("too many channel rosters");
         }
         let challenge = channel_roster_challenge(&channel_id, &server_root, version, &members);
         if SignPublic::from_bytes(&server_root)
@@ -1182,6 +1190,9 @@ impl RelayState {
             }
 
             Request::FetchSignals { topic } => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
                 let out = self
                     .signals
                     .get(&topic)
@@ -2110,9 +2121,15 @@ mod tests {
             }
         }
         assert_eq!(ok, cap as usize);
-        // ...the next same-instant read is refused.
+        // ...the next same-instant read is refused, on every read endpoint
+        // that shares this bucket — FetchSignals included (it used to have
+        // no rate limit at all, unlike every other read handler here).
         assert!(matches!(
             s.handle(Request::GetBlob([0u8; 32]), IP, 1_000),
+            Response::Error(_)
+        ));
+        assert!(matches!(
+            s.handle(Request::FetchSignals { topic: [0u8; 32] }, IP, 1_000),
             Response::Error(_)
         ));
     }
@@ -2302,6 +2319,48 @@ mod tests {
         // The real owner's genuinely-newer update still works.
         assert_eq!(
             s.handle(set_channel_roster(&owner, ch, 2, vec![]), IP, 0),
+            Response::Ok
+        );
+    }
+
+    /// `SetChannelRoster` binds a channel with only a *self-signed*
+    /// `server_root` — no allow-list, anyone can mint a keypair and pick an
+    /// unused `channel_id`. Without a cap, `channel_rosters` would grow
+    /// without bound the same way `channels` would without `MAX_CHANNELS`.
+    /// Populates the map directly (bypassing real signing) to reach the cap
+    /// cheaply, then confirms a genuinely new channel is refused while an
+    /// update to an already-bound one still isn't blocked by the cap.
+    #[test]
+    fn channel_roster_count_is_capped() {
+        let mut s = state();
+        let existing_owner = SignSecret::from_bytes(&[1u8; 32]);
+        let existing_root = existing_owner.public().to_bytes();
+        let mut existing = [0u8; 32];
+        for i in 0..MAX_CHANNEL_ROSTERS {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            if i == 0 {
+                existing = id;
+            }
+            s.channel_rosters
+                .insert(id, (existing_root, 0, Default::default()));
+        }
+
+        let owner = SignSecret::from_bytes(&[2u8; 32]);
+        let new_channel = [0xffu8; 32];
+        assert_eq!(
+            s.handle(set_channel_roster(&owner, new_channel, 1, vec![]), IP, 0),
+            Response::Error("too many channel rosters".into())
+        );
+
+        // An update to an already-bound channel isn't blocked by the cap —
+        // only a brand-new channel_id is.
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&existing_owner, existing, 1, vec![]),
+                IP,
+                0
+            ),
             Response::Ok
         );
     }

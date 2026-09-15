@@ -259,6 +259,12 @@ enum Command {
     Respond(u64, Vec<u8>),
     Provide(Vec<u8>, oneshot::Sender<Result<(), P2pError>>),
     GetProviders(Vec<u8>, oneshot::Sender<Result<Vec<PeerId>, P2pError>>),
+    /// Stop the driver task. Handled directly in `run`'s select loop rather
+    /// than `on_command`, since the driver also holds a `Command` sender of
+    /// its own (`cmd_self`, handed to inbound requests) — without an explicit
+    /// stop, `cmd_rx` never sees every sender drop and never closes on its
+    /// own.
+    Shutdown,
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -450,6 +456,13 @@ impl Node {
     pub async fn get_providers(&self, key: Vec<u8>) -> Result<Vec<PeerId>, P2pError> {
         self.call(|tx| Command::GetProviders(key, tx)).await?
     }
+
+    /// Stop this node's background driver task, so an operator can opt back
+    /// out of DHT participation without restarting the whole process.
+    /// Best-effort and idempotent: a no-op if the driver already exited.
+    pub async fn shutdown(&self) {
+        let _ = self.cmd.send(Command::Shutdown).await;
+    }
 }
 
 struct Driver {
@@ -499,6 +512,7 @@ impl Driver {
         loop {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => match cmd {
+                    Some(Command::Shutdown) => break,
                     Some(cmd) => self.on_command(cmd),
                     None => break, // every Node handle dropped
                 },
@@ -610,6 +624,8 @@ impl Driver {
                     .get_providers(kad::RecordKey::new(&key));
                 self.pending_providers.insert(id, (reply, HashSet::new()));
             }
+            // Intercepted in `run`'s select loop before it reaches here.
+            Command::Shutdown => unreachable!(),
         }
     }
 
@@ -977,5 +993,30 @@ mod tests {
             Some(&b"PING RELAY"[..]),
             "the relay request/response completed over libp2p"
         );
+    }
+
+    /// A node's driver task must actually stop on `shutdown()` — this is the
+    /// mechanism a live "opt out of DHT participation" toggle relies on
+    /// (dante-core's `Engine::disable_p2p`, dante-cli's `POST /api/p2p
+    /// {"on":false}`). Without an explicit stop, the driver's own `cmd_self`
+    /// sender keeps the channel open forever, so dropping every `Node` handle
+    /// alone is not enough (see the comment on `Command::Shutdown`).
+    #[tokio::test]
+    async fn shutdown_stops_the_driver_and_further_calls_fail() {
+        let (node, _rx, _in) = Node::spawn(&secret(9)).expect("spawn");
+        node.listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .expect("listen before shutdown");
+
+        node.shutdown().await;
+
+        // Give the driver task a beat to actually exit.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let err = node
+            .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .await
+            .expect_err("driver is gone, so a call after shutdown must fail");
+        assert!(matches!(err, P2pError::Gone));
     }
 }

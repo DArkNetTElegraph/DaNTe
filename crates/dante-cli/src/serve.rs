@@ -293,6 +293,11 @@ enum Cmd {
     },
     /// libp2p node status as a ready JSON object.
     P2pInfo { reply: oneshot::Sender<String> },
+    /// Turn on DHT participation (a no-op if already on): replies with the
+    /// same shape as `P2pInfo`.
+    EnableP2p { reply: oneshot::Sender<String> },
+    /// Turn off DHT participation (a no-op if already off).
+    DisableP2p { reply: oneshot::Sender<()> },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
     /// The DM pair's safety number + verification state as a ready JSON object.
@@ -1862,6 +1867,38 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
                 "{\"enabled\":false,\"built\":false}".to_string()
             };
             let _ = reply.send(body);
+        }
+        Cmd::EnableP2p { reply } => {
+            #[cfg(feature = "p2p")]
+            let body = {
+                if engine.p2p_peer_id().is_none() {
+                    if let Err(e) = engine.enable_p2p("/ip4/0.0.0.0/tcp/0", &[]).await {
+                        eprintln!("p2p enable failed: {e}");
+                    }
+                }
+                match engine.p2p_peer_id() {
+                    Some(pid) => serde_json::json!({
+                        "enabled": true,
+                        "peer_id": pid,
+                        "dial_addrs": engine.p2p_dial_addrs(),
+                    })
+                    .to_string(),
+                    None => "{\"enabled\":false}".to_string(),
+                }
+            };
+            #[cfg(not(feature = "p2p"))]
+            let body = {
+                let _ = &engine;
+                "{\"enabled\":false,\"built\":false}".to_string()
+            };
+            let _ = reply.send(body);
+        }
+        Cmd::DisableP2p { reply } => {
+            #[cfg(feature = "p2p")]
+            engine.disable_p2p().await;
+            #[cfg(not(feature = "p2p"))]
+            let _ = &engine;
+            let _ = reply.send(());
         }
         Cmd::CreateServer {
             name,
@@ -3623,6 +3660,39 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 .await
                 .unwrap_or_else(|_| "{\"enabled\":false}".to_string());
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        ("POST", "/api/p2p") => {
+            #[derive(serde::Deserialize)]
+            struct Req {
+                on: bool,
+            }
+            let Ok(r) = serde_json::from_slice::<Req>(&body) else {
+                return respond(&mut stream, 400, "text/plain", b"bad json").await;
+            };
+            if r.on {
+                let (tx, rx) = oneshot::channel();
+                if shared.cmd.send(Cmd::EnableP2p { reply: tx }).await.is_err() {
+                    return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+                }
+                let body = rx
+                    .await
+                    .unwrap_or_else(|_| "{\"enabled\":false}".to_string());
+                respond(&mut stream, 200, "application/json", body.as_bytes()).await
+            } else {
+                let (tx, rx) = oneshot::channel();
+                if shared.cmd.send(Cmd::DisableP2p { reply: tx }).await.is_err() {
+                    return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+                }
+                let _ = rx.await;
+                respond(
+                    &mut stream,
+                    200,
+                    "application/json",
+                    b"{\"enabled\":false}",
+                )
+                .await
+            }
         }
 
         ("POST", "/api/discover") => {

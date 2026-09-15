@@ -609,6 +609,8 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .set-toggle input { width: auto; margin: 0; }
 .set-sec.danger .set-h { color: var(--blazing-flame); }
 .danger-btn { border-color: var(--blazing-flame) !important; color: var(--blazing-flame) !important; }
+.ob-p2p-yes { background: var(--ok) !important; border-color: var(--ok) !important; color: #06301a !important; }
+.ob-p2p-yes:disabled { opacity: .6; }
 #search-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.5);
   display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
 .search-box { width: min(560px, 92vw); background: var(--bg-pane); border: 1px solid var(--divider);
@@ -5196,21 +5198,33 @@ function openSettings() {
       textContent: "Lets other people's clients connect through you too — no separate relay to run. Uses the address this client was started with (--relay-listen), or the default, if it wasn't given one.",
     }));
   }).catch(() => {});
-  const p2pLine = el("div", "set-mono");
-  p2pLine.textContent = "Peer-to-peer: …";
-  nwSec.appendChild(p2pLine);
-  api.get("/api/p2p").then(p => {
-    if (!p || !p.enabled) {
-      p2pLine.textContent = "Peer-to-peer: off"
-        + (p && p.built === false ? " (build with --features p2p to enable)" : "");
-      return;
-    }
-    p2pLine.textContent = "Peer-to-peer: on";
-    nwSec.appendChild(Object.assign(el("div", "set-mono"),
+  const p2pDetail = el("div");
+  const paintP2pDetail = p => {
+    p2pDetail.innerHTML = "";
+    if (!p || !p.enabled) return;
+    p2pDetail.appendChild(Object.assign(el("div", "set-mono"),
       { textContent: "  peer id: " + (p.peer_id || "?") }));
     for (const a of (p.dial_addrs || []))
-      nwSec.appendChild(Object.assign(el("div", "set-mono"), { textContent: "  " + a }));
-  }).catch(() => { p2pLine.textContent = "Peer-to-peer: off"; });
+      p2pDetail.appendChild(Object.assign(el("div", "set-mono"), { textContent: "  " + a }));
+  };
+  api.get("/api/p2p").then(p => {
+    if (p && p.built === false) {
+      nwSec.appendChild(Object.assign(el("div", "set-mono"),
+        { textContent: "Peer-to-peer: build with --features p2p to enable" }));
+      return;
+    }
+    const p2pToggle = settingToggle("Help route messages (DHT)", !!(p && p.enabled), on => {
+      api.post("/api/p2p", { on }).then(paintP2pDetail).catch(() => {});
+    });
+    nwSec.appendChild(p2pToggle);
+    nwSec.appendChild(Object.assign(el("div", "set-hint"), {
+      textContent: "On by default: this device also stores a small slice of the peer directory " +
+        "(prekeys, bootstrap addresses) and re-gossips new identity records for the network. Off " +
+        "still works fine — you fall back to the relay alone.",
+    }));
+    nwSec.appendChild(p2pDetail);
+    paintP2pDetail(p);
+  }).catch(() => {});
   box.appendChild(nwSec);
 
   // Danger zone
@@ -5475,11 +5489,66 @@ async function onboardSubmit(mode, fields) {
         '<button class="ghost" id="ob-copy">Copy</button></div>';
       $("#ob-blob").textContent = r.backup;
       $("#ob-copy").onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.backup);
-      $("#ob-done").onclick = () => location.reload();
+      $("#ob-done").onclick = renderOnboardP2pStep;
     } else {
       location.reload();
     }
   } catch (e) { obErr(e.message || "failed"); }
+}
+
+/* Shown once, right after a fresh identity is created (engine already
+   connected at this point — /api/onboard's "create" branch does that
+   synchronously). Both choices here are opt-in-friendly and skippable:
+   neither blocks finishing onboarding. */
+function renderOnboardP2pStep() {
+  const b = $("#ob-body");
+  b.innerHTML =
+    '<p>Two optional things that make DaNTe work better:</p>' +
+    '<div class="set-sec">' +
+    '<p><b>Help route messages (DHT)?</b> This device stores a small slice of the ' +
+    'peer directory (prekeys, bootstrap addresses) and re-gossips new identity ' +
+    'records — it runs alongside your relay connection, not instead of it, and ' +
+    'improves lookup speed and resilience for everyone. On by default; you can ' +
+    'turn it off anytime in Settings → Network.</p>' +
+    '<div class="row">' +
+    '<button id="ob-p2p-yes" class="ob-p2p-yes">Yes, help route messages</button>' +
+    '<button class="ghost" id="ob-p2p-no">No thanks</button>' +
+    '</div></div>' +
+    '<div class="set-sec">' +
+    '<p><b>Microphone access.</b> Needed for voice calls. Not required to finish ' +
+    'setup — you can grant it later, the first time you join a call.</p>' +
+    '<div class="row">' +
+    '<button id="ob-mic-yes">Enable microphone</button>' +
+    '<button class="ghost" id="ob-mic-skip">Skip</button>' +
+    '</div><div id="ob-mic-msg" class="set-hint"></div></div>' +
+    '<div class="row" style="margin-top:8px"><button id="ob-p2p-continue">Continue</button></div>';
+
+  const setP2pChoice = on => {
+    LS.set("p2p_optin", on);
+    api.post("/api/p2p", { on }).catch(() => {});
+    $("#ob-p2p-yes").disabled = on;
+    $("#ob-p2p-no").disabled = !on;
+  };
+  $("#ob-p2p-yes").onclick = () => setP2pChoice(true);
+  $("#ob-p2p-no").onclick = () => setP2pChoice(false);
+  // Default: on, matching the also-relay opt-out pattern.
+  setP2pChoice(true);
+
+  $("#ob-mic-yes").onclick = async () => {
+    const msg = $("#ob-mic-msg");
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("no microphone API in this context");
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(t => t.stop());
+      msg.textContent = "Microphone access granted.";
+    } catch (e) {
+      msg.textContent = "Couldn't get microphone access (" + (e.message || e) + ") — you can retry from a call later.";
+    }
+  };
+  $("#ob-mic-skip").onclick = () => { $("#ob-mic-msg").textContent = "Skipped — you'll be asked again on your first call."; };
+  $("#ob-p2p-continue").onclick = () => location.reload();
 }
 
 function renderOnboard(state) {
@@ -5571,6 +5640,10 @@ async function init() {
   if (store.embedsOn) api.post("/api/embeds", { on: true }).catch(() => {});
   // Same re-assert for GIF search: the server defaults it off every restart.
   if (store.gifsearchAvailable && store.gifsearchOn) api.gifSearchToggle(true).catch(() => {});
+  // Same re-assert for DHT participation: on by default (opt-out, chosen at
+  // onboarding or in Settings → Network), and the server defaults it off
+  // every restart since it isn't persisted boot-side yet.
+  if (LS.get("p2p_optin", true)) api.post("/api/p2p", { on: true }).catch(() => {});
 
   poll();
   openStream();

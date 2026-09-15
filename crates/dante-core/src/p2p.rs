@@ -198,6 +198,12 @@ impl P2p {
         self.node.peer_id().to_string()
     }
 
+    /// Stop the background libp2p driver task. Called when the engine drops
+    /// this `P2p` (e.g. the user opts back out of DHT participation).
+    pub(crate) async fn shutdown(&self) {
+        self.node.shutdown().await;
+    }
+
     /// Full dialable multiaddrs, each ending `/p2p/<peer-id>` — what another
     /// node passes as `bootstrap`.
     pub(crate) fn dial_addrs(&self) -> Vec<String> {

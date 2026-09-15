@@ -113,6 +113,16 @@ impl IcePolicy {
 }
 
 /// Everything a relay mutates.
+/// A point-in-time snapshot of a relay's own load. See [`RelayState::stats`].
+#[derive(Debug, Clone, Copy)]
+pub struct RelayStats {
+    pub identities: usize,
+    pub channels: usize,
+    pub mailbox_entries: usize,
+    pub blob_bytes: usize,
+    pub channel_bytes: usize,
+}
+
 pub struct RelayState {
     ledger: Ledger<MemoryStore>,
     mailbox: Mailbox,
@@ -680,6 +690,36 @@ impl RelayState {
             .into_iter()
             .filter(|a| !a.is_empty() && a.len() <= MAX_P2P_ADDR_LEN)
             .collect();
+    }
+
+    /// Operator-seeded (`--p2p-bootstrap`) plus recently-self-reported
+    /// federation neighbors, in the same order and TTL/cap rules
+    /// `Request::GetP2pPeers` answers with — shared by the wire handler and
+    /// the operator console so they can't drift apart.
+    pub fn known_p2p_peers(&self, now: u64) -> Vec<String> {
+        let mut out = self.p2p_seed.clone();
+        for (addr, ts) in self.p2p_reported.iter().rev() {
+            if out.len() >= MAX_P2P_PEERS_REPLY {
+                break;
+            }
+            if now.saturating_sub(*ts) <= P2P_REPORTED_TTL_MS && !out.contains(addr) {
+                out.push(addr.clone());
+            }
+        }
+        out
+    }
+
+    /// A snapshot of this relay's own load — for an operator console, not the
+    /// wire protocol (nothing here is client-requestable; it would leak
+    /// aggregate size information about who's using the relay).
+    pub fn stats(&self) -> RelayStats {
+        RelayStats {
+            identities: self.ledger.len(),
+            channels: self.channels.len(),
+            mailbox_entries: self.mailbox.len(),
+            blob_bytes: self.blob_bytes,
+            channel_bytes: self.channel_bytes,
+        }
     }
 
     /// Periodic housekeeping: expire mailbox entries, evaporate stale
@@ -1274,18 +1314,7 @@ impl RelayState {
                 Response::Ok
             }
 
-            Request::GetP2pPeers => {
-                let mut out = self.p2p_seed.clone();
-                for (addr, ts) in self.p2p_reported.iter().rev() {
-                    if out.len() >= MAX_P2P_PEERS_REPLY {
-                        break;
-                    }
-                    if now.saturating_sub(*ts) <= P2P_REPORTED_TTL_MS && !out.contains(addr) {
-                        out.push(addr.clone());
-                    }
-                }
-                Response::P2pPeers(out)
-            }
+            Request::GetP2pPeers => Response::P2pPeers(self.known_p2p_peers(now)),
 
             // SFU signalling is intercepted by `RelayHandler` before the state
             // sees it. Reaching here means this relay was built without the

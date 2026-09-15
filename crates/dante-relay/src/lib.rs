@@ -11,6 +11,7 @@
 //! The `dante-relay` binary wraps [`state::RelayHandler`] and adds argument
 //! parsing, the maintenance loop, and the federation event loop.
 
+pub mod console;
 pub mod run;
 #[cfg(feature = "sfu")]
 pub mod sfu;

@@ -9,7 +9,6 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dante_ledger::LedgerParams;
-use dante_net::transport::serve;
 use tokio::net::TcpListener;
 
 use crate::state::{now_ms, IcePolicy, Limits, RelayHandler, RelayState};
@@ -176,6 +175,7 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
     }
     #[cfg(feature = "p2p")]
     let p2p_bootstrap = cfg.p2p_bootstrap.clone();
+    let console_p2p_bootstrap = cfg.p2p_bootstrap.clone();
     if !cfg.p2p_bootstrap.is_empty() {
         tracing::info!(
             count = cfg.p2p_bootstrap.len(),
@@ -210,6 +210,32 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
         .with_context(|| format!("binding {}", cfg.listen))?;
     tracing::info!(listen = %cfg.listen, "relay listening");
 
+    let conn_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Live "dial this peer" requests from the operator console to the p2p
+    // task. Bounded and small: this is a human typing addresses, not a
+    // throughput path.
+    let (dial_tx, dial_rx) = tokio::sync::mpsc::channel::<String>(8);
+
+    #[cfg(feature = "p2p")]
+    let p2p_enabled = cfg.p2p_listen.is_some();
+    #[cfg(not(feature = "p2p"))]
+    let p2p_enabled = false;
+
+    let console_task = {
+        let handler = Arc::clone(&handler);
+        crate::console::run(
+            handler,
+            crate::console::Console {
+                started_at: std::time::Instant::now(),
+                conn_count: Arc::clone(&conn_count),
+                listen: cfg.listen.clone(),
+                p2p_enabled,
+                p2p_bootstrap: console_p2p_bootstrap,
+                p2p_dial_tx: p2p_enabled.then_some(dial_tx),
+            },
+        )
+    };
+
     #[cfg(feature = "p2p")]
     let p2p_task = {
         let handler = Arc::clone(&handler);
@@ -222,16 +248,22 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
                 Some(hex) => parse_seed(hex).context("--p2p-seed must be 64 hex chars")?,
                 None => dante_crypto::random_array::<32>(),
             };
-            serve_p2p(handler, &addr, seed, &boot).await
+            serve_p2p(handler, &addr, seed, &boot, dial_rx).await
         }
     };
     #[cfg(not(feature = "p2p"))]
-    let p2p_task = std::future::pending::<anyhow::Result<()>>();
+    let p2p_task = {
+        // Nothing consumes dial requests without the p2p task around to dial
+        // them; drop the receiver explicitly rather than leave it unused.
+        drop(dial_rx);
+        std::future::pending::<anyhow::Result<()>>()
+    };
 
     tokio::select! {
-        r = serve(listener, handler) => { r?; }
+        r = dante_net::transport::serve_with_conn_count(listener, handler, conn_count) => { r?; }
         r = p2p_task => { r?; }
         _ = maintenance => {}
+        _ = console_task => {}
     }
     Ok(())
 }
@@ -244,6 +276,7 @@ async fn serve_p2p(
     listen: &str,
     seed: [u8; 32],
     bootstrap: &[String],
+    mut dial_rx: tokio::sync::mpsc::Receiver<String>,
 ) -> anyhow::Result<()> {
     use dante_net::transport::RequestHandler;
     use dante_net::wire::{Request, Response};
@@ -491,6 +524,17 @@ async fn serve_p2p(
                     };
                     req.respond(resp.encode()).await;
                 });
+            }
+            // A live "/peer add <multiaddr>" from the operator console.
+            // `None` means every `Console` handle was dropped, which only
+            // happens if the console task itself ended — nothing to do but
+            // stop selecting on a channel that will never produce again.
+            addr = dial_rx.recv() => {
+                let Some(addr) = addr else { continue; };
+                match node.dial_str(&addr).await {
+                    Ok(()) => tracing::info!(%addr, "console: dialed a new federation neighbor"),
+                    Err(e) => tracing::warn!(%addr, error = %e, "console: dial failed"),
+                }
             }
         }
     }

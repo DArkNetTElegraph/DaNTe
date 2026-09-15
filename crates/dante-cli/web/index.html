@@ -655,6 +655,12 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 .date-divider::before, .date-divider::after { content: ""; flex: 1; height: 1px; background: var(--divider); }
 .date-divider span { font-size: 11px; font-weight: 700; letter-spacing: .02em; color: var(--text-faint);
   text-transform: uppercase; }
+/* ---- "N new messages" divider: where you left off in this target ---- */
+.unread-divider { display: flex; align-items: center; gap: 10px; margin: 16px 6px 8px; cursor: pointer; }
+.unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px; background: var(--accent); opacity: .45; }
+.unread-divider span { font-size: 11px; font-weight: 700; letter-spacing: .03em; color: var(--accent);
+  text-transform: uppercase; white-space: nowrap; }
+.unread-divider:hover span { text-decoration: underline; }
 /* ---- mute / deafen in the user panel ---- */
 .vc-btn.on { color: #e0555c; }
 #me-deafen.on { position: relative; }
@@ -1304,6 +1310,14 @@ const store = {
   messages: [],                       // flat inbox, each tagged with _target
   seen: 0,
   unread: new Map(),                  // target -> count of unseen messages
+  // How many of `msgsFor(target)` had already been seen last time this
+  // target was open — persisted, so "N new messages" survives a reload.
+  // Purely local: no server-side sequence number involved, so it works the
+  // same way for DMs and channels alike.
+  lastSeenCount: LS.get("lastSeenCount", {}),
+  // target -> index into msgsFor(target) where the unread divider goes, for
+  // *this* viewing session only (not persisted — cleared once you leave).
+  unreadDividerAt: {},
   mentions: new Set(),               // targets where I was @-mentioned
   invites: [],                       // [{channel,channel_name,server_name}] pending
   notices: [],                       // [{tag,text,scope,at}] standalone notices
@@ -1568,10 +1582,19 @@ const isDM      = () => store.view.server === "@dm";
 const curTarget = () => store.view.target;
 
 function selectTarget(server, target) {
+  const prev = store.view.target;
+  if (prev && prev !== target) delete store.unreadDividerAt[prev];
   store.view = { server, target };
   LS.set("view", store.view);
   store.unread.delete(target);
   store.mentions.delete(target);
+  if (target) {
+    const msgs = store.msgsFor(target);
+    const seenBefore = store.lastSeenCount[target] || 0;
+    if (msgs.length > seenBefore) store.unreadDividerAt[target] = seenBefore;
+    store.lastSeenCount[target] = msgs.length;
+    LS.set("lastSeenCount", store.lastSeenCount);
+  }
   render();
   const box = $("#text");
   box.disabled = !target; $("#send").disabled = !target;
@@ -1903,6 +1926,9 @@ function dayLabel(ts) {
   if (dayKey(ts) === dayKey(now - 86400000)) return "Yesterday";
   return new Date(ts).toLocaleDateString([], { year: "numeric", month: "long", day: "numeric" });
 }
+function timeLabel(ts) {
+  return ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+}
 
 let msgPaintTs = 0;
 function renderChat() {
@@ -2050,6 +2076,14 @@ function renderChat() {
   }
 
   const msgs = store.msgsFor(target);
+  // Messages that arrive while this target is already open are being read
+  // live — advance the persisted seen-count past them so they don't come
+  // back as "new" the next time you switch away and back. The divider's own
+  // position (captured once, at switch-in) is untouched by this.
+  if (msgs.length !== store.lastSeenCount[target]) {
+    store.lastSeenCount[target] = msgs.length;
+    LS.set("lastSeenCount", store.lastSeenCount);
+  }
   // Preserve the reader's scroll: the log is rebuilt on every poll/render, and
   // it used to snap to the bottom each time — yanking you down while you were
   // reading history. Only auto-scroll if you were already near the bottom, or
@@ -2068,7 +2102,11 @@ function renderChat() {
   let lastAuthor = null;
   let lastDay = null;
   const freshCut = msgPaintTs;   // groups newer than the last paint slide in
+  const divAt = store.unreadDividerAt[target];
+  let unreadDividerEl = null;
+  let msgIdx = -1;
   for (const m of msgs) {
+    msgIdx++;
     // Discord-style day separator when the calendar day changes.
     if (m._at) {
       const dk = dayKey(m._at);
@@ -2079,6 +2117,17 @@ function renderChat() {
         lastDay = dk;
         lastAuthor = null;   // re-show the author line after a divider
       }
+    }
+    if (msgIdx === divAt) {
+      const n = msgs.length - divAt;
+      const div = el("div", "unread-divider");
+      const label = el("span", null,
+        "↓ " + n + " new message" + (n === 1 ? "" : "s") + " since " + timeLabel(m._at) + " ↓");
+      div.appendChild(label);
+      div.onclick = () => div.scrollIntoView({ behavior: "smooth", block: "center" });
+      log.appendChild(div);
+      unreadDividerEl = div;
+      lastAuthor = null;   // re-show the author line after a divider
     }
     if (m.kind === "file") {
       const g = groupShell(m, m.from === lastAuthor);
@@ -2149,8 +2198,14 @@ function renderChat() {
     log.appendChild(g.node);
     lastAuthor = m.from;
   }
-  // Stick to the bottom only when appropriate; otherwise hold the reader's spot.
-  log.scrollTop = nearBottom ? log.scrollHeight : keepScroll;
+  // Stick to the bottom only when appropriate; otherwise hold the reader's
+  // spot. Switching into a target with unread messages is the one exception:
+  // land on the divider (where you left off), not the very bottom.
+  if (switched && unreadDividerEl) {
+    unreadDividerEl.scrollIntoView({ block: "center" });
+  } else {
+    log.scrollTop = nearBottom ? log.scrollHeight : keepScroll;
+  }
   msgPaintTs = Date.now();
   renderCallbar();
   renderReplyBar();

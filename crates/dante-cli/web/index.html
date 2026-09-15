@@ -4131,52 +4131,69 @@ function bpRenderSteps(step, error) {
 }
 
 async function bpPoll() {
-  let status;
-  try { status = await api.get("/api/boot"); } catch (_) { return; }
-  const bar = $("#boot-progress");
-  if (!status || status.step === "ready") {
-    if (!bar.hidden) {
-      $("#bp-spinner").className = "bp-spinner done";
-      $("#bp-headline").textContent = "You're fully registered with the network.";
-      $("#bp-elapsed").textContent = "";
-      setTimeout(() => { bar.hidden = true; }, 2200);
+  // The whole body used to be unguarded past the initial fetch -- any
+  // exception in the DOM/render code below (a bad field, a missing
+  // element) would throw as an unhandled rejection with zero visible
+  // trace, silently freezing whatever the banner last showed with no way
+  // to tell "the counter stopped" from "the page crashed quietly". Every
+  // failure now reaches the console, and the interval only ever stops on
+  // a genuine, confirmed "ready" -- never as a side effect of an error.
+  try {
+    const status = await api.get("/api/boot");
+    const bar = $("#boot-progress");
+    if (!status || typeof status !== "object") {
+      console.error("boot progress: /api/boot returned", status);
+      return;
     }
-    clearInterval(bpTimer);
-    return;
-  }
-  bar.hidden = false;
-  const elapsed = Date.now() - Number(status.since_ms || Date.now());
-  $("#bp-elapsed").textContent = bpFmtElapsed(elapsed);
-  bpRenderSteps(status.step, status.error);
+    if (status.step === "ready") {
+      if (!bar.hidden) {
+        $("#bp-spinner").className = "bp-spinner done";
+        $("#bp-headline").textContent = "You're fully registered with the network.";
+        $("#bp-elapsed").textContent = "";
+        setTimeout(() => { bar.hidden = true; }, 2200);
+      }
+      clearInterval(bpTimer);
+      return;
+    }
+    bar.hidden = false;
+    const elapsed = Date.now() - Number(status.since_ms || Date.now());
+    $("#bp-elapsed").textContent = bpFmtElapsed(elapsed);
+    bpRenderSteps(status.step, status.error);
 
-  if (status.step === "failed") {
-    $("#bp-spinner").className = "bp-spinner failed";
-    $("#bp-headline").textContent = "Startup hit a snag (" + (status.error || "unknown error")
-      + ") -- retrying in the background.";
-    $("#bp-copy").textContent = "";
-    return;
-  }
-  $("#bp-spinner").className = "bp-spinner";
+    if (status.step === "failed") {
+      $("#bp-spinner").className = "bp-spinner failed";
+      $("#bp-headline").textContent = "Startup hit a snag (" + (status.error || "unknown error")
+        + ") -- retrying in the background.";
+      $("#bp-copy").textContent = "";
+      return;
+    }
+    $("#bp-spinner").className = "bp-spinner";
 
-  if (status.step === "announcing") {
-    const bits = status.pow_bits || 20;
-    const tried = Number(status.attempts) || 0;
-    $("#bp-headline").textContent = "Registering with the network -- proof of work in progress"
-      + (tried ? " (" + tried.toLocaleString() + " nonces tried)" : "") + "...";
-    $("#bp-copy").textContent =
-      "This is an Argon2 memory-hard puzzle (" + bits + "-bit target), and it's deliberately expensive -- " +
-      "that's what keeps spinning up fake identities costly. Depending on the relay's difficulty and your " +
-      "hardware this can take anywhere from a couple of minutes to several hours. It's fully automatic and " +
-      "running in the background; you can keep using DaNTe locally while it works. Registration process is " +
-      "automatic and will take a while -- go grab a snack, get a coffee, or hop into a match of League. " +
-      "We'll still be here when you get back.";
-  } else {
-    $("#bp-headline").textContent = ({
-      connecting: "Connecting to the relay...",
-      publishing_prekeys: "Publishing your prekeys...",
-      syncing: "Syncing...",
-    })[status.step] || "Starting up...";
-    $("#bp-copy").textContent = "";
+    if (status.step === "announcing") {
+      const bits = status.pow_bits || 20;
+      const tried = Number(status.attempts) || 0;
+      $("#bp-headline").textContent = "Registering with the network -- proof of work in progress"
+        + (tried ? " (" + tried.toLocaleString() + " nonces tried)" : "") + "...";
+      $("#bp-copy").textContent =
+        "This is an Argon2 memory-hard puzzle (" + bits + "-bit target), and it's deliberately expensive -- " +
+        "that's what keeps spinning up fake identities costly. Depending on the relay's difficulty and your " +
+        "hardware this can take anywhere from a couple of minutes to several hours. It's fully automatic and " +
+        "running in the background; you can keep using DaNTe locally while it works. Registration process is " +
+        "automatic and will take a while -- go grab a snack, get a coffee, or hop into a match of League. " +
+        "We'll still be here when you get back.";
+    } else {
+      $("#bp-headline").textContent = ({
+        connecting: "Connecting to the relay...",
+        publishing_prekeys: "Publishing your prekeys...",
+        syncing: "Syncing...",
+      })[status.step] || "Starting up...";
+      $("#bp-copy").textContent = "";
+    }
+  } catch (e) {
+    // A transient fetch failure or a render bug: log it, but never let it
+    // silently kill future polls -- setInterval keeps calling this every
+    // second regardless, so the very next tick gets another chance.
+    console.error("boot progress poll failed:", e);
   }
 }
 

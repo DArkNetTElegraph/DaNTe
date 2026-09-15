@@ -1,9 +1,18 @@
 {
-  "checked_at_unix_ms": 1789493407924,
-  "online_count": 0,
-  "total_count": 0,
-  "dedicated_count": 0,
+  "checked_at_unix_ms": 1789493454125,
+  "online_count": 1,
+  "total_count": 1,
+  "dedicated_count": 1,
   "user_count": 0,
   "federated_count": 0,
-  "relays": []
+  "relays": [
+    {
+      "name": "darknettelegraph-official",
+      "addr": "158.180.41.193:9944",
+      "online": true,
+      "latency_ms": 237,
+      "discovered_via": null,
+      "kind": "dedicated"
+    }
+  ]
 }

@@ -3681,17 +3681,16 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 respond(&mut stream, 200, "application/json", body.as_bytes()).await
             } else {
                 let (tx, rx) = oneshot::channel();
-                if shared.cmd.send(Cmd::DisableP2p { reply: tx }).await.is_err() {
+                if shared
+                    .cmd
+                    .send(Cmd::DisableP2p { reply: tx })
+                    .await
+                    .is_err()
+                {
                     return respond(&mut stream, 500, "text/plain", b"engine gone").await;
                 }
                 let _ = rx.await;
-                respond(
-                    &mut stream,
-                    200,
-                    "application/json",
-                    b"{\"enabled\":false}",
-                )
-                .await
+                respond(&mut stream, 200, "application/json", b"{\"enabled\":false}").await
             }
         }
 

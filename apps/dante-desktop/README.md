@@ -98,6 +98,20 @@ Configuration is read from the environment (same names as `dante serve`):
 You need a relay reachable at `DANTE_RELAY` — run one with
 `cargo run -p dante-relay -- --listen 127.0.0.1:9944` from the repo root.
 
+**Linux + Wayland:** if the window never opens and you see `GTK-CRITICAL:
+gtk_widget_get_scale_factor: assertion 'GTK_IS_WIDGET (widget)' failed`
+followed by `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland
+display`, that's a known WebKitGTK bug in its native Wayland backend, not
+something in DaNTe's own code. Force GTK's X11 backend instead (via
+XWayland, present on effectively every Wayland session):
+
+```sh
+GDK_BACKEND=x11 cargo tauri dev
+```
+
+`scripts/setup-linux.sh --desktop` does this automatically when it detects
+a Wayland session.
+
 Group calls use the peer-to-peer mesh. The relay-hosted SFU offered by
 `dante serve --sfu` is deliberately not available here: the native audio
 bridge has no SFrame layer, so the relay would receive plaintext Opus. See

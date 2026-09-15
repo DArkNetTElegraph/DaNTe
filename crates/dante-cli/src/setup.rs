@@ -226,13 +226,17 @@ async fn install_service() {
         return;
     }
 
-    let Some(relay) = read_line("Relay address to connect to (host:port): ") else {
+    let Some(relay) = read_line(
+        "Relay address to connect to (host:port, or leave blank for the public directory's \
+         fastest relay -- 'auto'): ",
+    ) else {
         return;
     };
-    if relay.is_empty() {
-        println!("(nothing entered)");
-        return;
-    }
+    let relay = if relay.is_empty() {
+        "auto".to_string()
+    } else {
+        relay
+    };
     let http = read_line("Local HTTP bind [127.0.0.1:8080]: ").unwrap_or_default();
     let http = if http.is_empty() {
         "127.0.0.1:8080".to_string()

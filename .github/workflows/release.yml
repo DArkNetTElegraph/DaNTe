@@ -111,7 +111,15 @@ jobs:
 
       - name: System libraries (macOS)
         if: runner.os == 'macOS'
-        run: brew install pkg-config opus
+        run: brew install pkg-config
+
+      # A universal build lipo's together two independently-built binaries
+      # (aarch64 + x86_64), so both targets' standard libraries need to be
+      # installed before either `cargo build` pass below can run — see
+      # `cargo tauri build`'s own `--target universal-apple-darwin` docs.
+      - name: Install both macOS targets for a universal build
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -140,13 +148,49 @@ jobs:
       # also emit a `.sig` file next to each updater-format artifact
       # (`.app.tar.gz` on macOS, `.AppImage.tar.gz` on Linux, the NSIS
       # installer `.exe` under `nsis-updater/` on Windows).
+      # macOS builds universal (both Apple Silicon and Intel in one binary)
+      # so every Mac gets offered the same update regardless of which arch
+      # it's running — a separate step because it needs its own extra env
+      # var, not because the command itself couldn't be conditional inline.
+      - name: Build the bundle (macOS universal)
+        if: runner.os == 'macOS'
+        working-directory: apps/dante-desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # `--target universal-apple-darwin` builds aarch64 and x86_64
+          # separately, then `lipo`'s them together. audiopus_sys defaults
+          # to `pkg-config` first on unix, but Homebrew's opus is
+          # single-arch (whichever this runner natively is) — pkg-config
+          # would happily hand back that single-arch dylib to link into
+          # *both* passes, silently corrupting whichever half doesn't match
+          # the runner's own arch. This env var (audiopus_sys's own escape
+          # hatch) skips straight to its vendored CMake build instead,
+          # which correctly targets whatever `cargo build --target <triple>`
+          # is actually building for — the same vendored path Windows
+          # already goes through via the CMAKE_POLICY_VERSION_MINIMUM
+          # workaround above, just forced here rather than pkg-config
+          # failing to find opus on its own.
+          LIBOPUS_NO_PKG: "1"
+        run: cargo tauri build --target universal-apple-darwin
+
       - name: Build the bundle
+        if: runner.os != 'macOS'
         working-directory: apps/dante-desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build
 
+      # A universal macOS build's output lands under
+      # target/universal-apple-darwin/release/bundle/ instead of the usual
+      # target/release/bundle/ (cargo/Tauri's normal cross-compile-target
+      # convention, applied here since `--target universal-apple-darwin`
+      # is itself a target as far as the CLI's own output-path logic is
+      # concerned) — both roots are listed unconditionally rather than
+      # made per-OS: on Linux/Windows the universal-only path simply never
+      # matches anything, same as `if-no-files-found: warn` already
+      # tolerates elsewhere in this file.
       - name: Upload the run's artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -163,6 +207,9 @@ jobs:
             apps/dante-desktop/target/release/bundle/**/*.AppImage
             apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz
             apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz.sig
+            apps/dante-desktop/target/universal-apple-darwin/release/bundle/**/*.dmg
+            apps/dante-desktop/target/universal-apple-darwin/release/bundle/**/*.app.tar.gz
+            apps/dante-desktop/target/universal-apple-darwin/release/bundle/**/*.app.tar.gz.sig
           if-no-files-found: warn
 
       - name: Attach the bundle to the GitHub release
@@ -178,7 +225,9 @@ jobs:
                  apps/dante-desktop/target/release/bundle/**/*.deb
                  apps/dante-desktop/target/release/bundle/**/*.rpm
                  apps/dante-desktop/target/release/bundle/**/*.AppImage
-                 apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz)
+                 apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz
+                 apps/dante-desktop/target/universal-apple-darwin/release/bundle/**/*.dmg
+                 apps/dante-desktop/target/universal-apple-darwin/release/bundle/**/*.app.tar.gz)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "no desktop bundle files were produced for ${{ matrix.os }}" >&2
             exit 1
@@ -204,7 +253,11 @@ jobs:
           shopt -s nullglob globstar
           case "${{ runner.os }}" in
             Linux) pattern="apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz" ;;
-            macOS) pattern="apps/dante-desktop/target/release/bundle/**/*.app.tar.gz" ;;
+            # A universal build (--target universal-apple-darwin) lands
+            # under target/universal-apple-darwin/release/, not the usual
+            # target/release/ — see the comment on "Upload the run's
+            # artifacts" above for why.
+            macOS) pattern="apps/dante-desktop/target/universal-apple-darwin/release/bundle/**/*.app.tar.gz" ;;
             Windows) pattern="apps/dante-desktop/target/release/bundle/nsis-updater/*.exe" ;;
             *) echo "unknown runner.os: ${{ runner.os }}" >&2; exit 1 ;;
           esac
@@ -217,18 +270,21 @@ jobs:
               continue
             fi
             case "${{ runner.os }}" in
-              Linux) key="linux-x86_64" ;;
-              Windows) key="windows-x86_64" ;;
-              macOS)
-                case "$(uname -m)" in
-                  arm64|aarch64) key="darwin-aarch64" ;;
-                  *) key="darwin-x86_64" ;;
-                esac
-                ;;
+              Linux) keys=(linux-x86_64) ;;
+              Windows) keys=(windows-x86_64) ;;
+              # A universal build covers both Apple Silicon and Intel in one
+              # binary, so this same artifact + signature is valid for
+              # either arch's updater lookup — advertise both keys rather
+              # than guessing one from the runner's own (irrelevant) arch.
+              macOS) keys=(darwin-aarch64 darwin-x86_64) ;;
             esac
             url="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$(basename "$artifact")"
-            fragment=$(jq -n --arg key "$key" --arg sig "$(cat "$sig_file")" --arg url "$url" \
-              '{($key): {signature: $sig, url: $url}}')
+            sig="$(cat "$sig_file")"
+            for key in "${keys[@]}"; do
+              entry=$(jq -n --arg key "$key" --arg sig "$sig" --arg url "$url" \
+                '{($key): {signature: $sig, url: $url}}')
+              fragment=$(jq -s '.[0] * .[1]' <(echo "$fragment") <(echo "$entry"))
+            done
           done
           echo "$fragment" > latest-json-fragment.json
           cat latest-json-fragment.json

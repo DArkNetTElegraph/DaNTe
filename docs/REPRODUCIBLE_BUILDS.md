@@ -32,13 +32,13 @@ duration of the job.
 You need the same OS and architecture (Linux x86_64) and nothing else: no
 Docker, no project keys.
 
-1. **Get the source at the release tag** (replace `v0.0.1` with the release
+1. **Get the source at the release tag** (replace `v0.1.0-alpha.1` with the release
    you are verifying):
 
    ```sh
    git clone https://github.com/DArkNetTElegraph/DaNTe
    cd DaNTe
-   git checkout v0.0.1
+   git checkout v0.1.0-alpha.1
    ```
 
 2. **Install Rust.** [`rust-toolchain.toml`](../rust-toolchain.toml) pins the
@@ -71,7 +71,7 @@ Docker, no project keys.
 
    ```sh
    curl -L -o dist/SHA256SUMS \
-     https://github.com/DArkNetTElegraph/DaNTe/releases/download/v0.0.1/SHA256SUMS
+     https://github.com/DArkNetTElegraph/DaNTe/releases/download/v0.1.0-alpha.1/SHA256SUMS
    ( cd dist && sha256sum -c SHA256SUMS )
    ```
 
@@ -114,8 +114,8 @@ key that could be stolen or lost.
 # one-time
 go install github.com/sigstore/cosign/v2/cmd/cosign@latest   # or your package manager
 
-curl -LO https://github.com/DArkNetTElegraph/DaNTe/releases/download/v0.0.1/SHA256SUMS
-curl -LO https://github.com/DArkNetTElegraph/DaNTe/releases/download/v0.0.1/SHA256SUMS.bundle
+curl -LO https://github.com/DArkNetTElegraph/DaNTe/releases/download/v0.1.0-alpha.1/SHA256SUMS
+curl -LO https://github.com/DArkNetTElegraph/DaNTe/releases/download/v0.1.0-alpha.1/SHA256SUMS.bundle
 
 cosign verify-blob \
   --bundle SHA256SUMS.bundle \

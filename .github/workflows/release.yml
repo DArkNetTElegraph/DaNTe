@@ -63,10 +63,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # A tag like v0.1.0-alpha.1 carries the pre-release marker itself
+          # (deliberately kept out of the actual package version — Tauri's
+          # Windows MSI bundler requires that to be a bare number, so
+          # "alpha.1" would hard-fail it) — mirror it onto the GitHub
+          # release with --prerelease so it shows the "Pre-release" badge
+          # instead of looking like a normal, install-me release.
+          prerelease_flag=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease_flag=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
+            "${prerelease_flag[@]}" \
             dist/dante dist/dante-relay dist/SHA256SUMS dist/SHA256SUMS.bundle
 
   desktop-bundle:

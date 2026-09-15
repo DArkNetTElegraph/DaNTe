@@ -30,7 +30,7 @@ p2p = ["dep:dante-p2p", "dante-net/p2p"]
 
 [dev-dependencies]
 # `sfu` so the in-process test relay can host group-call SFU rooms.
-dante-relay = { path = "../dante-relay", version = "0.0.1", features = ["sfu"] }
+dante-relay = { path = "../dante-relay", version = "0.1.0", features = ["sfu"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "test-util"] }
 
 [lints.rust]

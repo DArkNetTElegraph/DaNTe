@@ -113,10 +113,23 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
 /// attempt — callers pick [`REGISTRATION`] or [`LIVENESS`], or a network-tuned
 /// value, and run this off the main thread.
 pub fn solve(challenge: &[u8; 32], difficulty: Difficulty) -> PowProof {
+    solve_with_progress(challenge, difficulty, &std::sync::atomic::AtomicU64::new(0))
+}
+
+/// [`solve`], incrementing `attempts` after every hash so a caller on another
+/// thread can report live progress (e.g. a UI showing nonces tried so far).
+/// One increment per Argon2 pass, which is also the dominant per-attempt
+/// cost, so `attempts` is a faithful proxy for elapsed work.
+pub fn solve_with_progress(
+    challenge: &[u8; 32],
+    difficulty: Difficulty,
+    attempts: &std::sync::atomic::AtomicU64,
+) -> PowProof {
     loop {
         let nonce = random_bytes::<NONCE_LEN>();
         let d = digest(challenge, &nonce, difficulty.m_cost_kib, difficulty.t_cost)
             .expect("REGISTRATION/LIVENESS and tuned params are valid");
+        attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if leading_zero_bits(&d) >= u32::from(difficulty.bits) {
             return PowProof {
                 m_cost_kib: difficulty.m_cost_kib,

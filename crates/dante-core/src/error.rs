@@ -85,4 +85,9 @@ pub enum CoreError {
     /// endpoint was given to a build without the `p2p` feature.
     #[error("p2p: {0}")]
     P2p(String),
+
+    /// The blocking task solving a PoW puzzle panicked instead of returning
+    /// a proof.
+    #[error("pow solver: {0}")]
+    Pow(String),
 }

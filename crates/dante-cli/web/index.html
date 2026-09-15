@@ -962,6 +962,58 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 /* Sidebar section labels: a touch more air and tracking. */
 .group-label, .role-label { letter-spacing: .06em; }
 
+/* Boot progress: an honest, non-blocking status bar for the startup
+   sequence — most importantly the proof-of-work search, which at real
+   network strength can run for minutes to hours. Pinned to the top edge
+   rather than a modal, since local state stays usable while it runs. */
+#boot-progress {
+  position: fixed; top: env(safe-area-inset-top, 0px); left: 0; right: 0; z-index: 80;
+  font-size: 13px; color: var(--text);
+}
+.bp-bar {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-raised); border-bottom: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-sm);
+  padding: 8px 16px;
+}
+.bp-spinner {
+  width: 14px; height: 14px; flex: 0 0 auto; border-radius: 50%;
+  border: 2px solid var(--divider); border-top-color: var(--accent);
+  animation: bp-spin .8s linear infinite;
+}
+.bp-spinner.done { border: none; background: #3fbf6f; animation: none; }
+.bp-spinner.done::after { content: "✓"; display: block; font-size: 10px; line-height: 14px; text-align: center; color: #08240f; }
+@keyframes bp-spin { to { transform: rotate(360deg); } }
+.bp-headline { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bp-elapsed { color: var(--text-faint); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.bp-toggle {
+  flex: 0 0 auto; background: transparent; border: 1px solid var(--divider); color: var(--text-muted);
+  border-radius: var(--radius-sm); padding: 4px 10px; font: inherit; cursor: pointer;
+}
+.bp-toggle:hover { color: var(--text); border-color: var(--text-faint); }
+.bp-panel {
+  background: var(--bg-raised); border-bottom: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg); padding: 4px 16px 14px;
+}
+.bp-copy { color: var(--text-muted); margin: 8px 0 14px; max-width: 62ch; }
+.bp-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.bp-steps li {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--text-faint);
+}
+.bp-steps li.active { color: var(--text); font-weight: 600; }
+.bp-steps li.done { color: var(--text-muted); }
+.bp-steps .bp-dot {
+  width: 16px; height: 16px; flex: 0 0 auto; border-radius: 50%;
+  border: 2px solid var(--divider); display: grid; place-items: center; font-size: 10px;
+}
+.bp-steps li.active .bp-dot { border-color: var(--accent); border-top-color: transparent; animation: bp-spin .8s linear infinite; }
+.bp-steps li.done .bp-dot { border: none; background: #3fbf6f; color: #08240f; }
+.bp-steps li.done .bp-dot::after { content: "✓"; }
+.bp-steps li.failed .bp-dot { border: none; background: var(--blazing-flame); color: #fff; }
+.bp-steps li.failed .bp-dot::after { content: "!"; }
+.bp-steps li.failed { color: var(--blazing-flame); }
+
 /* Monospace everywhere it was hard-coded to the old stack. */
 #user-panel .fp, .set-fp, #onboard textarea, .modal textarea,
 .modal .msg code, #onboard .blob { font-family: var(--font-mono); }
@@ -1066,6 +1118,19 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 <div id="gcall-toast" hidden></div>
 <div id="update-toast" hidden></div>
 <div id="missed-toast" hidden></div>
+
+<div id="boot-progress" hidden>
+  <div class="bp-bar" id="bp-bar">
+    <span class="bp-spinner" id="bp-spinner" aria-hidden="true"></span>
+    <span class="bp-headline" id="bp-headline"></span>
+    <span class="bp-elapsed" id="bp-elapsed"></span>
+    <button class="bp-toggle" id="bp-toggle" aria-expanded="false">Details</button>
+  </div>
+  <div class="bp-panel" id="bp-panel" hidden>
+    <p class="bp-copy" id="bp-copy"></p>
+    <ol class="bp-steps" id="bp-steps"></ol>
+  </div>
+</div>
 
 <script nonce="__DANTE_CSP_NONCE__">
 "use strict";
@@ -4029,6 +4094,103 @@ async function checkMissedMessages() {
   toast.appendChild(dismiss);
 }
 
+/* ---------- boot progress ---------------------------------------- */
+// Honest, non-blocking status for the startup sequence: local state stays
+// usable throughout, but other users won't see this identity on the network
+// until "announcing" (the proof-of-work search) clears -- worth saying so
+// plainly, since at real network strength that step can run for hours.
+const BP_STEPS = [
+  { key: "connecting", label: "Connecting to the relay" },
+  { key: "announcing", label: "Registering identity (proof of work)" },
+  { key: "publishing_prekeys", label: "Publishing prekeys" },
+  { key: "syncing", label: "Syncing" },
+];
+let bpTimer = null;
+let bpExpanded = false;
+
+function bpFmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = n => String(n).padStart(2, "0");
+  return h > 0 ? h + ":" + pad(m) + ":" + pad(sec) : pad(m) + ":" + pad(sec);
+}
+
+function bpRenderSteps(step, error) {
+  const list = $("#bp-steps");
+  list.innerHTML = "";
+  const idx = BP_STEPS.findIndex(s => s.key === step);
+  BP_STEPS.forEach((s, i) => {
+    const li = el("li");
+    li.className = (error && i === idx) ? "failed"
+      : (i < idx || step === "ready") ? "done"
+      : (i === idx) ? "active" : "";
+    li.appendChild(el("span", "bp-dot"));
+    li.appendChild(el("span", null, s.label));
+    list.appendChild(li);
+  });
+}
+
+async function bpPoll() {
+  let status;
+  try { status = await api.get("/api/boot"); } catch (_) { return; }
+  const bar = $("#boot-progress");
+  if (!status || status.step === "ready") {
+    if (!bar.hidden) {
+      $("#bp-spinner").className = "bp-spinner done";
+      $("#bp-headline").textContent = "You're fully registered with the network.";
+      $("#bp-elapsed").textContent = "";
+      setTimeout(() => { bar.hidden = true; }, 2200);
+    }
+    clearInterval(bpTimer);
+    return;
+  }
+  bar.hidden = false;
+  const elapsed = Date.now() - Number(status.since_ms || Date.now());
+  $("#bp-elapsed").textContent = bpFmtElapsed(elapsed);
+  bpRenderSteps(status.step, status.error);
+
+  if (status.step === "failed") {
+    $("#bp-spinner").className = "bp-spinner failed";
+    $("#bp-headline").textContent = "Startup hit a snag (" + (status.error || "unknown error")
+      + ") -- retrying in the background.";
+    $("#bp-copy").textContent = "";
+    return;
+  }
+  $("#bp-spinner").className = "bp-spinner";
+
+  if (status.step === "announcing") {
+    const bits = status.pow_bits || 20;
+    const tried = Number(status.attempts) || 0;
+    $("#bp-headline").textContent = "Registering with the network -- proof of work in progress"
+      + (tried ? " (" + tried.toLocaleString() + " nonces tried)" : "") + "...";
+    $("#bp-copy").textContent =
+      "This is an Argon2 memory-hard puzzle (" + bits + "-bit target), and it's deliberately expensive -- " +
+      "that's what keeps spinning up fake identities costly. Depending on the relay's difficulty and your " +
+      "hardware this can take anywhere from a couple of minutes to several hours. It's fully automatic and " +
+      "running in the background; you can keep using DaNTe locally while it works. Registration process is " +
+      "automatic and will take a while -- go grab a snack, get a coffee, or hop into a match of League. " +
+      "We'll still be here when you get back.";
+  } else {
+    $("#bp-headline").textContent = ({
+      connecting: "Connecting to the relay...",
+      publishing_prekeys: "Publishing your prekeys...",
+      syncing: "Syncing...",
+    })[status.step] || "Starting up...";
+    $("#bp-copy").textContent = "";
+  }
+}
+
+function initBootProgress() {
+  $("#bp-toggle").onclick = () => {
+    bpExpanded = !bpExpanded;
+    $("#bp-panel").hidden = !bpExpanded;
+    $("#bp-toggle").setAttribute("aria-expanded", String(bpExpanded));
+    $("#bp-toggle").textContent = bpExpanded ? "Hide" : "Details";
+  };
+  bpPoll();
+  bpTimer = setInterval(bpPoll, 1000);
+}
+
 function renderGroupCallToast() {
   const toast = $("#gcall-toast");
   // An invite/in-progress call for a channel that isn't the one currently open.
@@ -5709,6 +5871,7 @@ async function init() {
 
   await refreshChannels();
   checkMissedMessages();
+  initBootProgress();
 
   // restore last view if still valid
   const v = store.view;

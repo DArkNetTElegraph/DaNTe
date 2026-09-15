@@ -93,7 +93,8 @@ pub async fn run() -> anyhow::Result<()> {
         println!("  1) Check relay eligibility (ping an address)");
         println!("  2) Install a background relay/client service");
         println!("  3) Build the desktop app");
-        println!("  4) Exit\n");
+        println!("  4) Find the fastest public relay for me");
+        println!("  5) Exit\n");
         let Some(choice) = read_line("> ") else {
             break;
         };
@@ -102,8 +103,9 @@ pub async fn run() -> anyhow::Result<()> {
             "1" => check_relay_eligibility().await,
             "2" => install_service().await,
             "3" => build_desktop_app().await,
-            "4" | "" => break,
-            _ => println!("Not a valid choice — pick 1-4.\n"),
+            "4" => find_fastest_relay().await,
+            "5" | "" => break,
+            _ => println!("Not a valid choice — pick 1-5.\n"),
         }
         println!();
     }
@@ -143,6 +145,39 @@ async fn check_relay_eligibility() {
             );
         }
     }
+}
+
+async fn find_fastest_relay() {
+    let urls = vec![crate::directory::DEFAULT_DIRECTORY.to_string()];
+    let ranked = with_spinner(
+        &format!("Pinging every relay listed at {}", urls.join(", ")),
+        crate::directory::rank_reachable(&urls),
+    )
+    .await;
+    if ranked.is_empty() {
+        fail("no reachable relay found in the directory");
+        println!(
+            "  Either nothing in relays/registry.toml answered from here, or the directory \
+             itself couldn't be fetched. Check your own network connection, or connect with a \
+             specific --relay ADDR you already know."
+        );
+        return;
+    }
+    ok(&format!("found {} reachable relay(s):", ranked.len()));
+    for (i, r) in ranked.iter().enumerate() {
+        println!(
+            "  {}) {} — {} ({}ms)",
+            i + 1,
+            r.name,
+            r.addr,
+            r.latency.as_millis()
+        );
+    }
+    println!(
+        "\nUse the fastest one directly with:\n\n  dante chat --relay {}\n  dante serve --relay {}\n\n\
+         or let this happen automatically every time with `--relay auto` in place of an address.",
+        ranked[0].addr, ranked[0].addr
+    );
 }
 
 /// Build a systemd `--user` unit for `dante serve` pointed at `relay`, using

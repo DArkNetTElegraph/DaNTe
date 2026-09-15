@@ -23,6 +23,11 @@
 //! records. `chat`/`serve` also accept `--p2p` / `--p2p-listen <multiaddr>` to
 //! run a node for the DHT key-directory + ledger-gossip fallback.
 //!
+//! `--relay auto` instead pings every relay listed in the public directory
+//! (`relays/registry.toml`, published at [`directory::DEFAULT_DIRECTORY`])
+//! and connects to whichever answers fastest — `--directory URL` or
+//! `DANTE_RELAY_DIRECTORY` add more directory sources on top of the default.
+//!
 //! In `chat`, lines starting with `/` are commands: DMs (`/to`, `/file`,
 //! `/call`, `/safety`, `/contacts`), servers and channels (`/server`,
 //! `/channel`, `/vchannel`, `/invite`, `/invitelink`, `/redeem`, `/roles`,
@@ -31,6 +36,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
+mod directory;
 mod setup;
 
 use anyhow::{Context, Result};
@@ -91,14 +97,55 @@ fn bootstrap_list(flags: &HashMap<String, String>) -> Vec<String> {
     out
 }
 
-fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
+/// Directory URLs to consult for `--relay auto`: `--directory`, then
+/// `DANTE_RELAY_DIRECTORY` (comma/space-separated), then the compiled-in
+/// [`directory::DEFAULT_DIRECTORY`] — additive, same pattern as
+/// [`bootstrap_list`], so pointing at an extra (e.g. self-hosted) mirror
+/// never silently drops the default one.
+fn directory_list(flags: &HashMap<String, String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        for a in s
+            .split([',', ' ', '\t', '\n'])
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            let a = a.to_string();
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    };
+    if let Some(d) = flags.get("directory") {
+        push(d);
+    }
+    if let Ok(env) = std::env::var("DANTE_RELAY_DIRECTORY") {
+        push(&env);
+    }
+    push(directory::DEFAULT_DIRECTORY);
+    out
+}
+
+/// The `--relay` value, translating the discovery aliases `dht` / `p2p` (and a
+/// bare `--bootstrap` with no `--relay`) into
+/// `p2p-discover:<bootstrap-multiaddr,...>` that `Engine::connect` understands,
+/// and `auto` into whichever directory-listed relay answers a real ping
+/// fastest from here (see [`directory::rank_reachable`]).
+///
+/// Bootstrap multiaddrs come from `--bootstrap`, then the `DANTE_BOOTSTRAP`
+/// environment variable (comma/space-separated), then the compiled-in
+/// [`DEFAULT_BOOTSTRAP`] — so a distro or an operator can point at a network
+/// without a flag, and once well-known addresses exist a bare `dante serve`
+/// needs no relay config at all.
+async fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
     let boot = bootstrap_list(flags).join(",");
 
     let relay = match flags.get("relay") {
         Some(r) => r.clone(),
         None if !boot.is_empty() => "dht".to_string(),
         None => anyhow::bail!(
-            "missing --relay (or --bootstrap / DANTE_BOOTSTRAP for DHT relay discovery)"
+            "missing --relay (or --bootstrap / DANTE_BOOTSTRAP for DHT relay discovery, or \
+             --relay auto to pick the fastest listed public relay)"
         ),
     };
     if relay == "dht" || relay == "p2p" {
@@ -108,6 +155,28 @@ fn relay_endpoint(flags: &HashMap<String, String>) -> Result<String> {
             );
         }
         Ok(format!("p2p-discover:{boot}"))
+    } else if relay == "auto" {
+        let urls = directory_list(flags);
+        eprintln!(
+            "dante: pinging every relay listed at {} ...",
+            urls.join(", ")
+        );
+        let ranked = directory::rank_reachable(&urls).await;
+        match ranked.first() {
+            Some(best) => {
+                eprintln!(
+                    "dante: picked {} ({}, {}ms round trip)",
+                    best.name,
+                    best.addr,
+                    best.latency.as_millis()
+                );
+                Ok(best.addr.clone())
+            }
+            None => anyhow::bail!(
+                "--relay auto found no reachable relay in the directory ({})",
+                urls.join(", ")
+            ),
+        }
     } else {
         Ok(relay)
     }
@@ -246,7 +315,7 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         .get("http")
         .cloned()
         .unwrap_or_else(|| "127.0.0.1:8080".to_string());
-    let relay = relay_endpoint(flags)?;
+    let relay = relay_endpoint(flags).await?;
     let bits: u8 = flags
         .get("pow-bits")
         .and_then(|v| v.parse().ok())
@@ -329,7 +398,7 @@ fn pow_cost(flags: &HashMap<String, String>) -> (u32, u32) {
 /// Shared connect + params logic for `chat` and `serve`.
 async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
     let identity = load_identity(flags)?;
-    let relay = relay_endpoint(flags)?;
+    let relay = relay_endpoint(flags).await?;
     let bits: u8 = flags
         .get("pow-bits")
         .and_then(|v| v.parse().ok())
@@ -1947,9 +2016,10 @@ fn bail_soft(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_flags, parse_hex16, parse_sfu_mesh_limit, pow_cost};
+    use super::{directory_list, parse_flags, parse_hex16, parse_sfu_mesh_limit, pow_cost};
     use dante_crypto::pow::REGISTRATION;
     use dante_ledger::LedgerParams;
+    use std::collections::HashMap;
 
     /// A message-id argument (`chat`/`bot` commands) is operator-supplied
     /// but still untrusted-shaped input; a 32-*byte* string containing
@@ -2011,6 +2081,29 @@ mod tests {
     fn dev_pow_flag_opts_into_the_light_cost() {
         let flags = parse_flags(["--dev-pow"].map(String::from).into_iter());
         assert_eq!(pow_cost(&flags), (4_096, 1));
+    }
+
+    /// `--directory` adds a mirror on top of the compiled-in default rather
+    /// than replacing it — the whole point of supporting more than one
+    /// directory source is resilience, so pointing at an extra one must
+    /// never silently drop the other.
+    #[test]
+    fn directory_list_is_additive_over_the_default() {
+        let flags = parse_flags(std::iter::empty());
+        let list = directory_list(&flags);
+        assert!(list.contains(&crate::directory::DEFAULT_DIRECTORY.to_string()));
+
+        let mut flags = HashMap::new();
+        flags.insert(
+            "directory".to_string(),
+            "https://mirror.example/status.json".to_string(),
+        );
+        let list = directory_list(&flags);
+        assert!(list.contains(&"https://mirror.example/status.json".to_string()));
+        assert!(
+            list.contains(&crate::directory::DEFAULT_DIRECTORY.to_string()),
+            "adding a mirror must not drop the default directory"
+        );
     }
 
     #[test]

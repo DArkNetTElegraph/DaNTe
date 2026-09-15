@@ -11,6 +11,12 @@
 #
 # Entries are kept alphabetical by name to keep diffs small and reviewable.
 
+[[relay]]
+name = "darknettelegraph-official"
+addr = "158.180.41.193:9944"
+kind = "dedicated"
+contact = "github.com/adriankralovsky"
+
 # [[relay]]
 # name = "example-community"
 # addr = "relay.example.org:9944"

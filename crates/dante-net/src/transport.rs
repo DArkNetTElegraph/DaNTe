@@ -8,7 +8,11 @@
 //! serving side ([`serve`] / [`RequestHandler`]) is transport-agnostic —
 //! `dante-relay` feeds it both TCP connections and libp2p inbound requests.
 
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    net::IpAddr,
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use tokio::{
@@ -673,6 +677,17 @@ pub async fn serve<H: RequestHandler>(
     listener: TcpListener,
     handler: Arc<H>,
 ) -> Result<(), NetError> {
+    serve_with_conn_count(listener, handler, Arc::new(AtomicUsize::new(0))).await
+}
+
+/// [`serve`], additionally keeping `count` updated with the number of
+/// currently-open connections — for a caller (e.g. an operator console) that
+/// wants to report live connection load without its own bookkeeping.
+pub async fn serve_with_conn_count<H: RequestHandler>(
+    listener: TcpListener,
+    handler: Arc<H>,
+    count: Arc<AtomicUsize>,
+) -> Result<(), NetError> {
     let conn_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -684,11 +699,14 @@ pub async fn serve<H: RequestHandler>(
             continue;
         };
         let handler = Arc::clone(&handler);
+        let count = Arc::clone(&count);
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tokio::spawn(async move {
             let _permit = permit; // released when the connection ends
             if let Err(e) = serve_conn(stream, peer.ip(), handler).await {
                 tracing::debug!(%peer, error = %e, "connection ended");
             }
+            count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         });
     }
 }

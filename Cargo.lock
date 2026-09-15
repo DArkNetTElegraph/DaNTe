@@ -1077,6 +1077,8 @@ dependencies = [
  "dante-proto",
  "dante-sfu",
  "dante-voice",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

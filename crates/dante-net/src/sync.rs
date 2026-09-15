@@ -313,6 +313,34 @@ pub async fn get_p2p_peers(client: &mut Client) -> Result<Vec<String>, NetError>
     }
 }
 
+/// Connect to a plain `host:port` relay address and confirm it's actually
+/// alive with a real `Request::Ping` round trip, not just "something answers
+/// the port" — the same check [`crate`]'s own relay-status tooling
+/// (`dante-relay-check`) runs against the public registry, useful here for a
+/// self-check before listing a relay there. Returns the round-trip latency.
+pub async fn ping(
+    addr: &str,
+    timeout: std::time::Duration,
+) -> Result<std::time::Duration, NetError> {
+    fn timed_out(what: &str, timeout: std::time::Duration) -> NetError {
+        NetError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("{what} timed out after {timeout:?}"),
+        ))
+    }
+    let started = std::time::Instant::now();
+    let mut client = tokio::time::timeout(timeout, Client::connect(addr))
+        .await
+        .map_err(|_| timed_out("connect", timeout))??;
+    match tokio::time::timeout(timeout, client.request(&Request::Ping))
+        .await
+        .map_err(|_| timed_out("ping", timeout))??
+    {
+        Response::Pong => Ok(started.elapsed()),
+        _ => Err(NetError::UnexpectedResponse("Ping")),
+    }
+}
+
 /// Join the SFU room for `room` (a channel id) with `offer`; returns the
 /// assigned slot and the SFU's answer. The relay must be built with its `sfu`
 /// feature, otherwise it answers an error.

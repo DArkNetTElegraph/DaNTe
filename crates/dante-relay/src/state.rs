@@ -637,7 +637,8 @@ impl RelayState {
                 removed += b.len();
             }
         }
-        while self.channel_bytes.saturating_sub(removed) > self.channel_store_cap && !entry.2.is_empty()
+        while self.channel_bytes.saturating_sub(removed) > self.channel_store_cap
+            && !entry.2.is_empty()
         {
             let (_, b, _) = entry.2.remove(0);
             removed += b.len();

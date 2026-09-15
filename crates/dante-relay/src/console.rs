@@ -50,59 +50,183 @@ pub struct Console {
 /// `std::future::pending` when p2p isn't configured.
 pub async fn run(handler: Arc<RelayHandler>, console: Console) {
     if std::io::stdin().is_terminal() {
-        println!("dante-relay console -- type /help for commands.");
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        loop {
-            print!("relay> ");
+        let hud_rows = terminal_rows().filter(|&r| r > 3);
+        if let Some(rows) = hud_rows {
+            // DECSTBM: restrict scrolling to everything but the last row, so
+            // ordinary output (the prompt, command replies) scrolls in rows
+            // 1..rows-1 exactly like normal, while the last row is reserved
+            // for a status line nothing else ever writes to. This is the
+            // same trick `less`/`vim`/tmux's own status bar use -- not a
+            // real TUI, no raw mode, no new dependency: plain ANSI, and
+            // ordinary `println!` above it keeps working unmodified.
+            print!("\x1b[1;{}r\x1b[1;1H", rows - 1);
             std::io::stdout().flush().ok();
-            let Ok(Some(line)) = lines.next_line().await else {
-                break;
-            };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        }
+        println!("dante-relay console -- type /help for commands.");
+        if hud_rows.is_some() {
+            println!("(live stats pinned to the bottom line, updating every second)");
+        } else {
+            println!("(terminal size unavailable -- run /stats for a one-shot snapshot)");
+        }
+
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        print!("relay> ");
+        std::io::stdout().flush().ok();
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    if let Some(rows) = hud_rows {
+                        redraw_pinned_line(&handler, &console, rows).await;
+                    }
+                }
+                next = lines.next_line() => {
+                    let Ok(Some(line)) = next else { break; };
+                    let line = line.trim();
+                    if line.is_empty() {
+                        print!("relay> ");
+                        std::io::stdout().flush().ok();
+                        continue;
+                    }
+                    let mut parts = line.splitn(2, char::is_whitespace);
+                    let cmd = parts.next().unwrap_or("");
+                    let arg = parts.next().unwrap_or("").trim();
+                    match cmd {
+                        "/help" | "help" => print_help(),
+                        "/stats" | "stats" => print_stats(&handler, &console).await,
+                        "/peers" | "peers" => print_peers(&handler, &console).await,
+                        "/peer" => match arg.split_once(char::is_whitespace) {
+                            Some(("add", addr)) => add_peer(&console, addr.trim().to_string()).await,
+                            _ => println!("usage: /peer add <multiaddr>"),
+                        },
+                        "/registry" | "registry" => check_registry(arg, &console).await,
+                        _ => println!("unknown command {cmd:?} -- try /help"),
+                    }
+                    print!("relay> ");
+                    std::io::stdout().flush().ok();
+                }
             }
-            let mut parts = line.splitn(2, char::is_whitespace);
-            let cmd = parts.next().unwrap_or("");
-            let arg = parts.next().unwrap_or("").trim();
-            match cmd {
-                "/help" | "help" => print_help(),
-                "/stats" | "stats" => print_stats(&handler, &console).await,
-                "/peers" | "peers" => print_peers(&handler, &console).await,
-                "/peer" => match arg.split_once(char::is_whitespace) {
-                    Some(("add", addr)) => add_peer(&console, addr.trim().to_string()).await,
-                    _ => println!("usage: /peer add <multiaddr>"),
-                },
-                "/registry" | "registry" => check_registry(arg, &console).await,
-                _ => println!("unknown command {cmd:?} -- try /help"),
-            }
+        }
+        if hud_rows.is_some() {
+            reset_terminal();
         }
     }
     std::future::pending::<()>().await;
 }
 
+/// Terminal row count via `stty size`, which reads it from whatever tty is
+/// on this process's own stdin. There's no portable way to ask the terminal
+/// this without an ioctl, and this crate forbids unsafe code entirely
+/// (`#![forbid(unsafe_code)]` at the crate root) -- a subprocess is the only
+/// route left, and it's cheap and one-shot (called once at console start,
+/// not per redraw). `None` on anything that isn't a real, queryable
+/// terminal, or if `stty` isn't installed.
+fn terminal_rows() -> Option<u16> {
+    // `Command::output()` defaults a child's stdin to `Stdio::null()`, not
+    // inherited -- without overriding it here, `stty` has no controlling
+    // terminal to query at all and fails every time, regardless of whether
+    // *this* process actually has one.
+    let out = std::process::Command::new("stty")
+        .arg("size")
+        .stdin(std::process::Stdio::inherit())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().next()?.parse().ok()
+}
+
+/// Undoes the scroll-region restriction from [`run`], unconditionally and
+/// harmlessly even if it was never set (not a terminal, `stty` unavailable,
+/// etc. -- printing this to a plain pipe or a terminal never put in that
+/// mode does nothing). Called on every *graceful* exit path: the console
+/// loop ending here, and `dante-relay`'s own Ctrl-C handler in `main.rs`.
+/// Not run on a hard kill (SIGKILL, a panic that aborts the process) --
+/// like any program that does this (tmux included), recovery there is
+/// `reset` or `tput reset` in the shell, a standard, well-known fix.
+///
+/// A live terminal *resize* while the console is running isn't handled
+/// (that needs a SIGWINCH handler, which needs re-querying `stty size` and
+/// re-issuing the DECSTBM sequence -- deliberately out of scope here); if
+/// an operator resizes their window mid-session the pinned line can end up
+/// misplaced until they reconnect.
+pub fn reset_terminal() {
+    print!("\x1b[r");
+    let _ = std::io::stdout().flush();
+}
+
+/// Redraws the single pinned status line at the bottom of the terminal
+/// (row `rows`) without disturbing whatever the operator is currently
+/// typing above it: save cursor, jump to the last row, clear it, print,
+/// restore cursor -- all in one write so nothing else can interleave with
+/// it mid-sequence.
+async fn redraw_pinned_line(handler: &RelayHandler, console: &Console, rows: u16) {
+    let stats = handler.state().lock().await.stats();
+    let uptime = console.started_at.elapsed();
+    let conns = console.conn_count.load(Ordering::Relaxed);
+    let cpu_ram = match (process_usage(), host_ram_and_load()) {
+        (Some(p), Some((ram_pct, load_1m))) => format!(
+            " | proc {} RSS | host RAM {ram_pct:.0}% | load {load_1m:.2}",
+            fmt_bytes(p.rss_bytes)
+        ),
+        (Some(p), None) => format!(" | proc {} RSS", fmt_bytes(p.rss_bytes)),
+        _ => String::new(),
+    };
+    let line = format!(
+        "[dante-relay] up {} | {conns} conn | {} id | {} ch{cpu_ram}",
+        fmt_duration(uptime),
+        stats.identities,
+        stats.channels,
+    );
+    print!("\x1b7\x1b[{rows};1H\x1b[2K{line}\x1b8");
+    std::io::stdout().flush().ok();
+}
+
 fn print_help() {
     println!(
-        "/stats               uptime, connections, storage, process CPU/memory\n\
+        "/stats               uptime, connections, storage, process + host CPU/RAM/disk\n\
          /peers               configured and known federation neighbors\n\
          /peer add <multiaddr>  dial a new federation neighbor right now\n\
          /registry [addr]     check whether addr (default: this relay's own --listen) \
 is in the public directory\n\
-         /help                this text"
+         /help                this text\n\n\
+         A one-line summary is already pinned to the bottom of this terminal, \
+updating every second -- /stats gives the full breakdown on demand."
     );
 }
 
 async fn print_stats(handler: &RelayHandler, console: &Console) {
+    print!("{}", render_stats(handler, console).await);
+}
+
+/// Formats the same content `/stats` prints, as a string rather than direct
+/// `println!`s -- so `/watch` can clear the screen and redraw it in place
+/// without duplicating a second copy of this text.
+async fn render_stats(handler: &RelayHandler, console: &Console) -> String {
     let stats = handler.state().lock().await.stats();
     let uptime = console.started_at.elapsed();
     let conns = console.conn_count.load(Ordering::Relaxed);
-    println!("uptime:         {}", fmt_duration(uptime));
-    println!("connections:    {conns} active (TCP)");
-    println!("identities:     {}", stats.identities);
-    println!("channels:       {}", stats.channels);
-    println!("mailbox:        {} envelope(s)", stats.mailbox_entries);
-    println!("file blobs:     {}", fmt_bytes(stats.blob_bytes as u64));
-    println!("channel store:  {}", fmt_bytes(stats.channel_bytes as u64));
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "uptime:         {}", fmt_duration(uptime));
+    let _ = writeln!(out, "connections:    {conns} active (TCP)");
+    let _ = writeln!(out, "identities:     {}", stats.identities);
+    let _ = writeln!(out, "channels:       {}", stats.channels);
+    let _ = writeln!(out, "mailbox:        {} envelope(s)", stats.mailbox_entries);
+    let _ = writeln!(
+        out,
+        "file blobs:     {}",
+        fmt_bytes(stats.blob_bytes as u64)
+    );
+    let _ = writeln!(
+        out,
+        "channel store:  {}",
+        fmt_bytes(stats.channel_bytes as u64)
+    );
     match process_usage() {
         Some(u) => {
             let avg_pct = if uptime.as_secs_f64() > 0.0 {
@@ -110,14 +234,59 @@ async fn print_stats(handler: &RelayHandler, console: &Console) {
             } else {
                 0.0
             };
-            println!(
-                "process:        {:.1}s CPU time ({:.1}% average since start), {} RSS",
+            let _ = writeln!(
+                out,
+                "this process:   {:.1}s CPU time ({:.1}% average since start), {} RSS",
                 u.cpu_seconds,
                 avg_pct,
                 fmt_bytes(u.rss_bytes)
             );
         }
-        None => println!("process:        CPU/memory usage unavailable on this platform"),
+        None => {
+            let _ = writeln!(out, "this process:   CPU/memory usage unavailable here");
+        }
+    }
+    match host_usage().await {
+        Some(h) => {
+            let _ = writeln!(
+                out,
+                "host CPU load:  {:.2} 1m / {:.2} 5m / {:.2} 15m ({} core(s))",
+                h.load_1m, h.load_5m, h.load_15m, h.cpu_cores
+            );
+            let _ = writeln!(
+                out,
+                "host RAM:       {} used / {} total ({:.0}%)",
+                fmt_bytes(h.ram_used_bytes),
+                fmt_bytes(h.ram_total_bytes),
+                pct(h.ram_used_bytes, h.ram_total_bytes)
+            );
+            match (h.disk_used_bytes, h.disk_total_bytes) {
+                (Some(used), Some(total)) => {
+                    let _ = writeln!(
+                        out,
+                        "host disk (.):  {} used / {} total ({:.0}%)",
+                        fmt_bytes(used),
+                        fmt_bytes(total),
+                        pct(used, total)
+                    );
+                }
+                _ => {
+                    let _ = writeln!(out, "host disk (.):  unavailable (`df` not found?)");
+                }
+            }
+        }
+        None => {
+            let _ = writeln!(out, "host CPU/RAM:   unavailable on this platform");
+        }
+    }
+    out
+}
+
+fn pct(used: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        used as f64 / total as f64 * 100.0
     }
 }
 
@@ -285,6 +454,141 @@ fn process_usage() -> Option<ProcessUsage> {
 
 #[cfg(not(target_os = "linux"))]
 fn process_usage() -> Option<ProcessUsage> {
+    None
+}
+
+struct HostUsage {
+    ram_used_bytes: u64,
+    ram_total_bytes: u64,
+    load_1m: f64,
+    load_5m: f64,
+    load_15m: f64,
+    cpu_cores: usize,
+    disk_used_bytes: Option<u64>,
+    disk_total_bytes: Option<u64>,
+}
+
+/// RAM (used/total bytes) and 1/5/15-minute load averages plus core count,
+/// from `/proc/meminfo` and `/proc/loadavg` -- no subprocess, so this is
+/// cheap enough to call every second from the pinned status line as well as
+/// from the fuller `/stats` breakdown.
+#[cfg(target_os = "linux")]
+fn ram_and_load() -> Option<(u64, u64, f64, f64, f64, usize)> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let field = |key: &str| -> Option<u64> {
+        meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix(key))?
+            .trim()
+            .trim_end_matches(" kB")
+            .trim()
+            .parse()
+            .ok()
+    };
+    let mem_total_kb = field("MemTotal:")?;
+    // MemAvailable (not MemFree) is what actually matters: it already
+    // accounts for reclaimable page/slab cache, which on a Linux box is
+    // usually most of "free" memory and isn't memory under real pressure.
+    let mem_available_kb = field("MemAvailable:")?;
+    let ram_total_bytes = mem_total_kb * 1024;
+    let ram_used_bytes = ram_total_bytes.saturating_sub(mem_available_kb * 1024);
+
+    let loadavg = std::fs::read_to_string("/proc/loadavg").ok()?;
+    let mut parts = loadavg.split_whitespace();
+    let load_1m: f64 = parts.next()?.parse().ok()?;
+    let load_5m: f64 = parts.next()?.parse().ok()?;
+    let load_15m: f64 = parts.next()?.parse().ok()?;
+
+    let cpu_cores = std::fs::read_to_string("/proc/cpuinfo")
+        .map(|s| {
+            s.lines()
+                .filter(|l| l.starts_with("processor"))
+                .count()
+                .max(1)
+        })
+        .unwrap_or(1);
+
+    Some((
+        ram_used_bytes,
+        ram_total_bytes,
+        load_1m,
+        load_5m,
+        load_15m,
+        cpu_cores,
+    ))
+}
+#[cfg(not(target_os = "linux"))]
+fn ram_and_load() -> Option<(u64, u64, f64, f64, f64, usize)> {
+    None
+}
+
+/// `(RAM used %, 1-minute load average)` -- the two host numbers cheap and
+/// small enough to belong on the pinned status line, refreshed every
+/// second. Full detail (RAM in bytes, all three load windows, disk) is
+/// `/stats`'s job, not the HUD's.
+fn host_ram_and_load() -> Option<(f64, f64)> {
+    let (used, total, load_1m, _5m, _15m, _cores) = ram_and_load()?;
+    Some((pct(used, total), load_1m))
+}
+
+/// The whole machine's load, not just this process's -- the operator's real
+/// question is usually "is the box this relay lives on about to fall over,"
+/// which `process_usage` alone can't answer (a relay can look fine while a
+/// neighboring process eats the disk).
+#[cfg(target_os = "linux")]
+async fn host_usage() -> Option<HostUsage> {
+    let (ram_used_bytes, ram_total_bytes, load_1m, load_5m, load_15m, cpu_cores) = ram_and_load()?;
+
+    // `df` in a blocking task: it's a subprocess spawn + wait, which would
+    // otherwise briefly block whichever tokio worker thread polls this.
+    // `/stats` calls this once per invocation, so the cost is bounded --
+    // unlike the pinned line, which deliberately does NOT call this (see
+    // `host_ram_and_load`) precisely to avoid spawning `df` every second.
+    let (disk_used_bytes, disk_total_bytes) = tokio::task::spawn_blocking(disk_usage_here)
+        .await
+        .unwrap_or((None, None));
+
+    Some(HostUsage {
+        ram_used_bytes,
+        ram_total_bytes,
+        load_1m,
+        load_5m,
+        load_15m,
+        cpu_cores,
+        disk_used_bytes,
+        disk_total_bytes,
+    })
+}
+
+/// Disk usage of the filesystem holding the current working directory, via
+/// `df -Pk .` (POSIX output format, so the column layout is stable). Not the
+/// relay's own storage specifically -- everything it holds is in memory, not
+/// on disk -- this is "how full is the disk this process happens to live
+/// on," which is what an operator actually wants to know before that disk
+/// fills up and takes down everything else on the box too.
+#[cfg(target_os = "linux")]
+fn disk_usage_here() -> (Option<u64>, Option<u64>) {
+    let out = match std::process::Command::new("df").args(["-Pk", "."]).output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return (None, None),
+    };
+    let text = String::from_utf8_lossy(&out);
+    let Some(data_line) = text.lines().nth(1) else {
+        return (None, None);
+    };
+    let cols: Vec<&str> = data_line.split_whitespace().collect();
+    // Filesystem, 1024-blocks, Used, Available, Use%, Mounted-on.
+    let Some(total_kb) = cols.get(1).and_then(|s| s.parse::<u64>().ok()) else {
+        return (None, None);
+    };
+    let Some(used_kb) = cols.get(2).and_then(|s| s.parse::<u64>().ok()) else {
+        return (None, None);
+    };
+    (Some(used_kb * 1024), Some(total_kb * 1024))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn host_usage() -> Option<HostUsage> {
     None
 }
 

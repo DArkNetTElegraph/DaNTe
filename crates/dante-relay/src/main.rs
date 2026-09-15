@@ -27,7 +27,13 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::select! {
         r = dante_relay::run(cfg) => { r?; }
-        _ = tokio::signal::ctrl_c() => { tracing::info!("shutting down"); }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("shutting down");
+            // Harmless even if the console never pinned a status line (not
+            // a terminal, `stty` unavailable, etc.) -- see its own doc
+            // comment for why this only covers graceful exits.
+            dante_relay::console::reset_terminal();
+        }
     }
     Ok(())
 }

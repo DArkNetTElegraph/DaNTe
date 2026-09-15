@@ -326,18 +326,26 @@ fi
 
 if [ "$MODE" = desktop ]; then
   info "Launching the desktop app..."
-  # WebKitGTK's native Wayland backend has a known bug where a widget's
-  # scale factor gets queried before it's fully mapped ("GTK-CRITICAL:
-  # gtk_widget_get_scale_factor: assertion 'GTK_IS_WIDGET (widget)' failed"),
-  # which then cascades into a fatal "Gdk-Message: Error 71 (Protocol error)
-  # dispatching to Wayland display" and the app never opens. Forcing GTK's
-  # X11 backend (through XWayland, present on effectively every Wayland
-  # session) is the standard, widely-documented fix across the WebKitGTK/
-  # Tauri ecosystem — not something DaNTe's own code can fix, so this is a
-  # workaround, not a real solution to the underlying GTK bug.
+  # WebKitGTK's native Wayland backend has two known bugs, both worked
+  # around here rather than fixed (neither is DaNTe's own code):
+  # 1. A widget's scale factor gets queried before it's fully mapped
+  #    ("GTK-CRITICAL: gtk_widget_get_scale_factor: assertion
+  #    'GTK_IS_WIDGET (widget)' failed"), cascading into a fatal
+  #    "Gdk-Message: Error 71 (Protocol error) dispatching to Wayland
+  #    display" that stops the window from opening at all. Forcing GTK's
+  #    X11 backend (through XWayland, present on effectively every Wayland
+  #    session) is the standard fix across the WebKitGTK/Tauri ecosystem.
+  # 2. Even with that fix, WebKit's DMA-BUF renderer can fail to allocate
+  #    its GBM render-surface buffer ("Failed to create GBM buffer of size
+  #    WxH: Invalid argument"), leaving the window open but its content
+  #    area permanently black — a GPU-driver/Mesa compatibility gap, not
+  #    a universal Wayland issue like #1. Disabling that renderer falls
+  #    back to one that doesn't hit it. Confirmed fixing a real black-window
+  #    report on a live machine (2026-09-15), not just a documented issue.
   if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    info "Wayland session detected — setting GDK_BACKEND=x11 to avoid a known WebKitGTK/Wayland crash."
-    ( cd apps/dante-desktop && GDK_BACKEND=x11 DANTE_RELAY="$RELAY_ADDR" cargo tauri dev )
+    info "Wayland session detected — setting GDK_BACKEND=x11 and disabling WebKit's DMA-BUF renderer to avoid known WebKitGTK/Wayland crashes."
+    ( cd apps/dante-desktop \
+      && GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 DANTE_RELAY="$RELAY_ADDR" cargo tauri dev )
   else
     ( cd apps/dante-desktop && DANTE_RELAY="$RELAY_ADDR" cargo tauri dev )
   fi

@@ -128,13 +128,20 @@ async fn check_relay_eligibility() {
     match result {
         Ok(latency) => {
             ok(&format!("reachable — round trip {}ms", latency.as_millis()));
+            let same_host_note = if latency.as_millis() < 5 {
+                "  That round trip is fast enough that you're likely checking from the relay's \
+                 own box or LAN, which tells you the port answers but nothing about real-world \
+                 latency for anyone else.\n"
+            } else {
+                ""
+            };
             println!(
-                "  This confirms {addr} answers a real DaNTe protocol round trip from this \
-                 machine. It does NOT confirm reachability from the public internet if this \
-                 box sits behind NAT or a cloud security group — either ask someone outside \
-                 your network to check the same address, or add it to relays/registry.toml and \
-                 let the scheduled relay-status check (which runs from GitHub's own runners) \
-                 confirm it independently."
+                "{same_host_note}  This confirms {addr} answers a real DaNTe protocol round \
+                 trip from this machine. It does NOT confirm reachability from the public \
+                 internet if this box sits behind NAT or a cloud security group — either ask \
+                 someone outside your network to check the same address, or add it to \
+                 relays/registry.toml and let the scheduled relay-status check (which runs from \
+                 GitHub's own runners) confirm it independently."
             );
         }
         Err(e) => {
@@ -171,6 +178,16 @@ async fn find_fastest_relay() {
             r.name,
             r.addr,
             r.latency.as_millis()
+        );
+    }
+    if ranked[0].latency.as_millis() < 5 {
+        println!(
+            "\nNote: {}ms is what a machine right next to (or running) {} sees, not what a \
+             stranger elsewhere would. If you're checking from the relay's own box or LAN, \
+             this number isn't a real-world latency estimate -- it's just confirming the port \
+             answers.",
+            ranked[0].latency.as_millis(),
+            ranked[0].name
         );
     }
     println!(

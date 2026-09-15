@@ -179,7 +179,7 @@ above — it states precisely what is and is not protected.
 
 ### Not done yet
 
-- **Desktop app: signing, auto-update.** The shell itself is in place — it
+- **Desktop app: OS code-signing.** The shell itself is in place — it
   reuses `dante serve` verbatim, opens the window *before* the engine starts
   and narrates each startup step into it, hides to the tray instead of
   quitting, raises OS notifications, has a native application menu bar
@@ -189,12 +189,13 @@ above — it states precisely what is and is not protected.
   `.deb`/`.rpm`/`.AppImage` — see
   [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md#release)).
   What is outstanding: the bundles are unsigned (macOS Gatekeeper and Windows
-  SmartScreen both warn), which needs certificates this project does not have
-  yet. The auto-updater is structurally wired (`tauri-plugin-updater`, a
-  "Check for Updates…" menu item) but inert — it needs the same kind of
-  maintainer-held credential signing doesn't have either, plus an
-  install-prompt UI; see
-  [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md#auto-update).
+  SmartScreen both warn), which needs certificates this single-maintainer
+  project has decided not to buy. Auto-update (2026-09-15) is a separate,
+  free keypair with no certificate authority involved — see
+  [`apps/dante-desktop/README.md`](apps/dante-desktop/README.md#auto-update)
+  for what's built (real signing key, release-manifest assembly, an actual
+  in-app "Restart & Install" prompt) and what's still unverified (no GTK
+  stack here to build or run the desktop shell at all).
 - Desktop support for the **group-call SFU**: the browser path is wired and
   SFrame-gated (`--sfu`, roster threshold, headless-Chromium-verified), but the
   desktop shell's native audio has no SFrame equivalent, so it is deliberately

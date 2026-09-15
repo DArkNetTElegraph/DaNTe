@@ -150,42 +150,49 @@ that says so.
 
 ## Auto-update
 
-The `tauri-plugin-updater` + `tauri-plugin-process` plumbing is wired
-(`tauri.conf.json`'s `plugins.updater`, `Cargo.toml`, a "Check for
-Updates…" item at the top of the application menu) but **not yet
-functional in a release**, on purpose, for the same reason as
-code-signing above.
+Wired end-to-end, using a real signing keypair (2026-09-15) — **not yet
+runtime-verified**, since this dev environment has no GTK/webview stack to
+build or run the desktop shell at all (the same limitation the rest of this
+doc already notes for everything else native), and the release-manifest
+plumbing below only runs on an actual `v*` tag push, which nothing short of
+a real release exercises.
 
-Tauri's updater requires a signature on every update it installs — that
-requirement [cannot be disabled](https://tauri.app/plugin/updater/). The
-`pubkey` currently in `tauri.conf.json` is an **ephemeral placeholder**:
-its matching private key was generated once (`cargo tauri signer generate
---ci`), used only to produce a syntactically valid public key, and
-discarded immediately — nothing ever signs anything with it, and no
-manifest could ever pass its signature check even if one existed. "Check
-for Updates…" is safe to click today; it will report a failure (no
-reachable manifest, or a signature mismatch), never install anything.
+- **Signing**: `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+  are set as GitHub repo secrets, and `tauri.conf.json`'s `pubkey` is the
+  matching real public key (`cargo tauri signer generate` was run once; the
+  private key and its password exist only as that GitHub secret — this
+  project has one maintainer, so there was no third party to hand the
+  keystore file to). This is a separate, free keypair from OS-level
+  code-signing certificates (still not provisioned — see above): it proves
+  an update came from this project's own release process, nothing to do
+  with Gatekeeper/SmartScreen trust, and needs no certificate authority.
+- **Release manifest**: `.github/workflows/release.yml`'s `desktop-bundle`
+  job now passes the signing env vars to `cargo tauri build`, which (via
+  `createUpdaterArtifacts: true`, already set) additionally emits a `.sig`
+  file next to each platform's updater-format artifact (`.app.tar.gz` on
+  macOS, `.AppImage.tar.gz` on Linux, the NSIS installer under
+  `nsis-updater/` on Windows). A new step per platform reads its `.sig` and
+  builds a small JSON fragment (`{os}-{arch}: {signature, url}}`, using
+  Tauri's own platform-key naming); a final `assemble-latest-json` job
+  merges all three fragments into one manifest and uploads it as the
+  `latest.json` release asset the `pubkey`'s endpoint already expects. A
+  platform whose `.sig` is missing (e.g. signing secrets unset) contributes
+  no entry rather than failing the release.
+- **The prompt**: the native side checks on a timer (starting a minute
+  after launch, then every 6 hours) and from "Check for Updates…" in the
+  application menu (`apps/dante-desktop/src/update.rs`). Finding one emits
+  a `dante://update-available` event the shared web UI
+  (`crates/dante-cli/web/index.html`'s `setupDesktopUpdatePrompt`, a no-op
+  in the plain-browser `dante serve` build — it checks for
+  `window.__TAURI__` first) turns into a toast: "Update vX.Y.Z available",
+  with **Restart & Install** and **Later**. Accepting invokes
+  `install_pending_update`, which downloads, verifies against the pubkey
+  above, installs, and restarts into the new build; a failure (network,
+  signature mismatch) is shown inline in the toast rather than retried
+  silently.
 
-To make it real, a maintainer needs to:
-
-1. Generate a real keypair: `cargo tauri signer generate -w
-   ~/.tauri/dante.key` (keep the private key **and its password**; losing
-   either means old installs can never verify a future update).
-2. Replace `pubkey` in `tauri.conf.json` with the real public key.
-3. Add the private key (and its password, if set) as GitHub secrets
-   (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) and
-   wire them into the `desktop-bundle` job in
-   `.github/workflows/release.yml` — `createUpdaterArtifacts: true` (already
-   set) makes `cargo tauri build` also produce the signed update
-   archives once those env vars are present.
-4. Add a step that assembles a `latest.json` manifest (see [the updater
-   guide](https://tauri.app/plugin/updater/#update-artifacts)) from the
-   three platforms' signed archives and uploads it as a release asset
-   named `latest.json` — the endpoint already configured
-   (`https://github.com/DArkNetTElegraph/DaNTe/releases/latest/download/latest.json`)
-   is the standard GitHub-releases convention for exactly that file, so no
-   further endpoint change should be needed once it exists.
-5. Decide on and build an actual "an update is available" UI — right now
-   a found update is only logged to stderr, not offered to the user, since
-   installing without asking is not something this project should do
-   silently.
+What this doesn't cover: `macos-latest` GitHub runners build Apple
+Silicon (`darwin-aarch64`); there is no Intel-mac (`darwin-x86_64`) build
+in the matrix, so an Intel Mac install would never see an update offered.
+Building a universal binary (or a second matrix leg) is a real follow-up,
+not done here.

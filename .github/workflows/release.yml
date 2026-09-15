@@ -128,13 +128,23 @@ jobs:
         working-directory: apps/dante-desktop
         run: cargo tauri icon icons/icon.png
 
-      # Unsigned by default: with no code-signing secrets configured, this
-      # produces a real, installable bundle for each platform, but macOS
-      # Gatekeeper and Windows SmartScreen will warn on first launch. See
-      # apps/dante-desktop/README.md's "Release" section for what signing
-      # would need and why it isn't wired up yet.
+      # Code-signing (Gatekeeper/SmartScreen trust) is unconfigured — this
+      # project has no maintainer-held Apple/Windows certificates, so macOS
+      # and Windows will still warn on first launch. See
+      # apps/dante-desktop/README.md's "Release" section. Update-signing is
+      # a separate, unrelated key (TAURI_SIGNING_PRIVATE_KEY): it proves an
+      # update came from this project's own release process, nothing to do
+      # with OS-level trust, and needs no certificate authority — just the
+      # keypair `cargo tauri signer generate` made once. With it present,
+      # `createUpdaterArtifacts: true` in tauri.conf.json makes this step
+      # also emit a `.sig` file next to each updater-format artifact
+      # (`.app.tar.gz` on macOS, `.AppImage.tar.gz` on Linux, the NSIS
+      # installer `.exe` under `nsis-updater/` on Windows).
       - name: Build the bundle
         working-directory: apps/dante-desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build
 
       - name: Upload the run's artifacts
@@ -144,11 +154,15 @@ jobs:
           path: |
             apps/dante-desktop/target/release/bundle/**/*.dmg
             apps/dante-desktop/target/release/bundle/**/*.app.tar.gz
+            apps/dante-desktop/target/release/bundle/**/*.app.tar.gz.sig
             apps/dante-desktop/target/release/bundle/**/*.msi
             apps/dante-desktop/target/release/bundle/**/*.exe
+            apps/dante-desktop/target/release/bundle/**/*.exe.sig
             apps/dante-desktop/target/release/bundle/**/*.deb
             apps/dante-desktop/target/release/bundle/**/*.rpm
             apps/dante-desktop/target/release/bundle/**/*.AppImage
+            apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz
+            apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz.sig
           if-no-files-found: warn
 
       - name: Attach the bundle to the GitHub release
@@ -158,13 +172,105 @@ jobs:
         run: |
           shopt -s nullglob globstar
           files=(apps/dante-desktop/target/release/bundle/**/*.dmg
+                 apps/dante-desktop/target/release/bundle/**/*.app.tar.gz
                  apps/dante-desktop/target/release/bundle/**/*.msi
                  apps/dante-desktop/target/release/bundle/**/*.exe
                  apps/dante-desktop/target/release/bundle/**/*.deb
                  apps/dante-desktop/target/release/bundle/**/*.rpm
-                 apps/dante-desktop/target/release/bundle/**/*.AppImage)
+                 apps/dante-desktop/target/release/bundle/**/*.AppImage
+                 apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "no desktop bundle files were produced for ${{ matrix.os }}" >&2
             exit 1
           fi
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+
+      # The .sig files themselves are never downloaded by anyone — the
+      # updater client only ever fetches latest.json (assembled below, once
+      # every platform's fragment is in) and the update artifact it points
+      # to. This step just reads each .sig produced above and turns it,
+      # plus the matching artifact's release download URL, into one JSON
+      # fragment keyed by Tauri's own `{os}-{arch}` naming
+      # (linux-x86_64/darwin-x86_64/darwin-aarch64/windows-x86_64) — see
+      # tauri-plugin-updater's `updater_os`/`updater_arch` for where that
+      # naming comes from. A platform with no updater artifact (nothing
+      # built, or signing wasn't configured) contributes an empty fragment
+      # rather than failing the job — this could plausibly run before
+      # secrets are configured.
+      - name: Assemble this platform's update-manifest fragment
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          case "${{ runner.os }}" in
+            Linux) pattern="apps/dante-desktop/target/release/bundle/**/*.AppImage.tar.gz" ;;
+            macOS) pattern="apps/dante-desktop/target/release/bundle/**/*.app.tar.gz" ;;
+            Windows) pattern="apps/dante-desktop/target/release/bundle/nsis-updater/*.exe" ;;
+            *) echo "unknown runner.os: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          artifacts=($pattern)
+          fragment="{}"
+          for artifact in "${artifacts[@]}"; do
+            sig_file="$artifact.sig"
+            if [ ! -f "$sig_file" ]; then
+              echo "no .sig next to $artifact — signing secrets likely unset, skipping" >&2
+              continue
+            fi
+            case "${{ runner.os }}" in
+              Linux) key="linux-x86_64" ;;
+              Windows) key="windows-x86_64" ;;
+              macOS)
+                case "$(uname -m)" in
+                  arm64|aarch64) key="darwin-aarch64" ;;
+                  *) key="darwin-x86_64" ;;
+                esac
+                ;;
+            esac
+            url="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$(basename "$artifact")"
+            fragment=$(jq -n --arg key "$key" --arg sig "$(cat "$sig_file")" --arg url "$url" \
+              '{($key): {signature: $sig, url: $url}}')
+          done
+          echo "$fragment" > latest-json-fragment.json
+          cat latest-json-fragment.json
+
+      - name: Upload this platform's update-manifest fragment
+        uses: actions/upload-artifact@v7
+        with:
+          name: latest-json-fragment-${{ matrix.os }}
+          path: latest-json-fragment.json
+          if-no-files-found: warn
+
+  assemble-latest-json:
+    name: assemble latest.json
+    needs: desktop-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every platform's fragment
+        uses: actions/download-artifact@v6
+        with:
+          pattern: latest-json-fragment-*
+          path: fragments
+          merge-multiple: false
+
+      # Each fragment landed in its own subdirectory (merge-multiple:false,
+      # so a platform contributing an empty `{}` can't collide filenames
+      # with another's real fragment.json). `jq -s add` merges every
+      # fragment object's keys into one `platforms` map — safe because each
+      # platform's step above only ever sets its own `{os}-{arch}` key.
+      - name: Merge into one manifest and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          platforms=$(find fragments -name '*.json' -exec cat {} \; | jq -s 'add // {}')
+          pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          jq -n --arg version "${{ github.ref_name }}" --arg pub_date "$pub_date" \
+            --argjson platforms "$platforms" \
+            '{version: $version, notes: ("Release " + $version), pub_date: $pub_date, platforms: $platforms}' \
+            > latest.json
+          echo "-- assembled manifest --"
+          cat latest.json
+          if [ "$(jq '.platforms | length' latest.json)" -eq 0 ]; then
+            echo "::warning::latest.json has no platforms — update-signing secrets are probably unset; publishing anyway so the release isn't blocked, but no client will find an update from it"
+          fi
+          gh release upload "${{ github.ref_name }}" latest.json --clobber

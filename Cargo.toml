@@ -40,7 +40,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 # 1.91 is OpenMLS 0.9's floor (pulled in by dante-mls -> dante-core -> dante-cli).
 rust-version = "1.91"
@@ -51,17 +51,17 @@ authors = ["The DaNTe contributors"]
 [workspace.dependencies]
 # Internal crates. Explicit versions so `cargo deny` does not read the bare
 # path deps as wildcard-version dependencies.
-dante-crypto = { path = "crates/dante-crypto", version = "0.0.1" }
-dante-identity = { path = "crates/dante-identity", version = "0.0.1" }
-dante-ledger = { path = "crates/dante-ledger", version = "0.0.1" }
-dante-proto = { path = "crates/dante-proto", version = "0.0.1" }
-dante-net = { path = "crates/dante-net", version = "0.0.1" }
-dante-dm = { path = "crates/dante-dm", version = "0.0.1" }
-dante-mls = { path = "crates/dante-mls", version = "0.0.1" }
-dante-core = { path = "crates/dante-core", version = "0.0.1" }
-dante-voice = { path = "crates/dante-voice", version = "0.0.1" }
-dante-sfu = { path = "crates/dante-sfu", version = "0.0.1" }
-dante-p2p = { path = "crates/dante-p2p", version = "0.0.1" }
+dante-crypto = { path = "crates/dante-crypto", version = "0.1.0" }
+dante-identity = { path = "crates/dante-identity", version = "0.1.0" }
+dante-ledger = { path = "crates/dante-ledger", version = "0.1.0" }
+dante-proto = { path = "crates/dante-proto", version = "0.1.0" }
+dante-net = { path = "crates/dante-net", version = "0.1.0" }
+dante-dm = { path = "crates/dante-dm", version = "0.1.0" }
+dante-mls = { path = "crates/dante-mls", version = "0.1.0" }
+dante-core = { path = "crates/dante-core", version = "0.1.0" }
+dante-voice = { path = "crates/dante-voice", version = "0.1.0" }
+dante-sfu = { path = "crates/dante-sfu", version = "0.1.0" }
+dante-p2p = { path = "crates/dante-p2p", version = "0.1.0" }
 
 # Shared third-party deps (kept minimal; phases add their own)
 thiserror = "2"

@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "dante-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dante-core",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "dante-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dante-crypto",
  "dante-dm",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "dante-crypto"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "dante-dm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dante-crypto",
  "dante-identity",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "dante-identity"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bip39",
  "ciborium",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "dante-ledger"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dante-crypto",
  "dante-identity",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "dante-mls"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dante-crypto",
  "dante-proto",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "dante-net"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "dante-crypto",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "dante-p2p"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "dante-proto"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dante-crypto",
  "hex-literal",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "dante-relay"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "dante-relay-check"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dante-crypto",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "dante-sfu"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "dante-net",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "dante-voice"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",

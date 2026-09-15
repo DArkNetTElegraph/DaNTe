@@ -40,7 +40,7 @@ dante-net = { workspace = true, features = ["unfurl"] }
 # dependency (rustls) is already pulled in by dante-net's own `unfurl`
 # feature above — so the embedded relay can offer the operator's opt-in
 # relay-side unfurl toggle same as the standalone `dante-relay` binary.
-dante-relay = { path = "../dante-relay", version = "0.0.1", features = ["unfurl"] }
+dante-relay = { path = "../dante-relay", version = "0.1.0", features = ["unfurl"] }
 anyhow.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

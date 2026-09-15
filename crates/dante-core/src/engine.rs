@@ -3040,6 +3040,18 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Stop DHT participation: shuts down the libp2p driver task and drops
+    /// the node. A no-op if p2p was never enabled. The relay connection is
+    /// untouched — this only opts back out of the DHT key-directory
+    /// fallback and ledger gossip, matching [`enable_p2p`](Engine::enable_p2p)'s
+    /// "on top of the relay, not instead of it" role.
+    #[cfg(feature = "p2p")]
+    pub async fn disable_p2p(&mut self) {
+        if let Some(p2p) = self.p2p.take() {
+            p2p.shutdown().await;
+        }
+    }
+
     /// Resolve a peer's prekey bundle straight from the DHT (skips the relay).
     /// `None` if p2p is not enabled or the record is not found. Exposed mainly
     /// for tests and diagnostics.

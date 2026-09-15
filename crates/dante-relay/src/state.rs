@@ -228,6 +228,9 @@ const MAX_PREKEY_IDENTITIES: usize = 100_000;
 const MAX_KEYPKG_IDENTITIES: usize = 100_000;
 /// Cap on distinct channels the relay logs for.
 const MAX_CHANNELS: usize = 100_000;
+/// Cap on `channel_ids` in one `Request::ChannelHeads` call — a client is
+/// just checking its own membership list, never needs thousands at once.
+const MAX_CHANNEL_HEADS_PER_REQUEST: usize = 2_000;
 /// Cap on distinct channels the relay holds a roster for. A roster is set by
 /// a self-signed `server_root` with no allow-list — anyone can mint a
 /// keypair, pick an unused `channel_id`, and bind it — so without this cap
@@ -1189,6 +1192,30 @@ impl RelayState {
                     }
                 };
                 Response::ChannelLog(out)
+            }
+
+            Request::ChannelHeads { channel_ids } => {
+                if !self.read_rl.check(&ip, now, 1.0) {
+                    return Response::Error("rate limited".into());
+                }
+                if channel_ids.len() > MAX_CHANNEL_HEADS_PER_REQUEST {
+                    return Response::Error("too many channel ids in one request".into());
+                }
+                let heads = channel_ids
+                    .into_iter()
+                    .map(|id| {
+                        // `next_seq` is the seq the *next* post will get, so the
+                        // current head is one less; an unknown/empty channel
+                        // (no entry yet, `next_seq` starts at 1) reports 0.
+                        let head = self
+                            .channels
+                            .get(&id)
+                            .map(|(next_seq, _, _)| next_seq.saturating_sub(1))
+                            .unwrap_or(0);
+                        (id, head)
+                    })
+                    .collect();
+                Response::ChannelHeads(heads)
             }
 
             Request::PostSignal { topic, blob } => {
@@ -2266,6 +2293,56 @@ mod tests {
             s.handle(post_to_channel(&poster, ch, vec![7u8; 1000]), IP, 1_000),
             Response::Posted(_)
         ));
+    }
+
+    #[test]
+    fn channel_heads_survives_partial_eviction_and_reports_zero_for_unknown_channels() {
+        let mut s = state();
+        let ch = [21u8; 32];
+        let unknown = [22u8; 32];
+        let poster = Identity::generate(0);
+        announce(&mut s, &poster);
+        let root = SignSecret::from_bytes(&[10u8; 32]);
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&root, ch, 1, vec![*poster.id().as_bytes()]),
+                IP,
+                1_000
+            ),
+            Response::Ok
+        );
+        assert!(matches!(
+            s.handle(post_to_channel(&poster, ch, vec![7u8; 1000]), IP, 1_000),
+            Response::Posted(_)
+        ));
+        // Two more, late enough that a `maintain` sweep just past the first
+        // post's TTL expires only that one.
+        let later = 1_000 + BLOB_TTL_MS - 100;
+        for _ in 0..2u64 {
+            assert!(matches!(
+                s.handle(post_to_channel(&poster, ch, vec![7u8; 1000]), IP, later),
+                Response::Posted(_)
+            ));
+        }
+        s.maintain(1_000 + BLOB_TTL_MS + 1);
+        // The first post is gone, but the channel itself survives (2 entries
+        // still within TTL) -- next_seq, and so ChannelHeads, still counts
+        // all 3 posts, not just the 2 that are still retained.
+        let Response::ChannelHeads(heads) = s.handle(
+            Request::ChannelHeads {
+                channel_ids: vec![ch, unknown],
+            },
+            IP,
+            1_000,
+        ) else {
+            panic!("expected ChannelHeads");
+        };
+        assert_eq!(
+            heads,
+            vec![(ch, 3), (unknown, 0)],
+            "head seq for a channel keeps counting past partial TTL \
+             eviction of its stored entries; an unseen channel reports 0"
+        );
     }
 
     #[test]

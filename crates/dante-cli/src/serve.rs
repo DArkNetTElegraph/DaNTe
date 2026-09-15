@@ -1692,12 +1692,21 @@ const ICE_REFRESH_MARGIN_SECS: u64 = 300;
 ///   unresponsive relay. A relay that gains a TURN config is picked up on the
 ///   next connect.
 fn ice_needs_refresh(servers: &[dante_core::IceServer], now_secs: u64) -> bool {
-    servers.iter().any(|s| {
-        !s.username.is_empty()
-            && s.username
-                .parse::<u64>()
-                .map_or(true, |expiry| expiry <= now_secs + ICE_REFRESH_MARGIN_SECS)
-    })
+    // Empty always means "try again," not "stable, nothing to refresh": the
+    // relay's operator can turn on TURN/STUN at any time after a client
+    // already cached an empty list from before that. This costs one relay
+    // round trip per call-start attempt for a deployment that genuinely has
+    // no TURN configured -- a real but small cost, paid only when a user
+    // actually tries to start a call, against the alternative of voice
+    // staying silently, permanently broken for every already-running client
+    // until each one is restarted.
+    servers.is_empty()
+        || servers.iter().any(|s| {
+            !s.username.is_empty()
+                && s.username
+                    .parse::<u64>()
+                    .map_or(true, |expiry| expiry <= now_secs + ICE_REFRESH_MARGIN_SECS)
+        })
 }
 
 /// The `GET /api/ice` body: the ICE servers the page hands `RTCPeerConnection`.
@@ -5302,9 +5311,10 @@ mod tests {
         assert!(ice_needs_refresh(&[turn(now - 1)], now));
         // STUN has no expiry, so a STUN-only config never triggers a fetch.
         assert!(!ice_needs_refresh(std::slice::from_ref(&stun), now));
-        // Nothing learned: connect already asked, and re-asking would put a
-        // relay round trip on every call start for a no-TURN deployment.
-        assert!(!ice_needs_refresh(&[], now));
+        // Nothing learned yet: always worth trying again, since the relay's
+        // operator can enable TURN at any point after this client already
+        // cached an empty result -- an empty list must never look "stable".
+        assert!(ice_needs_refresh(&[], now));
         // A username we cannot parse is treated as unknown, so refresh.
         assert!(ice_needs_refresh(
             &[dante_core::IceServer {

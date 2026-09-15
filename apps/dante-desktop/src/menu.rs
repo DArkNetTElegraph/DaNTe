@@ -12,32 +12,7 @@
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::App;
 
-/// Check for an update and log the result. Does not install one: the updater
-/// plugin is wired (see `apps/dante-desktop/Cargo.toml` and `tauri.conf.json`)
-/// but has no real signing key behind it yet — every check will either fail
-/// to reach a real manifest or fail signature verification against the
-/// placeholder pubkey, by design, until a maintainer wires a real keypair
-/// into the release workflow. See the README's "Auto-update" section.
-async fn check_for_updates(app: tauri::AppHandle) {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = match app.updater() {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("dante-desktop: updater unavailable: {e}");
-            return;
-        }
-    };
-    match updater.check().await {
-        Ok(Some(update)) => {
-            eprintln!(
-                "dante-desktop: update {} available (not installed — no install-prompt UI yet)",
-                update.version
-            );
-        }
-        Ok(None) => eprintln!("dante-desktop: no update available"),
-        Err(e) => eprintln!("dante-desktop: update check failed: {e}"),
-    }
-}
+use crate::update::check_for_updates;
 
 /// Build and attach the application menu bar.
 pub fn install(app: &App) -> tauri::Result<()> {

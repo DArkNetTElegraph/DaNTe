@@ -282,16 +282,17 @@ img.sticker { display: block; max-width: 180px; max-height: 180px; object-fit: c
 #callbar button.hangup, #gcallbar button.hangup { background: var(--blazing-flame); color: #fff; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
 
-#call-toast, #gcall-toast { position: fixed; right: 18px; z-index: 90;
+#call-toast, #gcall-toast, #update-toast { position: fixed; right: 18px; z-index: 90;
   background: var(--bg-pane); border: 1px solid var(--divider); border-radius: 10px;
   box-shadow: 0 16px 40px rgba(0,0,0,.45); padding: 14px 16px; display: flex;
   gap: 10px; align-items: center; font-size: 13px; color: var(--text); }
 #call-toast { bottom: 18px; }
 #gcall-toast { bottom: 92px; }
-#call-toast button, #gcall-toast button { border: 0; border-radius: 6px; padding: 6px 12px;
+#update-toast { bottom: 166px; }
+#call-toast button, #gcall-toast button, #update-toast button { border: 0; border-radius: 6px; padding: 6px 12px;
   font-weight: 700; font-size: 12px; cursor: pointer; }
-#call-toast .accept, #gcall-toast .accept { background: #3fbf6f; color: #08240f; }
-#call-toast .decline, #gcall-toast .decline { background: var(--blazing-flame); color: #fff; }
+#call-toast .accept, #gcall-toast .accept, #update-toast .accept { background: #3fbf6f; color: #08240f; }
+#call-toast .decline, #gcall-toast .decline, #update-toast .decline { background: var(--blazing-flame); color: #fff; }
 
 .pane-scroll { flex: 1; overflow-y: auto; padding: 10px 8px; }
 .group-label {
@@ -846,7 +847,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 #mention-popup { animation: pop-in .12s cubic-bezier(.2,.9,.3,1); }
 
 /* Toasts slide in from the right (JS only rebuilds them when they change). */
-#call-toast:not([hidden]), #gcall-toast:not([hidden]) { animation: toast-in .22s cubic-bezier(.2,.9,.3,1); }
+#call-toast:not([hidden]), #gcall-toast:not([hidden]), #update-toast:not([hidden]) { animation: toast-in .22s cubic-bezier(.2,.9,.3,1); }
 
 /* Bars that appear above the composer / log. */
 #replybar:not([hidden]), #callbar:not([hidden]), #gcallbar:not([hidden]) { animation: slide-down .16s ease; }
@@ -903,7 +904,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 
 /* Floating surfaces: one elevation language. */
 .settings-box, .search-box, .pins-box, .modal,
-#call-toast, #gcall-toast {
+#call-toast, #gcall-toast, #update-toast {
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -944,7 +945,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 /* Solid accent buttons get a faint top highlight for depth. */
 .composer button:not(.ghost-icon), .modal button:not(.ghost),
 #onboard button:not(.ghost), #callbar button, #gcallbar button,
-#call-toast button, #gcall-toast button {
+#call-toast button, #gcall-toast button, #update-toast button {
   border-radius: var(--radius-sm);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.14), var(--shadow-sm);
 }
@@ -1054,6 +1055,7 @@ a.file-row:hover { border-color: var(--cornflower-blue); }
 
 <div id="call-toast" hidden></div>
 <div id="gcall-toast" hidden></div>
+<div id="update-toast" hidden></div>
 
 <script nonce="__DANTE_CSP_NONCE__">
 "use strict";
@@ -1140,6 +1142,7 @@ const ICONS = {
   headphones: '<path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="2.5" y="13.5" width="4.5" height="7" rx="1.6"/><rect x="17" y="13.5" width="4.5" height="7" rx="1.6"/>',
   lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
   monitor: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 19h16"/>',
 };
 function svgIcon(name) {
   return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
@@ -3898,6 +3901,53 @@ function renderGroupCallBar() {
   bar.appendChild(leave);
 }
 
+// Desktop-shell only: the browser build of this page (plain `dante serve`)
+// has no `window.__TAURI__` and this is a no-op there. The native side
+// (apps/dante-desktop) checks for an update at startup and on a timer, and
+// emits "dante://update-available" the moment it finds one; this just
+// renders the offer and, on acceptance, hands back to the native side to
+// download, verify, and install it (installing here in JS isn't possible —
+// only the native updater plugin can replace the running app's own files).
+function setupDesktopUpdatePrompt() {
+  const tauri = window.__TAURI__;
+  if (!tauri || !tauri.event || !tauri.core) return;
+  const toast = $("#update-toast");
+  let installing = false;
+  tauri.event.listen("dante://update-available", (e) => {
+    if (installing) return; // already mid-install from an earlier prompt
+    const { version } = e.payload || {};
+    toast.hidden = false;
+    toast.innerHTML = "";
+    const lbl = el("span");
+    lbl.innerHTML = svgIcon("download") + " Update"
+      + (version ? " " + esc(version) : "") + " available";
+    toast.appendChild(lbl);
+    const install = el("button", "accept", "Restart & Install");
+    install.onclick = async () => {
+      if (installing) return;
+      installing = true;
+      install.disabled = true;
+      install.textContent = "Installing…";
+      try {
+        await tauri.core.invoke("install_pending_update");
+        // On success the native side relaunches the app itself; if we're
+        // still here after a few seconds, something didn't restart as
+        // expected, so fall through to the catch-equivalent below instead
+        // of leaving the button stuck on "Installing…" forever.
+      } catch (err) {
+        installing = false;
+        install.disabled = false;
+        install.textContent = "Restart & Install";
+        lbl.textContent = "Update failed: " + (err && err.message ? err.message : String(err));
+      }
+    };
+    toast.appendChild(install);
+    const dismiss = el("button", "decline", "Later");
+    dismiss.onclick = () => { toast.hidden = true; };
+    toast.appendChild(dismiss);
+  });
+}
+
 function renderGroupCallToast() {
   const toast = $("#gcall-toast");
   // An invite/in-progress call for a channel that isn't the one currently open.
@@ -5551,6 +5601,7 @@ async function init() {
 }
 paintIcons();
 init();
+setupDesktopUpdatePrompt();
 </script>
 </body>
 </html>

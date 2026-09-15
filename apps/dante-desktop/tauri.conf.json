@@ -23,7 +23,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhEMENDNjIwMTJBOEE4NEIKUldSTHFLZ1NJTVlNalNKc2FuZXNPdjZkemNLZjAzVXJQUXAzZkwwSno3aTQxamVFME1YbkQrcDMK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRBNzNCRkNFODczQzAxRDEKUldUUkFUeUh6cjl6U2diaVlSMUJHdnVRMFJxdnZRUFczamh6dWFMMXBlNUtmSk1FeDh5ckR6NnMK",
       "endpoints": [
         "https://github.com/DArkNetTElegraph/DaNTe/releases/latest/download/latest.json"
       ]

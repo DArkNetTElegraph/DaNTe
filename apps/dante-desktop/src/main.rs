@@ -21,6 +21,10 @@
 //!   standard Edit operations (cut/copy/paste/undo/redo), and Window
 //!   (minimize/fullscreen) — the OS menu bar on macOS, the window's own menu
 //!   bar on Windows and Linux.
+//! - **Auto-update** (`update`): checks on a timer (and from the menu), and
+//!   on finding one, offers to install it right in the web UI (see
+//!   `crates/dante-cli/web/index.html`'s `setupDesktopUpdatePrompt`) rather
+//!   than a separate native dialog.
 //!
 //! Config comes from the environment, matching `dante serve`:
 //!   DANTE_HOME        directory for the keystore + encrypted state
@@ -35,6 +39,7 @@ mod localapi;
 mod menu;
 mod notify;
 mod tray;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -263,7 +268,11 @@ fn main() -> Result<()> {
             url: Mutex::new(None),
             swapped: AtomicBool::new(false),
         })
-        .invoke_handler(tauri::generate_handler![open_app_anyway])
+        .manage(update::PendingUpdate::default())
+        .invoke_handler(tauri::generate_handler![
+            open_app_anyway,
+            update::install_pending_update
+        ])
         .setup(|app| {
             // The window comes up first, before any engine work, so startup is
             // something you watch rather than something you wait out.
@@ -289,6 +298,20 @@ fn main() -> Result<()> {
                             error: e.to_string(),
                         }),
                     );
+                }
+            });
+
+            // Check for an update on a timer, not just from the menu item —
+            // this is what makes it "DaNTe prompts you", not "you have to
+            // remember to go looking". Delayed on first run so it doesn't
+            // compete with startup's own network activity (relay dial,
+            // ledger sync, PoW) for attention or bandwidth.
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                loop {
+                    update::check_for_updates(update_handle.clone()).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
                 }
             });
 

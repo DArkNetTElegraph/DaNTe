@@ -91,6 +91,25 @@ pub enum Request {
         /// Return entries with sequence number greater than this.
         since_seq: u64,
     },
+    /// The current head `seq` for each of several channels, batched to avoid
+    /// one round trip per channel. Unlike [`Request::FetchChannel`], this is
+    /// answered from the channel's post counter, not from what's still
+    /// retained -- so a channel that's dropped its *oldest* entries to a
+    /// storage cap or TTL still reports its true head, not just what a
+    /// `FetchChannel` could still return. That's what makes an honest "you
+    /// missed N messages" count possible for the common case.
+    ///
+    /// One real gap: a relay's periodic GC drops a channel's post counter
+    /// along with its last retained entry once *every* entry has expired
+    /// (`dante-relay`'s `maintain`), so a channel gone fully quiet past its
+    /// TTL resets to head `0` here too -- the same as one this relay has
+    /// never seen. A member who was away longer than that TTL undercounts,
+    /// in the one case where the miss was largest.
+    ChannelHeads {
+        /// The channel ids to look up. A channel this relay has never seen
+        /// (or has none of yet) is reported back as head `0`.
+        channel_ids: Vec<[u8; 32]>,
+    },
     /// Post an ephemeral, unlogged signal (e.g. a typing indicator) under a
     /// shared `topic`. The relay holds each for a few seconds only and never
     /// persists it. Fire-and-forget: the reply is [`Response::Ok`].
@@ -217,6 +236,9 @@ pub enum Response {
     Blob(Option<Vec<u8>>),
     /// Reply to [`Request::FetchChannel`]: `(seq, blob)` pairs in order.
     ChannelLog(Vec<(u64, Vec<u8>)>),
+    /// Reply to [`Request::ChannelHeads`]: `(channel_id, head_seq)` pairs, in
+    /// the same order the ids were asked for.
+    ChannelHeads(Vec<([u8; 32], u64)>),
     /// Reply to [`Request::FetchSignals`]: opaque payloads, oldest first.
     Signals(Vec<Vec<u8>>),
     /// Reply to [`Request::GetIceConfig`]: the ICE servers for this network.
@@ -279,6 +301,7 @@ const REQ_SFU_PULL: u8 = 21;
 const REQ_SFU_LEAVE: u8 = 22;
 const REQ_UNFURL: u8 = 23;
 const REQ_SET_CHANNEL_ROSTER: u8 = 24;
+const REQ_CHANNEL_HEADS: u8 = 25;
 
 const RES_PONG: u8 = 0;
 const RES_OK: u8 = 1;
@@ -297,6 +320,7 @@ const RES_P2P_PEERS: u8 = 13;
 const RES_SFU_ANSWER: u8 = 14;
 const RES_SFU_ICE: u8 = 15;
 const RES_UNFURL: u8 = 16;
+const RES_CHANNEL_HEADS: u8 = 17;
 
 /// Upper bound on how many elements a length-prefixed list decoder will
 /// pre-reserve. A count field is untrusted `u32` wire data and each element is
@@ -523,6 +547,10 @@ impl Request {
             } => {
                 w.u8(REQ_FETCH_CHANNEL).fixed(channel_id).u64(*since_seq);
             }
+            Request::ChannelHeads { channel_ids } => {
+                w.u8(REQ_CHANNEL_HEADS);
+                write_id_list(&mut w, channel_ids);
+            }
             Request::PostSignal { topic, blob } => {
                 w.u8(REQ_POST_SIGNAL).fixed(topic).bytes(blob);
             }
@@ -608,6 +636,9 @@ impl Request {
                 channel_id: r.fixed::<32>()?,
                 since_seq: r.u64()?,
             },
+            REQ_CHANNEL_HEADS => Request::ChannelHeads {
+                channel_ids: read_id_list(&mut r)?,
+            },
             REQ_POST_SIGNAL => Request::PostSignal {
                 topic: r.fixed::<32>()?,
                 blob: r.bytes()?.to_vec(),
@@ -683,6 +714,7 @@ impl Request {
             Request::PostToChannel { .. } => "PostToChannel",
             Request::SetChannelRoster { .. } => "SetChannelRoster",
             Request::FetchChannel { .. } => "FetchChannel",
+            Request::ChannelHeads { .. } => "ChannelHeads",
             Request::PostSignal { .. } => "PostSignal",
             Request::FetchSignals { .. } => "FetchSignals",
             Request::GetIceConfig => "GetIceConfig",
@@ -750,6 +782,12 @@ impl Response {
                 w.u8(RES_CHANNEL_LOG).u32(entries.len() as u32);
                 for (seq, blob) in entries {
                     w.u64(*seq).bytes(blob);
+                }
+            }
+            Response::ChannelHeads(heads) => {
+                w.u8(RES_CHANNEL_HEADS).u32(heads.len() as u32);
+                for (channel_id, seq) in heads {
+                    w.fixed(channel_id).u64(*seq);
                 }
             }
             Response::Signals(blobs) => {
@@ -838,6 +876,17 @@ impl Response {
                 }
                 Response::ChannelLog(out)
             }
+            RES_CHANNEL_HEADS => {
+                let n = r.u32()? as usize;
+                if n > r.remaining() {
+                    return Err(WireError::LengthTooLarge(n as u64));
+                }
+                let mut out = Vec::with_capacity(n.min(LIST_PREALLOC_CAP));
+                for _ in 0..n {
+                    out.push((r.fixed::<32>()?, r.u64()?));
+                }
+                Response::ChannelHeads(out)
+            }
             RES_SIGNALS => Response::Signals(read_blob_list(&mut r)?),
             RES_ICE => Response::IceConfig(read_ice_list(&mut r)?),
             RES_KEYPKG => Response::KeyPackage(if r.bool()? {
@@ -921,6 +970,12 @@ mod tests {
             channel_id: [4u8; 32],
             since_seq: 7,
         });
+        rt_req(Request::ChannelHeads {
+            channel_ids: vec![[4u8; 32], [9u8; 32]],
+        });
+        rt_req(Request::ChannelHeads {
+            channel_ids: vec![],
+        });
         rt_req(Request::PostSignal {
             topic: [5u8; 32],
             blob: vec![7, 7, 7],
@@ -975,6 +1030,11 @@ mod tests {
         rt_res(Response::Blob(Some(vec![1, 1])));
         rt_res(Response::Blob(None));
         rt_res(Response::ChannelLog(vec![(1, vec![9]), (2, vec![])]));
+        rt_res(Response::ChannelHeads(vec![
+            ([4u8; 32], 12),
+            ([9u8; 32], 0),
+        ]));
+        rt_res(Response::ChannelHeads(vec![]));
         rt_res(Response::Signals(vec![vec![1, 2], vec![]]));
         rt_res(Response::KeyPackage(Some(vec![5, 6, 7])));
         rt_res(Response::KeyPackage(None));

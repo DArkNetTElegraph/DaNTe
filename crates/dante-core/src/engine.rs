@@ -1848,6 +1848,36 @@ impl Engine {
         self.channels.get(channel_id).map_or(0, |c| c.last_seq)
     }
 
+    /// How many messages this client hasn't fetched yet, per channel it's a
+    /// member of -- `(channel_id, missed)`, channels with nothing missed
+    /// omitted. Compares each channel's locally-consumed `last_seq` against
+    /// the relay's head counter (one batched round trip): "how far behind
+    /// did being offline leave you," not "how many of those messages could
+    /// still be recovered" -- most of a lapsed member's missed messages have
+    /// already rolled off the relay's storage cap or TTL by the time they
+    /// reconnect, same as `Request::FetchChannel` would show them.
+    ///
+    /// Undercounts if a channel went fully quiet for longer than its own
+    /// TTL: the relay's own head counter resets to 0 once every entry has
+    /// expired (see `Request::ChannelHeads`'s doc comment), so the one
+    /// channel a very-lapsed member missed the most on is exactly the one
+    /// this can silently under-report for.
+    pub async fn missed_channel_counts(&mut self) -> Result<Vec<([u8; 32], u64)>, CoreError> {
+        let ids: Vec<[u8; 32]> = self.channels.keys().copied().collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let heads = sync::channel_heads(&mut self.client, &ids).await?;
+        Ok(heads
+            .into_iter()
+            .filter_map(|(id, head)| {
+                let last_seq = self.channels.get(&id).map_or(0, |c| c.last_seq);
+                let missed = head.saturating_sub(last_seq);
+                (missed > 0).then_some((id, missed))
+            })
+            .collect())
+    }
+
     /// Fan a just-submitted ledger record out to peers over gossipsub. No-op
     /// unless the `p2p` feature is on and a node is running.
     async fn gossip_record(&self, rec: &Record) {

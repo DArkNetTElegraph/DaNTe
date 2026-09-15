@@ -285,6 +285,26 @@ pub async fn announce_p2p(client: &mut Client, addrs: &[String]) -> Result<(), N
 
 /// Ask the relay for libp2p bootstrap multiaddrs. Empty (not an error) if the
 /// relay has none or is too old to answer.
+/// The current head `seq` for each of `channel_ids`, from the relay's
+/// persistent per-channel post counter -- accurate even for a channel whose
+/// older entries have already rolled off the relay's storage cap or TTL, so
+/// `head - your_last_seen_seq` is an honest "how many messages did I miss"
+/// count. A channel id the relay has never seen comes back as head `0`.
+pub async fn channel_heads(
+    client: &mut Client,
+    channel_ids: &[[u8; 32]],
+) -> Result<Vec<([u8; 32], u64)>, NetError> {
+    match client
+        .request(&Request::ChannelHeads {
+            channel_ids: channel_ids.to_vec(),
+        })
+        .await?
+    {
+        Response::ChannelHeads(heads) => Ok(heads),
+        _ => Err(NetError::UnexpectedResponse("ChannelHeads")),
+    }
+}
+
 pub async fn get_p2p_peers(client: &mut Client) -> Result<Vec<String>, NetError> {
     match client.request(&Request::GetP2pPeers).await? {
         Response::P2pPeers(list) => Ok(list),

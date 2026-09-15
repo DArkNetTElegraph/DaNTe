@@ -298,6 +298,10 @@ enum Cmd {
     EnableP2p { reply: oneshot::Sender<String> },
     /// Turn off DHT participation (a no-op if already off).
     DisableP2p { reply: oneshot::Sender<()> },
+    /// How many messages this client hasn't fetched yet, per channel it's a
+    /// member of. Ready JSON: `{"<channel_id_b32>": missed_count, ...}`,
+    /// channels with nothing missed omitted.
+    MissedChannelCounts { reply: oneshot::Sender<String> },
     /// Fire-and-forget: broadcast an "I am typing" signal to `to`.
     Typing { to: String },
     /// The DM pair's safety number + verification state as a ready JSON object.
@@ -1899,6 +1903,19 @@ async fn handle_cmd(engine: &mut Engine, shared: &Shared, cmd: Cmd) {
             #[cfg(not(feature = "p2p"))]
             let _ = &engine;
             let _ = reply.send(());
+        }
+        Cmd::MissedChannelCounts { reply } => {
+            let body = match engine.missed_channel_counts().await {
+                Ok(missed) => {
+                    let map: serde_json::Map<String, serde_json::Value> = missed
+                        .into_iter()
+                        .map(|(id, n)| (id_b32(&id), serde_json::Value::from(n)))
+                        .collect();
+                    serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
+                }
+                Err(_) => "{}".to_string(),
+            };
+            let _ = reply.send(body);
         }
         Cmd::CreateServer {
             name,
@@ -3698,6 +3715,20 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 let _ = rx.await;
                 respond(&mut stream, 200, "application/json", b"{\"enabled\":false}").await
             }
+        }
+
+        ("GET", "/api/missed") => {
+            let (tx, rx) = oneshot::channel();
+            if shared
+                .cmd
+                .send(Cmd::MissedChannelCounts { reply: tx })
+                .await
+                .is_err()
+            {
+                return respond(&mut stream, 500, "text/plain", b"engine gone").await;
+            }
+            let body = rx.await.unwrap_or_else(|_| "{}".to_string());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 
         ("POST", "/api/discover") => {

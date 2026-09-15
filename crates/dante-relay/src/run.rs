@@ -56,6 +56,9 @@ pub struct RunConfig {
     /// see `docs/THREAT_MODEL.md` §4 for the trust-model trade-off. No
     /// effect if the crate was not built with the `unfurl` feature.
     pub allow_unfurl: bool,
+    /// Cap on total channel-log blob bytes this relay holds before evicting
+    /// the oldest entries. `None` keeps [`Limits::default`]'s 128 MiB.
+    pub channel_store_cap_bytes: Option<usize>,
 }
 
 impl Default for RunConfig {
@@ -72,6 +75,7 @@ impl Default for RunConfig {
             p2p_listen: None,
             p2p_seed: None,
             allow_unfurl: false,
+            channel_store_cap_bytes: None,
         }
     }
 }
@@ -144,7 +148,11 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<()> {
         }
     }
 
-    let mut relay_state = RelayState::new(params, Limits::default());
+    let mut limits = Limits::default();
+    if let Some(cap) = cfg.channel_store_cap_bytes {
+        limits.channel_store_cap_bytes = cap;
+    }
+    let mut relay_state = RelayState::new(params, limits);
     if !cfg.ice.stun.is_empty() || !cfg.ice.turn.is_empty() {
         tracing::info!(
             stun = cfg.ice.stun.len(),

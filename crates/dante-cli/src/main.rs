@@ -402,6 +402,10 @@ fn also_relay_config(flags: &HashMap<String, String>) -> Option<dante_relay::Run
     #[cfg_attr(not(feature = "p2p"), allow(unused_mut))]
     let mut cfg = dante_relay::RunConfig {
         listen,
+        channel_store_cap_bytes: flags
+            .get("relay-storage-limit-gb")
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|gb| gb * 1024 * 1024 * 1024),
         ..Default::default()
     };
     #[cfg(feature = "p2p")]

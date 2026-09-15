@@ -106,6 +106,12 @@ fn parse_args() -> RunConfig {
             "--allow-relay-unfurl" => {
                 cfg.allow_unfurl = true;
             }
+            "--channel-store-cap-mb" => {
+                cfg.channel_store_cap_bytes = it
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .map(|mb| mb * 1024 * 1024);
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "usage: dante-relay [--listen ADDR] [--min-pow-bits N]\n  \
@@ -115,6 +121,7 @@ fn parse_args() -> RunConfig {
                      [--p2p-bootstrap MULTIADDR,...]  (libp2p bootstrap peers offered to p2p clients)\n  \
                      [--p2p-listen MULTIADDR] [--p2p-seed HEX32]  (serve clients over libp2p; feature p2p)\n  \
                      [--allow-relay-unfurl]  (fetch link previews for clients; feature unfurl, off by default)\n  \
+                     [--channel-store-cap-mb N]  (channel-log storage cap; default 128)\n  \
                      the TURN secret is read from DANTE_TURN_SECRET (preferred) or --turn-secret\n  \
                      defaults: --listen {DEFAULT_LISTEN}, PoW floor from LedgerParams::default()"
                 );

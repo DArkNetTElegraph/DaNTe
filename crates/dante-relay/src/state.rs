@@ -39,6 +39,10 @@ pub struct Limits {
     /// Read/query endpoints (fetches, log/blob reads, tree head). These return
     /// far more than they cost to request, so they need a ceiling of their own.
     pub read: (f64, f64),
+    /// Total bytes of channel-log blobs this relay will hold before evicting
+    /// the oldest entries. Operator-configurable (e.g. the desktop app's
+    /// also-relay storage limit); defaults to 128 MiB.
+    pub channel_store_cap_bytes: usize,
 }
 
 impl Default for Limits {
@@ -54,6 +58,7 @@ impl Default for Limits {
             // generous: a 240 burst, 60 / second sustained. Enough that no
             // honest client notices, low enough to cap amplification abuse.
             read: (240.0, 60.0),
+            channel_store_cap_bytes: 128 * 1024 * 1024,
         }
     }
 }
@@ -127,8 +132,10 @@ pub struct RelayState {
     /// [`Request::PostToChannel`]: knowing `channel_id` is no longer enough
     /// to write to it, the poster must currently be in this set.
     channel_rosters: std::collections::HashMap<[u8; 32], ChannelRoster>,
-    /// Running total of channel-log blob bytes, bounded by [`CHANNEL_STORE_CAP`].
+    /// Running total of channel-log blob bytes, bounded by `channel_store_cap`.
     channel_bytes: usize,
+    /// Cap on `channel_bytes`, from [`Limits::channel_store_cap_bytes`].
+    channel_store_cap: usize,
     /// `topic` -> ephemeral signals `(blob, deposited_ms)`. Typing indicators
     /// and the like: never persisted, swept aggressively by TTL.
     signals: std::collections::HashMap<[u8; 32], Vec<(Vec<u8>, u64)>>,
@@ -231,8 +238,6 @@ const MAX_CHANNEL_ROSTERS: usize = 100_000;
 const MAX_CHANNEL_ROSTER_MEMBERS: usize = 50_000;
 /// Largest accepted single channel-log frame.
 const MAX_CHANNEL_BLOB_BYTES: usize = 1024 * 1024;
-/// Global budget across all channel logs. 128 MiB.
-const CHANNEL_STORE_CAP: usize = 128 * 1024 * 1024;
 /// Byte budget for one `FetchChannel` reply, kept under the transport frame cap
 /// so a full channel can't build an unsendable response.
 const MAX_CHANNEL_FETCH_BYTES: usize = 7 * 1024 * 1024;
@@ -265,6 +270,7 @@ impl RelayState {
             channels: std::collections::HashMap::new(),
             channel_rosters: std::collections::HashMap::new(),
             channel_bytes: 0,
+            channel_store_cap: limits.channel_store_cap_bytes,
             signals: std::collections::HashMap::new(),
             announce_rl: KeyedRateLimiter::new(limits.announce.0, limits.announce.1),
             record_rl: KeyedRateLimiter::new(limits.record.0, limits.record.1),
@@ -285,6 +291,18 @@ impl RelayState {
             mbox_seen: std::collections::HashSet::new(),
             keypkg_outbox: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Current cap on total channel-log blob bytes.
+    pub fn channel_store_cap(&self) -> usize {
+        self.channel_store_cap
+    }
+
+    /// Change the cap on total channel-log blob bytes. Takes effect
+    /// immediately: a lowered cap is enforced on the next write (existing
+    /// stored bytes over the new cap are not evicted until then).
+    pub fn set_channel_store_cap(&mut self, bytes: usize) {
+        self.channel_store_cap = bytes;
     }
 
     /// Fold a ledger record heard from a peer relay over gossip into this
@@ -497,7 +515,7 @@ impl RelayState {
         if !self.channels.contains_key(&channel_id) && self.channels.len() >= MAX_CHANNELS {
             return false;
         }
-        if self.channel_bytes.saturating_add(blob.len()) > CHANNEL_STORE_CAP {
+        if self.channel_bytes.saturating_add(blob.len()) > self.channel_store_cap {
             return false;
         }
         let entry = self
@@ -619,7 +637,8 @@ impl RelayState {
                 removed += b.len();
             }
         }
-        while self.channel_bytes.saturating_sub(removed) > CHANNEL_STORE_CAP && !entry.2.is_empty()
+        while self.channel_bytes.saturating_sub(removed) > self.channel_store_cap
+            && !entry.2.is_empty()
         {
             let (_, b, _) = entry.2.remove(0);
             removed += b.len();
@@ -1062,7 +1081,7 @@ impl RelayState {
                 if !self.channels.contains_key(&channel_id) && self.channels.len() >= MAX_CHANNELS {
                     return Response::Error("channel directory full".into());
                 }
-                if self.channel_bytes.saturating_add(blob.len()) > CHANNEL_STORE_CAP {
+                if self.channel_bytes.saturating_add(blob.len()) > self.channel_store_cap {
                     return Response::Error("channel store full".into());
                 }
                 let added = blob.len();
@@ -2199,6 +2218,54 @@ mod tests {
         // After the retention window, maintain resyncs it to zero.
         s.maintain(1_000 + BLOB_TTL_MS + 1);
         assert_eq!(s.channel_bytes, 0);
+    }
+
+    #[test]
+    fn channel_store_cap_is_configurable_and_enforced() {
+        let mut s = RelayState::new(
+            LedgerParams {
+                min_announce_pow_bits: 8,
+                min_liveness_pow_bits: 8,
+                min_pow_m_cost_kib: 0,
+                min_pow_t_cost: 0,
+                ..Default::default()
+            },
+            Limits {
+                channel_store_cap_bytes: 1500,
+                ..Limits::default()
+            },
+        );
+        assert_eq!(s.channel_store_cap(), 1500);
+        let ch = [9u8; 32];
+        let poster = Identity::generate(0);
+        announce(&mut s, &poster);
+        let root = SignSecret::from_bytes(&[10u8; 32]);
+        assert_eq!(
+            s.handle(
+                set_channel_roster(&root, ch, 1, vec![*poster.id().as_bytes()]),
+                IP,
+                1_000
+            ),
+            Response::Ok
+        );
+        // Two 1000-byte posts: the first fits under the 1500-byte cap, the
+        // second would push total usage to 2000 and must be refused.
+        assert!(matches!(
+            s.handle(post_to_channel(&poster, ch, vec![7u8; 1000]), IP, 1_000),
+            Response::Posted(_)
+        ));
+        assert_eq!(
+            s.handle(post_to_channel(&poster, ch, vec![7u8; 1000]), IP, 1_000),
+            Response::Error("channel store full".into())
+        );
+        // Raising the limit at runtime (the also-relay Settings toggle)
+        // immediately allows the previously-refused post through.
+        s.set_channel_store_cap(4000);
+        assert_eq!(s.channel_store_cap(), 4000);
+        assert!(matches!(
+            s.handle(post_to_channel(&poster, ch, vec![7u8; 1000]), IP, 1_000),
+            Response::Posted(_)
+        ));
     }
 
     #[test]

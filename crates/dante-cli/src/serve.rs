@@ -740,7 +740,7 @@ struct Shared {
     /// keeps no detached background tasks of its own, so aborting the task
     /// this handle names drops its listener (freeing the port) and its
     /// maintenance loop together.
-    also_relay: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+    also_relay: Mutex<Option<(String, usize, tokio::task::JoinHandle<()>)>>,
 }
 
 impl Shared {
@@ -3010,10 +3010,10 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 .split([',', ' ', '\t'])
                 .filter(|s| !s.is_empty())
                 .collect();
-            let (also_relay_on, also_relay_listen) = {
+            let (also_relay_on, also_relay_listen, also_relay_cap_bytes) = {
                 let g = shared.also_relay.lock().await;
                 match &*g {
-                    Some((listen, _)) => (true, Some(listen.clone())),
+                    Some((listen, cap, _)) => (true, Some(listen.clone()), Some(*cap)),
                     None => (
                         false,
                         shared
@@ -3021,6 +3021,11 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                             .also_relay_cfg
                             .as_ref()
                             .map(|c| c.listen.clone()),
+                        shared
+                            .boot
+                            .also_relay_cfg
+                            .as_ref()
+                            .and_then(|c| c.channel_store_cap_bytes),
                     ),
                 }
             };
@@ -3031,6 +3036,7 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 "relays": relays,
                 "also_relay_on": also_relay_on,
                 "also_relay_listen": also_relay_listen,
+                "also_relay_storage_limit_bytes": also_relay_cap_bytes,
                 "sfu": shared.boot.sfu,
                 "sfu_mesh_limit": shared.boot.sfu_mesh_limit,
                 "gifsearch_available": shared.gif_provider.is_some(),
@@ -4465,8 +4471,8 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
 
         ("GET", "/api/also-relay") => {
             let g = shared.also_relay.lock().await;
-            let (on, listen) = match &*g {
-                Some((listen, _)) => (true, Some(listen.clone())),
+            let (on, listen, storage_limit_bytes) = match &*g {
+                Some((listen, cap, _)) => (true, Some(listen.clone()), Some(*cap)),
                 None => (
                     false,
                     shared
@@ -4474,10 +4480,20 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                         .also_relay_cfg
                         .as_ref()
                         .map(|c| c.listen.clone()),
+                    shared
+                        .boot
+                        .also_relay_cfg
+                        .as_ref()
+                        .and_then(|c| c.channel_store_cap_bytes),
                 ),
             };
             drop(g);
-            let body = serde_json::json!({ "on": on, "listen": listen }).to_string();
+            let body = serde_json::json!({
+                "on": on,
+                "listen": listen,
+                "storage_limit_bytes": storage_limit_bytes,
+            })
+            .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 
@@ -4490,27 +4506,45 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 /// `dante-relay`'s default listen address if this client was
                 /// never started with `--also-relay` at all).
                 listen: Option<String>,
+                /// Cap on channel-log storage, in bytes. Applied whether this
+                /// call starts the relay fresh or changes the limit on one
+                /// already running (which requires a stop+restart cycle,
+                /// since the relay doesn't support changing it in place).
+                /// `None` leaves the current/default cap alone.
+                storage_limit_bytes: Option<usize>,
             }
             let Ok(r) = serde_json::from_slice::<Req>(&body) else {
                 return respond(&mut stream, 400, "text/plain", b"bad json").await;
             };
             if r.on {
+                let already_running = shared.also_relay.lock().await.is_some();
+                if already_running && (r.listen.is_some() || r.storage_limit_bytes.is_some()) {
+                    stop_also_relay(&shared).await;
+                }
                 let mut cfg = shared.boot.also_relay_cfg.clone().unwrap_or_default();
                 if let Some(listen) = r.listen {
                     cfg.listen = listen;
+                }
+                if let Some(cap) = r.storage_limit_bytes {
+                    cfg.channel_store_cap_bytes = Some(cap);
                 }
                 start_also_relay(&shared, cfg).await;
             } else {
                 stop_also_relay(&shared).await;
             }
-            let listen = shared
-                .also_relay
-                .lock()
-                .await
-                .as_ref()
-                .map(|(listen, _)| listen.clone());
-            let body = serde_json::json!({ "ok": "ok", "on": listen.is_some(), "listen": listen })
-                .to_string();
+            let g = shared.also_relay.lock().await;
+            let (on, listen, storage_limit_bytes) = match &*g {
+                Some((listen, cap, _)) => (true, Some(listen.clone()), Some(*cap)),
+                None => (false, None, None),
+            };
+            drop(g);
+            let body = serde_json::json!({
+                "ok": "ok",
+                "on": on,
+                "listen": listen,
+                "storage_limit_bytes": storage_limit_bytes,
+            })
+            .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 
@@ -4893,19 +4927,22 @@ async fn start_also_relay(shared: &Arc<Shared>, cfg: dante_relay::RunConfig) {
         return;
     }
     let listen = cfg.listen.clone();
+    let cap = cfg
+        .channel_store_cap_bytes
+        .unwrap_or(dante_relay::state::Limits::default().channel_store_cap_bytes);
     eprintln!("also acting as a relay on {listen} (for others to connect to)");
     let handle = tokio::spawn(async move {
         if let Err(e) = dante_relay::run(cfg).await {
             eprintln!("embedded relay stopped: {e}");
         }
     });
-    *guard = Some((listen, handle));
+    *guard = Some((listen, cap, handle));
 }
 
 /// Stop the embedded relay if it's running. Returns whether it was.
 async fn stop_also_relay(shared: &Arc<Shared>) -> bool {
     match shared.also_relay.lock().await.take() {
-        Some((_, handle)) => {
+        Some((_, _, handle)) => {
             handle.abort();
             true
         }

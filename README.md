@@ -209,12 +209,15 @@ above — it states precisely what is and is not protected.
 
 **Automated setup:** `bash scripts/setup-linux.sh` (Fedora, Arch, Debian/Ubuntu
 and their derivatives — detects your distro, installs Rust + whatever system
-packages are missing, builds, and launches) or, on Windows,
-`.\scripts\setup-windows.ps1` from a PowerShell prompt. Both offer either the
-CLI + browser UI or the native desktop app; `--help` / `-?` lists every option
-(which relay to use, build-only, skip the package install, non-interactive
-`-y`/`-Yes`). Manual steps below if you'd rather see every command, or the
-script doesn't recognize your distro. Windows' default execution policy blocks
+packages are missing, builds, installs `dante`/`dante-relay` onto your PATH
+via `~/.cargo/bin` so they're runnable from any shell afterward, and
+launches) or, on Windows, `.\scripts\setup-windows.ps1` from a PowerShell
+prompt (same PATH install, via `%USERPROFILE%\.cargo\bin`). Both offer either
+the CLI + browser UI or the native desktop app; `--help` / `-?` lists every
+option (which relay to use, build-only, skip the package install, skip the
+PATH install with `--no-install`/`-NoInstall`, non-interactive `-y`/`-Yes`).
+Manual steps below if you'd rather see every command, or the script doesn't
+recognize your distro. Windows' default execution policy blocks
 running a local, unsigned script; if you hit that, run
 `powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1` instead.
 

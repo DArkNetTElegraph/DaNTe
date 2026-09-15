@@ -40,7 +40,12 @@ Usage: bash scripts/setup-linux.sh [OPTIONS]
   --build-only   Install requirements and build, but don't launch anything.
   --skip-deps    Don't touch system packages at all (you've already got
                  them, or you're re-running after a first successful setup).
-  --yes, -y      Don't ask for confirmation before installing packages.
+  --no-install   Don't copy the built binaries to ~/.cargo/bin — by default
+                 (--cli mode) this script installs them there so `dante` and
+                 `dante-relay` work from any shell afterward, the same way
+                 `cargo install` would.
+  --yes, -y      Don't ask for confirmation before installing packages or
+                 onto PATH.
   --help, -h     This message.
 
 DaNTe runs no infrastructure of its own — the relay this script starts is
@@ -53,6 +58,7 @@ RELAY_ADDR=""
 ASSUME_YES=0
 BUILD_ONLY=0
 SKIP_DEPS=0
+INSTALL_PATH=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,6 +67,7 @@ while [ $# -gt 0 ]; do
     --relay) RELAY_ADDR="${2:?--relay needs an address}"; shift ;;
     --build-only) BUILD_ONLY=1 ;;
     --skip-deps) SKIP_DEPS=1 ;;
+    --no-install) INSTALL_PATH=0 ;;
     --yes|-y) ASSUME_YES=1 ;;
     --help|-h) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
@@ -197,6 +204,42 @@ if [ "$MODE" = desktop ]; then
 else
   info "Building dante-cli and dante-relay (release)..."
   cargo build --release -p dante-cli -p dante-relay
+
+  # ---------- 6.5 install onto PATH ----------
+  # rustup already put ~/.cargo/bin on PATH when it installed Rust (step 5),
+  # so copying the binaries there — rather than requiring sudo for
+  # /usr/local/bin — makes `dante`/`dante-relay` runnable from any shell with
+  # no further PATH edits, on the same account that just built them.
+  if [ "$INSTALL_PATH" = 1 ]; then
+    if confirm "Install dante + dante-relay onto your PATH (~/.cargo/bin)?"; then
+      if mkdir -p "$HOME/.cargo/bin" 2>/dev/null \
+        && cp target/release/dante target/release/dante-relay "$HOME/.cargo/bin/" 2>/dev/null; then
+        info "Installed: $HOME/.cargo/bin/dante, $HOME/.cargo/bin/dante-relay"
+        case ":$PATH:" in
+          *":$HOME/.cargo/bin:"*)
+            info "Confirming it works:"
+            # `dante` with no subcommand prints its usage and exits 2 by
+            # design (same convention as e.g. `git`) — that's success here,
+            # not a failure, so `|| true` keeps `set -e` from treating the
+            # nonzero exit as this script's own error.
+            dante 2>&1 | head -20 || true
+            ;;
+          *)
+            warn "$HOME/.cargo/bin isn't on THIS shell's PATH yet (new installs need a fresh shell to pick up rustup's own PATH line)."
+            info "Add it now with:"
+            info "  echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+            info "(zsh: ~/.zshrc instead; fish: ~/.config/fish/config.fish with 'fish_add_path \$HOME/.cargo/bin')"
+            ;;
+        esac
+      else
+        warn "Couldn't write to $HOME/.cargo/bin — permissions issue on that directory, most likely."
+        info "The binaries are still right here though: $ROOT/target/release/dante and .../dante-relay"
+        info "Either fix permissions on ~/.cargo/bin (it should be owned by you, not root), or put THIS build directory on PATH instead:"
+        info "  echo 'export PATH=\"$ROOT/target/release:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+      fi
+    fi
+  fi
+
   if [ "$BUILD_ONLY" = 1 ]; then
     info "Done — binaries are at target/release/dante and target/release/dante-relay"
     exit 0

@@ -27,8 +27,13 @@
   Don't install anything — assume Rust, MSVC tools, and (for -Mode desktop)
   WebView2/Tauri CLI are already present.
 
+.PARAMETER NoInstall
+  Don't copy the built binaries to %USERPROFILE%\.cargo\bin — by default
+  (-Mode cli) this script installs them there so dante.exe/dante-relay.exe
+  work from any shell afterward, the same way `cargo install` would.
+
 .PARAMETER Yes
-  Don't ask for confirmation before installing anything.
+  Don't ask for confirmation before installing anything, including onto PATH.
 
 .EXAMPLE
   .\scripts\setup-windows.ps1
@@ -48,6 +53,7 @@ param(
     [string]$Relay,
     [switch]$BuildOnly,
     [switch]$SkipDeps,
+    [switch]$NoInstall,
     [switch]$Yes
 )
 
@@ -184,6 +190,46 @@ if ($Mode -eq "desktop") {
 } else {
     Info "Building dante-cli and dante-relay (release)..."
     cargo build --release -p dante-cli -p dante-relay
+
+    # ---------- 7.5 install onto PATH ----------
+    # rustup already put %USERPROFILE%\.cargo\bin on PATH (via the registry
+    # Environment key) when it installed Rust in step 4, so copying the
+    # binaries there makes dante.exe/dante-relay.exe runnable from any new
+    # shell with no further PATH edits — no admin rights needed, unlike
+    # something under Program Files.
+    if (-not $NoInstall) {
+        if (Confirm "Install dante.exe + dante-relay.exe onto your PATH (%USERPROFILE%\.cargo\bin)?") {
+            $installDir = "$env:USERPROFILE\.cargo\bin"
+            $installOk = $true
+            try {
+                New-Item -ItemType Directory -Force -Path $installDir -ErrorAction Stop | Out-Null
+                Copy-Item "target\release\dante.exe" -Destination $installDir -Force -ErrorAction Stop
+                Copy-Item "target\release\dante-relay.exe" -Destination $installDir -Force -ErrorAction Stop
+            } catch {
+                $installOk = $false
+                Warn "Couldn't write to $installDir -- $($_.Exception.Message)"
+                Info "The binaries are still right here though: $root\target\release\dante.exe and ...\dante-relay.exe"
+                Info "Add THIS build directory to PATH instead, from an elevated or non-elevated prompt as appropriate:"
+                Info "  [Environment]::SetEnvironmentVariable('Path', `"`$env:Path;$root\target\release`", 'User')"
+            }
+            if ($installOk) {
+                Info "Installed: $installDir\dante.exe, $installDir\dante-relay.exe"
+                $onPath = ($env:Path -split ';') -contains $installDir
+                if ($onPath) {
+                    Info "Confirming it works:"
+                    # dante.exe with no subcommand prints its usage and exits
+                    # 2 by design (same convention as e.g. git) -- that's
+                    # success here, not a script failure, so ignore the exit
+                    # code rather than let $ErrorActionPreference stop us.
+                    & "$installDir\dante.exe" 2>&1 | Select-Object -First 20
+                } else {
+                    Warn "$installDir isn't on PATH in THIS session yet (rustup adds it to the User PATH registry value, which a running shell won't see until it restarts)."
+                    Info "Open a new PowerShell/terminal window and 'dante' will work from there."
+                }
+            }
+        }
+    }
+
     if ($BuildOnly) {
         Info "Done — binaries are at target\release\dante.exe and target\release\dante-relay.exe"
         exit 0

@@ -33,6 +33,39 @@ struct StatusDoc {
 struct RelayEntry {
     name: String,
     addr: String,
+    #[serde(default)]
+    online: bool,
+    #[serde(default)]
+    latency_ms: Option<u64>,
+}
+
+/// A relay's last-published status from the scheduled external check
+/// (`dante-relay-check`, run every 30 minutes from GitHub's own
+/// infrastructure — a genuine outside vantage point, unlike a ping run from
+/// wherever this command happens to execute).
+#[derive(Debug, Clone)]
+pub struct PublishedStatus {
+    pub name: String,
+    pub online: bool,
+    pub latency_ms: Option<u64>,
+}
+
+/// Look up `addr`'s last-published status across every `urls` source.
+/// `None` if it isn't listed in the directory anywhere.
+pub async fn published_status(addr: &str, urls: &[String]) -> Option<PublishedStatus> {
+    for url in urls {
+        let Ok(doc) = fetch_status(url).await else {
+            continue;
+        };
+        if let Some(r) = doc.relays.into_iter().find(|r| r.addr == addr) {
+            return Some(PublishedStatus {
+                name: r.name,
+                online: r.online,
+                latency_ms: r.latency_ms,
+            });
+        }
+    }
+    None
 }
 
 /// A relay this process personally reached, with its own measured latency.

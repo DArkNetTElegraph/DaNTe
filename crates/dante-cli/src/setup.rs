@@ -127,28 +127,65 @@ async fn check_relay_eligibility() {
     .await;
     match result {
         Ok(latency) => {
-            ok(&format!("reachable — round trip {}ms", latency.as_millis()));
+            ok(&format!(
+                "reachable from THIS machine — round trip {}ms",
+                latency.as_millis()
+            ));
             let same_host_note = if latency.as_millis() < 5 {
                 "  That round trip is fast enough that you're likely checking from the relay's \
-                 own box or LAN, which tells you the port answers but nothing about real-world \
-                 latency for anyone else.\n"
+                 own box or LAN. A local check like this can only ever prove the process is up \
+                 and speaks the protocol — it cannot prove reachability from the outside \
+                 internet, because it isn't run from the outside internet. See below for that.\n"
             } else {
-                ""
+                "  This proves the process is up and speaks the protocol from here — it does \
+                 NOT prove reachability from the public internet if this box sits behind NAT or \
+                 a cloud security group. See below for a check that actually runs from outside \
+                 your network.\n"
             };
-            println!(
-                "{same_host_note}  This confirms {addr} answers a real DaNTe protocol round \
-                 trip from this machine. It does NOT confirm reachability from the public \
-                 internet if this box sits behind NAT or a cloud security group — either ask \
-                 someone outside your network to check the same address, or add it to \
-                 relays/registry.toml and let the scheduled relay-status check (which runs from \
-                 GitHub's own runners) confirm it independently."
-            );
+            print!("{same_host_note}");
         }
         Err(e) => {
-            fail(&format!("not reachable: {e}"));
+            fail(&format!("not reachable from this machine: {e}"));
             println!(
                 "  Common causes: dante-relay isn't running yet, the port isn't open in your \
                  firewall or cloud security group, or the address/port is wrong."
+            );
+        }
+    }
+
+    // The only check above that actually runs from OUTSIDE the operator's
+    // own network: dante-relay-check, on a schedule, from GitHub's runners.
+    // A relay only shows up here once someone's listed it in
+    // relays/registry.toml (see relays/README.md) -- this doesn't crawl or
+    // scan for relays that were never opted in.
+    let urls = vec![crate::directory::DEFAULT_DIRECTORY.to_string()];
+    match with_spinner(
+        "Checking the public directory's last externally-run check",
+        crate::directory::published_status(&addr, &urls),
+    )
+    .await
+    {
+        Some(p) if p.online => {
+            ok(&format!(
+                "externally confirmed online as \"{}\" ({})",
+                p.name,
+                p.latency_ms
+                    .map(|ms| format!("{ms}ms from GitHub's runner"))
+                    .unwrap_or_else(|| "no latency recorded".to_string())
+            ));
+        }
+        Some(p) => {
+            fail(&format!(
+                "listed as \"{}\" in the directory, but last seen OFFLINE from outside your \
+                 network",
+                p.name
+            ));
+        }
+        None => {
+            println!(
+                "  Not listed in the public directory yet, so there's no external check to \
+                 show — see relays/README.md to add it via a PR (this is opt-in by design, so \
+                 nothing crawls or scans for relays automatically)."
             );
         }
     }

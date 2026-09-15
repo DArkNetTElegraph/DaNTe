@@ -50,6 +50,10 @@ pub struct Console {
 /// `std::future::pending` when p2p isn't configured.
 pub async fn run(handler: Arc<RelayHandler>, console: Console) {
     if std::io::stdin().is_terminal() {
+        // Clear whatever cargo/build output or startup log lines are
+        // already sitting in the scrollback so the console starts on a
+        // clean screen, rather than stacking its banner right under them.
+        print!("\x1b[2J\x1b[H");
         let hud_rows = terminal_rows().filter(|&r| r > 3);
         if let Some(rows) = hud_rows {
             // DECSTBM: restrict scrolling to everything but the last row, so

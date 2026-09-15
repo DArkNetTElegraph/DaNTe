@@ -3027,7 +3027,8 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                  media-src 'self' blob:; base-uri 'none'; form-action 'none'; \
                  frame-ancestors 'none'\r\n\
                  X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
-                 X-Frame-Options: DENY\r\n"
+                 X-Frame-Options: DENY\r\n\
+                 Cache-Control: no-store\r\n"
             );
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
@@ -5177,7 +5178,8 @@ const SEC: &str = "Content-Security-Policy: default-src 'none'; \
      form-action 'none'; frame-ancestors 'none'\r\n\
      X-Content-Type-Options: nosniff\r\n\
      Referrer-Policy: no-referrer\r\n\
-     X-Frame-Options: DENY\r\n";
+     X-Frame-Options: DENY\r\n\
+     Cache-Control: no-store\r\n";
 
 /// Server-Sent Events: hold the connection open and push every new inbox item
 /// as it appears, so the SPA sees messages in ~150 ms instead of waiting for its

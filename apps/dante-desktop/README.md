@@ -191,8 +191,28 @@ a real release exercises.
   signature mismatch) is shown inline in the toast rather than retried
   silently.
 
-What this doesn't cover: `macos-latest` GitHub runners build Apple
-Silicon (`darwin-aarch64`); there is no Intel-mac (`darwin-x86_64`) build
-in the matrix, so an Intel Mac install would never see an update offered.
-Building a universal binary (or a second matrix leg) is a real follow-up,
-not done here.
+**macOS builds universal** (2026-09-15) — `cargo tauri build --target
+universal-apple-darwin`, which builds `aarch64-apple-darwin` and
+`x86_64-apple-darwin` separately and `lipo`'s them together, so the one
+`.app`/`.dmg` runs natively on both Apple Silicon and Intel and either
+arch's updater lookup (`darwin-aarch64` / `darwin-x86_64`) resolves to it.
+This needed one workaround: `audiopus_sys` defaults to finding Opus via
+`pkg-config` on unix, but Homebrew's `opus` is single-arch (whichever the
+runner natively is) — happily handed back to link into *both* per-arch
+passes, which would silently corrupt whichever half doesn't match. Setting
+`LIBOPUS_NO_PKG=1` for this build forces `audiopus_sys`'s own vendored
+CMake fallback instead, which correctly targets whichever triple that
+particular `cargo build` pass is actually for — the same vendored path
+Windows already goes through via the `CMAKE_POLICY_VERSION_MINIMUM`
+workaround elsewhere in this doc, just forced here on purpose rather than
+`pkg-config` failing to find Opus on its own. A universal build's output
+also lands under `target/universal-apple-darwin/release/` instead of the
+usual `target/release/` — `.github/workflows/release.yml`'s
+artifact-upload and manifest-assembly steps account for this.
+
+**Not verified**: none of this can be exercised by the normal CI matrix
+(the `desktop shell` job in `ci.yml` never passes `--target
+universal-apple-darwin`, and this repo has no macOS runner outside
+GitHub's own) — it needs an actual `v*` tag push to know for certain the
+dual-arch build, the `LIBOPUS_NO_PKG` workaround, and the corrected output
+paths all hold up together in practice.

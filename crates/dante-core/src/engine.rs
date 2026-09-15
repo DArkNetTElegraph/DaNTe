@@ -5,6 +5,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use dante_crypto::{
@@ -1567,7 +1571,36 @@ impl Engine {
     /// in the local replica on the next [`Engine::sync`], keeping the replica a
     /// strict prefix of the relay's log.
     pub async fn announce(&mut self, display_hint: &str, now_ms: u64) -> Result<(), CoreError> {
-        let rec = IdentityAnnounce::build(&self.identity, display_hint, self.pow)
+        self.announce_with_progress(display_hint, now_ms, None)
+            .await
+    }
+
+    /// [`Engine::announce`], reporting nonce attempts to `attempts` (if given)
+    /// as the search runs. The search itself runs on a blocking task — at
+    /// [`dante_crypto::pow::REGISTRATION`] strength this can take minutes to
+    /// hours, and running it inline on an async worker thread would starve
+    /// every other task sharing that thread (HTTP requests included) for the
+    /// whole search, which matters most on the single-core box this is most
+    /// likely to run slowest on.
+    pub async fn announce_with_progress(
+        &mut self,
+        display_hint: &str,
+        now_ms: u64,
+        attempts: Option<Arc<AtomicU64>>,
+    ) -> Result<(), CoreError> {
+        let idk_pub = self.identity.sign_public().to_bytes();
+        let ik_pub = self.identity.agree_public().to_bytes();
+        let challenge = IdentityAnnounce::challenge(&idk_pub, &ik_pub);
+        let difficulty = self.pow;
+        let counter = attempts.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+        counter.store(0, Ordering::Relaxed);
+        let counter_for_task = Arc::clone(&counter);
+        let pow = tokio::task::spawn_blocking(move || {
+            dante_crypto::pow::solve_with_progress(&challenge, difficulty, &counter_for_task)
+        })
+        .await
+        .map_err(|e| CoreError::Pow(e.to_string()))?;
+        let rec = IdentityAnnounce::from_proof(&self.identity, display_hint, ik_pub, pow)
             .to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
         self.gossip_record(&rec).await;
@@ -1648,8 +1681,28 @@ impl Engine {
 
     /// Publish a fresh liveness proof.
     pub async fn prove_liveness(&mut self, now_ms: u64) -> Result<(), CoreError> {
-        let rec = LivenessProof::build(&self.identity, now_ms, self.pow)
-            .to_record(&self.identity, now_ms);
+        self.prove_liveness_with_progress(now_ms, None).await
+    }
+
+    /// [`Engine::prove_liveness`], reporting nonce attempts to `attempts` (if
+    /// given). See [`Engine::announce_with_progress`] for why this runs on a
+    /// blocking task.
+    pub async fn prove_liveness_with_progress(
+        &mut self,
+        now_ms: u64,
+        attempts: Option<Arc<AtomicU64>>,
+    ) -> Result<(), CoreError> {
+        let challenge = LivenessProof::challenge(&self.identity.sign_public().to_bytes(), now_ms);
+        let difficulty = self.pow;
+        let counter = attempts.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+        counter.store(0, Ordering::Relaxed);
+        let counter_for_task = Arc::clone(&counter);
+        let pow = tokio::task::spawn_blocking(move || {
+            dante_crypto::pow::solve_with_progress(&challenge, difficulty, &counter_for_task)
+        })
+        .await
+        .map_err(|e| CoreError::Pow(e.to_string()))?;
+        let rec = LivenessProof { pow }.to_record(&self.identity, now_ms);
         sync::submit_record(&mut self.client, &rec).await?;
         self.gossip_record(&rec).await;
         self.last_announce_ms = now_ms;
@@ -2987,13 +3040,26 @@ impl Engine {
         display_hint: &str,
         now_ms: u64,
     ) -> Result<bool, CoreError> {
+        self.announce_if_stale_with_progress(display_hint, now_ms, None)
+            .await
+    }
+
+    /// [`Engine::announce_if_stale`], reporting nonce attempts to `attempts`
+    /// (if given) for whichever puzzle ends up running.
+    pub async fn announce_if_stale_with_progress(
+        &mut self,
+        display_hint: &str,
+        now_ms: u64,
+        attempts: Option<Arc<AtomicU64>>,
+    ) -> Result<bool, CoreError> {
         if now_ms.saturating_sub(self.last_announce_ms) <= REANNOUNCE_AFTER_MS {
             return Ok(false);
         }
         if self.last_announce_ms == 0 {
-            self.announce(display_hint, now_ms).await?;
+            self.announce_with_progress(display_hint, now_ms, attempts)
+                .await?;
         } else {
-            self.prove_liveness(now_ms).await?;
+            self.prove_liveness_with_progress(now_ms, attempts).await?;
         }
         Ok(true)
     }

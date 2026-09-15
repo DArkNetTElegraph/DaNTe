@@ -74,10 +74,24 @@ impl IdentityAnnounce {
     pub fn build(identity: &Identity, display_hint: &str, difficulty: Difficulty) -> Self {
         let idk_pub = identity.sign_public().to_bytes();
         let ik_pub = identity.agree_public().to_bytes();
+        let pow = pow::solve(&Self::challenge(&idk_pub, &ik_pub), difficulty);
+        Self::from_proof(identity, display_hint, ik_pub, pow)
+    }
+
+    /// Like [`Self::build`], but takes an already-solved [`PowProof`] instead
+    /// of solving inline — for a caller that ran the search off-thread (e.g.
+    /// via [`pow::solve_with_progress`] on a blocking task, to keep an async
+    /// runtime responsive and report live progress).
+    pub fn from_proof(
+        identity: &Identity,
+        display_hint: &str,
+        ik_pub: [u8; 32],
+        pow: PowProof,
+    ) -> Self {
         Self {
             ik_pub,
             ik_sig: identity.sign(&ik_pub),
-            pow: pow::solve(&Self::challenge(&idk_pub, &ik_pub), difficulty),
+            pow,
             display_hint: truncate_on_char_boundary(display_hint, DISPLAY_HINT_MAX).to_owned(),
         }
     }

@@ -750,12 +750,52 @@ struct Shared {
     /// this handle names drops its listener (freeing the port) and its
     /// maintenance loop together.
     also_relay: Mutex<Option<(String, usize, tokio::task::JoinHandle<()>)>>,
+    /// Nonces tried so far in the PoW search currently running (if any). One
+    /// counter shared for the process's lifetime: reset to 0 at the start of
+    /// each search by [`dante_core::Engine::announce_with_progress`] /
+    /// `prove_liveness_with_progress`, read directly by `GET /api/boot`
+    /// without going through the engine task's command channel.
+    pow_attempts: Arc<AtomicU64>,
+    /// The current boot step, for `GET /api/boot`'s honest "still working on
+    /// it" status while a PoW search or sync is in flight.
+    boot_status: Mutex<BootStatusView>,
+}
+
+/// A snapshot of [`dante_core::BootStep`] plus when it started, for
+/// `GET /api/boot`.
+#[derive(Clone)]
+struct BootStatusView {
+    step: &'static str,
+    pow_bits: u8,
+    since_ms: u64,
+    error: Option<String>,
+}
+
+impl Default for BootStatusView {
+    fn default() -> Self {
+        Self {
+            step: "connecting",
+            pow_bits: 0,
+            since_ms: now_ms(),
+            error: None,
+        }
+    }
 }
 
 impl Shared {
     fn next(&self) -> u64 {
         self.next_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
+}
+
+/// Record the current boot step for `GET /api/boot`.
+async fn set_boot_status(shared: &Shared, step: &'static str, pow_bits: u8, error: Option<String>) {
+    *shared.boot_status.lock().await = BootStatusView {
+        step,
+        pow_bits,
+        since_ms: now_ms(),
+        error,
+    };
 }
 
 /// Full base32 fingerprint from raw id bytes (channel ids, channel senders,
@@ -946,6 +986,8 @@ pub async fn run_on(
         pending_rx: Mutex::new(Some(cmd_rx)),
         local_authorities,
         also_relay: Mutex::new(None),
+        pow_attempts: Arc::new(AtomicU64::new(0)),
+        boot_status: Mutex::new(BootStatusView::default()),
     });
 
     if let Some(cfg) = shared.boot.also_relay_cfg.clone() {
@@ -1129,12 +1171,21 @@ async fn engine_task(
         }
     };
     if let Err(e) = async {
-        step(dante_core::BootStep::Announcing {
-            pow_bits: engine_shared.boot.pow.bits,
-        });
-        engine.announce_if_stale(&onboard_name, now_ms()).await?;
+        let pow_bits = engine_shared.boot.pow.bits;
+        set_boot_status(&engine_shared, "announcing", pow_bits, None).await;
+        step(dante_core::BootStep::Announcing { pow_bits });
+        engine_shared.pow_attempts.store(0, Ordering::Relaxed);
+        engine
+            .announce_if_stale_with_progress(
+                &onboard_name,
+                now_ms(),
+                Some(Arc::clone(&engine_shared.pow_attempts)),
+            )
+            .await?;
+        set_boot_status(&engine_shared, "publishing_prekeys", pow_bits, None).await;
         step(dante_core::BootStep::PublishingPrekeys);
         engine.publish_prekeys().await?;
+        set_boot_status(&engine_shared, "syncing", pow_bits, None).await;
         step(dante_core::BootStep::Syncing);
         engine.sync(now_ms()).await?;
         Ok::<_, dante_core::CoreError>(())
@@ -1145,11 +1196,13 @@ async fn engine_task(
         // The client stays up: most of the app works against local state, and
         // the tick loop keeps retrying. Say what broke rather than hanging on
         // a spinner that will never finish.
+        set_boot_status(&engine_shared, "failed", 0, Some(e.to_string())).await;
         step(dante_core::BootStep::Failed {
             error: e.to_string(),
         });
     } else {
         eprintln!("ready");
+        set_boot_status(&engine_shared, "ready", 0, None).await;
         step(dante_core::BootStep::Ready);
     }
     if let Some(name) = engine.my_username() {
@@ -3728,6 +3781,26 @@ async fn serve_conn(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 return respond(&mut stream, 500, "text/plain", b"engine gone").await;
             }
             let body = rx.await.unwrap_or_else(|_| "{}".to_string());
+            respond(&mut stream, 200, "application/json", body.as_bytes()).await
+        }
+
+        // Honest boot-progress status: which startup step is running (most
+        // notably `announcing`, the PoW search, which at REGISTRATION
+        // strength can run for minutes to hours), how many nonces it has
+        // tried so far, and how long it's been running. Read directly off
+        // shared state rather than round-tripping through the engine's
+        // command channel, since the engine may itself be blocked inside the
+        // PoW search's blocking task while this is polled.
+        ("GET", "/api/boot") => {
+            let status = shared.boot_status.lock().await.clone();
+            let body = serde_json::json!({
+                "step": status.step,
+                "pow_bits": status.pow_bits,
+                "attempts": shared.pow_attempts.load(Ordering::Relaxed),
+                "since_ms": status.since_ms,
+                "error": status.error,
+            })
+            .to_string();
             respond(&mut stream, 200, "application/json", body.as_bytes()).await
         }
 

@@ -31,6 +31,8 @@
 
 use std::{collections::HashMap, time::Duration};
 
+mod setup;
+
 use anyhow::{Context, Result};
 use dante_cli::{now_ms, parse_fingerprint, serve};
 use dante_core::Engine;
@@ -198,13 +200,15 @@ async fn main() -> Result<()> {
         "serve" => cmd_serve(&flags).await,
         "bot" => cmd_bot(&flags).await,
         "revoke" => cmd_revoke(&flags).await,
+        "setup" => setup::run().await,
         _ => {
             eprintln!(
                 "usage:\n  dante gen    --out KEYSTORE\n  dante fp     --keystore KEYSTORE\n  \
                  dante chat   --keystore KEYSTORE --relay ADDR [--pow-bits N] [--dev-pow] [--hint NAME]\n  \
                  dante serve  --keystore KEYSTORE --relay ADDR [--http 127.0.0.1:8080] [--pow-bits N] [--dev-pow]\n  \
                  dante bot    --keystore KEYSTORE --relay ADDR [--name NAME] [--auto-join] [--pow-bits N] [--dev-pow]\n  \
-                 dante revoke --keystore KEYSTORE --relay ADDR [--reason compromised|superseded|retired] --yes"
+                 dante revoke --keystore KEYSTORE --relay ADDR [--reason compromised|superseded|retired] --yes\n  \
+                 dante setup  # interactive wizard: check a relay, install a service, build the desktop app"
             );
             std::process::exit(2);
         }

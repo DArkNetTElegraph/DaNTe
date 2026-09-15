@@ -2,7 +2,9 @@
 # One-shot setup + launch for Linux: detects your distro, installs the Rust
 # toolchain and whatever system packages are needed, builds DaNTe, starts a
 # local relay (unless you point it at one you already have), and launches
-# either the browser-based `dante serve` UI or the native desktop app.
+# either the browser-based `dante serve` UI or the native desktop app. For a
+# relay operator who wants none of that, --server builds and runs just
+# dante-relay — no dante-cli, no client, no browser UI, nothing to connect to.
 #
 # This automates the manual steps in README.md ("Building") and
 # apps/dante-desktop/README.md ("Prerequisites") — read those if you'd rather
@@ -33,10 +35,21 @@ Usage: bash scripts/setup-linux.sh [OPTIONS]
   --desktop      Build & run the native Tauri desktop app instead. Installs
                  the platform WebView/GTK/audio dev packages too — a bigger
                  install than --cli.
-  --relay ADDR   Connect to an existing relay instead of starting a local one
-                 (e.g. --relay 203.0.113.5:9944, or an .onion address).
-                 Default: start `dante-relay --listen 127.0.0.1:9944` so a
-                 first run is fully self-contained.
+  --server       Build & run only dante-relay — no dante-cli, no client, no
+                 browser UI. For a relay operator who wants none of the app's
+                 own dependency footprint. Installs only `dante-relay` onto
+                 PATH; see --listen below, and `dante setup` (once installed)
+                 for turning this into a systemd service.
+  --relay ADDR   (--cli / --desktop only) Connect to an existing relay
+                 instead of starting a local one — a specific address (e.g.
+                 203.0.113.5:9944, or an .onion address), or the literal
+                 `auto` to ping the public directory and use whichever
+                 listed relay answers fastest. Omit it and an interactive
+                 run asks; a non-interactive one defaults to starting
+                 `dante-relay --listen 127.0.0.1:9944` (fully
+                 self-contained, no network dependency).
+  --listen ADDR  (--server only) Address dante-relay binds to. Default:
+                 dante-relay's own default (0.0.0.0:9944) if omitted.
   --build-only   Install requirements and build, but don't launch anything.
   --skip-deps    Don't touch system packages at all (you've already got
                  them, or you're re-running after a first successful setup).
@@ -55,6 +68,7 @@ EOF
 
 MODE=""
 RELAY_ADDR=""
+LISTEN_ADDR=""
 ASSUME_YES=0
 BUILD_ONLY=0
 SKIP_DEPS=0
@@ -64,7 +78,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --cli) MODE="cli" ;;
     --desktop) MODE="desktop" ;;
+    --server) MODE="server" ;;
     --relay) RELAY_ADDR="${2:?--relay needs an address}"; shift ;;
+    --listen) LISTEN_ADDR="${2:?--listen needs an address}"; shift ;;
     --build-only) BUILD_ONLY=1 ;;
     --skip-deps) SKIP_DEPS=1 ;;
     --no-install) INSTALL_PATH=0 ;;
@@ -123,10 +139,11 @@ pkg_install() {
 # ---------- 3. pick a mode ----------
 if [ -z "$MODE" ]; then
   if [ -t 0 ]; then
-    printf 'Set up (1) CLI + browser UI, or (2) native desktop app? [1] '
+    printf 'Set up (1) CLI + browser UI, (2) native desktop app, or (3) relay server only? [1] '
     read -r reply
     case "$reply" in
       2) MODE="desktop" ;;
+      3) MODE="server" ;;
       *) MODE="cli" ;;
     esac
   else
@@ -189,6 +206,48 @@ fi
 # fetches it automatically on the first `cargo` invocation below, so there's
 # nothing else to pin here.
 
+# Copies binaries `$@` from target/release into ~/.cargo/bin, with the same
+# confirm/permission-fallback/smoke-test handling regardless of which mode
+# called it. `$1` is what to actually run afterward to prove it's on PATH
+# (e.g. "dante" or "dante-relay --help"); a bare relay has no equivalent of
+# `dante`'s "print usage and exit 2" convention, so callers pass something
+# that produces visible, harmless output either way.
+install_onto_path() {
+  smoke_test_cmd="$1"; shift
+  if [ "$INSTALL_PATH" != 1 ]; then
+    return 0
+  fi
+  if confirm "Install $* onto your PATH (~/.cargo/bin)?"; then
+    if mkdir -p "$HOME/.cargo/bin" 2>/dev/null \
+      && cp "$@" "$HOME/.cargo/bin/" 2>/dev/null; then
+      info "Installed: $(printf '%s ' "$@" | sed "s#target/release/#$HOME/.cargo/bin/#g")"
+      case ":$PATH:" in
+        *":$HOME/.cargo/bin:"*)
+          info "Confirming it works:"
+          # A bare `dante` prints its usage and exits 2 by design (same
+          # convention as e.g. `git`) — that's success here, not a failure,
+          # so `|| true` keeps `set -e` from treating the nonzero exit as
+          # this script's own error. dante-relay with no args just starts
+          # listening, so callers using it pass a command that returns
+          # quickly instead (e.g. `--help`).
+          eval "$smoke_test_cmd" 2>&1 | head -20 || true
+          ;;
+        *)
+          warn "$HOME/.cargo/bin isn't on THIS shell's PATH yet (new installs need a fresh shell to pick up rustup's own PATH line)."
+          info "Add it now with:"
+          info "  echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+          info "(zsh: ~/.zshrc instead; fish: ~/.config/fish/config.fish with 'fish_add_path \$HOME/.cargo/bin')"
+          ;;
+      esac
+    else
+      warn "Couldn't write to $HOME/.cargo/bin — permissions issue on that directory, most likely."
+      info "The binaries are still right here though: $ROOT/target/release/"
+      info "Either fix permissions on ~/.cargo/bin (it should be owned by you, not root), or put THIS build directory on PATH instead:"
+      info "  echo 'export PATH=\"$ROOT/target/release:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+    fi
+  fi
+}
+
 # ---------- 6. build ----------
 if [ "$MODE" = desktop ]; then
   command -v cargo-tauri >/dev/null 2>&1 || {
@@ -201,45 +260,19 @@ if [ "$MODE" = desktop ]; then
     info "Done — installers are under apps/dante-desktop/target/release/bundle/"
     exit 0
   fi
+elif [ "$MODE" = server ]; then
+  info "Building dante-relay only (release)..."
+  cargo build --release -p dante-relay
+  install_onto_path "dante-relay --help" target/release/dante-relay
+  if [ "$BUILD_ONLY" = 1 ]; then
+    info "Done — binary is at target/release/dante-relay"
+    info "Next: 'dante setup' (once installed) can turn this into a systemd service."
+    exit 0
+  fi
 else
   info "Building dante-cli and dante-relay (release)..."
   cargo build --release -p dante-cli -p dante-relay
-
-  # ---------- 6.5 install onto PATH ----------
-  # rustup already put ~/.cargo/bin on PATH when it installed Rust (step 5),
-  # so copying the binaries there — rather than requiring sudo for
-  # /usr/local/bin — makes `dante`/`dante-relay` runnable from any shell with
-  # no further PATH edits, on the same account that just built them.
-  if [ "$INSTALL_PATH" = 1 ]; then
-    if confirm "Install dante + dante-relay onto your PATH (~/.cargo/bin)?"; then
-      if mkdir -p "$HOME/.cargo/bin" 2>/dev/null \
-        && cp target/release/dante target/release/dante-relay "$HOME/.cargo/bin/" 2>/dev/null; then
-        info "Installed: $HOME/.cargo/bin/dante, $HOME/.cargo/bin/dante-relay"
-        case ":$PATH:" in
-          *":$HOME/.cargo/bin:"*)
-            info "Confirming it works:"
-            # `dante` with no subcommand prints its usage and exits 2 by
-            # design (same convention as e.g. `git`) — that's success here,
-            # not a failure, so `|| true` keeps `set -e` from treating the
-            # nonzero exit as this script's own error.
-            dante 2>&1 | head -20 || true
-            ;;
-          *)
-            warn "$HOME/.cargo/bin isn't on THIS shell's PATH yet (new installs need a fresh shell to pick up rustup's own PATH line)."
-            info "Add it now with:"
-            info "  echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
-            info "(zsh: ~/.zshrc instead; fish: ~/.config/fish/config.fish with 'fish_add_path \$HOME/.cargo/bin')"
-            ;;
-        esac
-      else
-        warn "Couldn't write to $HOME/.cargo/bin — permissions issue on that directory, most likely."
-        info "The binaries are still right here though: $ROOT/target/release/dante and .../dante-relay"
-        info "Either fix permissions on ~/.cargo/bin (it should be owned by you, not root), or put THIS build directory on PATH instead:"
-        info "  echo 'export PATH=\"$ROOT/target/release:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
-      fi
-    fi
-  fi
-
+  install_onto_path "dante" target/release/dante target/release/dante-relay
   if [ "$BUILD_ONLY" = 1 ]; then
     info "Done — binaries are at target/release/dante and target/release/dante-relay"
     exit 0
@@ -247,6 +280,30 @@ else
 fi
 
 # ---------- 7. launch ----------
+if [ "$MODE" = server ]; then
+  info "Starting dante-relay${LISTEN_ADDR:+ on $LISTEN_ADDR} (Ctrl-C stops it)..."
+  if [ -n "$LISTEN_ADDR" ]; then
+    exec ./target/release/dante-relay --listen "$LISTEN_ADDR"
+  else
+    exec ./target/release/dante-relay
+  fi
+fi
+
+# A local relay only ever talks to itself — fine for kicking the tires
+# offline, useless for actually reaching anyone else. Ask rather than assume
+# either way: local costs nothing and touches no network; the public network
+# (via `--relay auto`, see PR #118) means talking to real people, at the
+# cost of a PoW registration against a relay you don't run, for every trial
+# run. --relay ADDR already skips this prompt. Piped/non-interactive stays
+# local, matching this script's existing "assume the safe default" pattern.
+if [ -z "$RELAY_ADDR" ] && [ -t 0 ]; then
+  printf 'Connect to (1) a private local relay, or (2) the public DaNTe network? [1] '
+  read -r reply
+  case "$reply" in
+    2) RELAY_ADDR="auto" ;;
+  esac
+fi
+
 relay_pid=""
 cleanup() {
   if [ -n "$relay_pid" ]; then
@@ -261,13 +318,37 @@ if [ -z "$RELAY_ADDR" ]; then
   ./target/release/dante-relay --listen "$RELAY_ADDR" &
   relay_pid=$!
   sleep 1
+elif [ "$RELAY_ADDR" = auto ]; then
+  info "Connecting to the public DaNTe network (pinging the directory for the fastest relay)..."
 else
   info "Using existing relay at $RELAY_ADDR"
 fi
 
 if [ "$MODE" = desktop ]; then
   info "Launching the desktop app..."
-  ( cd apps/dante-desktop && DANTE_RELAY="$RELAY_ADDR" cargo tauri dev )
+  # WebKitGTK's native Wayland backend has two known bugs, both worked
+  # around here rather than fixed (neither is DaNTe's own code):
+  # 1. A widget's scale factor gets queried before it's fully mapped
+  #    ("GTK-CRITICAL: gtk_widget_get_scale_factor: assertion
+  #    'GTK_IS_WIDGET (widget)' failed"), cascading into a fatal
+  #    "Gdk-Message: Error 71 (Protocol error) dispatching to Wayland
+  #    display" that stops the window from opening at all. Forcing GTK's
+  #    X11 backend (through XWayland, present on effectively every Wayland
+  #    session) is the standard fix across the WebKitGTK/Tauri ecosystem.
+  # 2. Even with that fix, WebKit's DMA-BUF renderer can fail to allocate
+  #    its GBM render-surface buffer ("Failed to create GBM buffer of size
+  #    WxH: Invalid argument"), leaving the window open but its content
+  #    area permanently black — a GPU-driver/Mesa compatibility gap, not
+  #    a universal Wayland issue like #1. Disabling that renderer falls
+  #    back to one that doesn't hit it. Confirmed fixing a real black-window
+  #    report on a live machine (2026-09-15), not just a documented issue.
+  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    info "Wayland session detected — setting GDK_BACKEND=x11 and disabling WebKit's DMA-BUF renderer to avoid known WebKitGTK/Wayland crashes."
+    ( cd apps/dante-desktop \
+      && GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 DANTE_RELAY="$RELAY_ADDR" cargo tauri dev )
+  else
+    ( cd apps/dante-desktop && DANTE_RELAY="$RELAY_ADDR" cargo tauri dev )
+  fi
 else
   info "Launching dante serve — open the URL it prints below in your browser."
   ./target/release/dante serve --relay "$RELAY_ADDR"

@@ -4,9 +4,9 @@
 //! dante gen    --out KEYSTORE                        # generate an identity
 //! dante fp     --keystore KEYSTORE                   # print the fingerprint
 //! dante chat   --keystore KEYSTORE --relay ADDR      # interactive terminal session
-//!              [--hint NAME] [--pow-bits N] [--sfu]
+//!              [--hint NAME] [--pow-bits N] [--dev-pow] [--sfu]
 //! dante serve  --keystore KEYSTORE --relay ADDR      # local web UI (JSON API + SPA)
-//!              [--http 127.0.0.1:8080] [--pow-bits N]
+//!              [--http 127.0.0.1:8080] [--pow-bits N] [--dev-pow]
 //!              [--sfu [--sfu-mesh-limit N]]
 //! dante bot    --keystore KEYSTORE --relay ADDR      # JSON-lines bridge on stdio
 //! dante revoke --keystore KEYSTORE --relay ADDR --yes   # publish a revocation
@@ -34,7 +34,10 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::{Context, Result};
 use dante_cli::{now_ms, parse_fingerprint, serve};
 use dante_core::Engine;
-use dante_crypto::{pow::Difficulty, sign::SignPublic};
+use dante_crypto::{
+    pow::{Difficulty, REGISTRATION},
+    sign::SignPublic,
+};
 use dante_identity::{id::IdentityId, keystore, Identity};
 use dante_ledger::LedgerParams;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -198,9 +201,9 @@ async fn main() -> Result<()> {
         _ => {
             eprintln!(
                 "usage:\n  dante gen    --out KEYSTORE\n  dante fp     --keystore KEYSTORE\n  \
-                 dante chat   --keystore KEYSTORE --relay ADDR [--pow-bits N] [--hint NAME]\n  \
-                 dante serve  --keystore KEYSTORE --relay ADDR [--http 127.0.0.1:8080] [--pow-bits N]\n  \
-                 dante bot    --keystore KEYSTORE --relay ADDR [--name NAME] [--auto-join] [--pow-bits N]\n  \
+                 dante chat   --keystore KEYSTORE --relay ADDR [--pow-bits N] [--dev-pow] [--hint NAME]\n  \
+                 dante serve  --keystore KEYSTORE --relay ADDR [--http 127.0.0.1:8080] [--pow-bits N] [--dev-pow]\n  \
+                 dante bot    --keystore KEYSTORE --relay ADDR [--name NAME] [--auto-join] [--pow-bits N] [--dev-pow]\n  \
                  dante revoke --keystore KEYSTORE --relay ADDR [--reason compromised|superseded|retired] --yes"
             );
             std::process::exit(2);
@@ -244,18 +247,17 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
         .get("pow-bits")
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
+    let (pow_m_cost_kib, pow_t_cost) = pow_cost(flags);
     let params = LedgerParams {
         min_announce_pow_bits: bits,
         min_liveness_pow_bits: bits.saturating_sub(4).max(1),
-        // Match the light dev solver below; a deployed network keeps the
-        // Default (REGISTRATION-strength) Argon2 floor.
-        min_pow_m_cost_kib: 4_096,
-        min_pow_t_cost: 1,
+        min_pow_m_cost_kib: pow_m_cost_kib,
+        min_pow_t_cost: pow_t_cost,
         ..Default::default()
     };
     let pow = Difficulty {
-        m_cost_kib: 4_096,
-        t_cost: 1,
+        m_cost_kib: pow_m_cost_kib,
+        t_cost: pow_t_cost,
         bits,
     };
     let keystore_path = PathBuf::from(
@@ -305,6 +307,21 @@ async fn cmd_serve(flags: &HashMap<String, String>) -> Result<()> {
     serve::run(existing, &http, boot).await
 }
 
+/// Argon2 memory/time cost for solving and verifying PoW proofs. Defaults to
+/// [`REGISTRATION`] strength so a stock client interoperates with a stock
+/// relay (which enforces that same floor via `LedgerParams::default()`) out
+/// of the box. `--dev-pow` opts into a fast, insecure cost for a relay you
+/// also run locally with matching `--min-pow-*` overrides — never point it
+/// at a real, shared relay, since that relay still enforces the real floor
+/// and will reject the resulting proof.
+fn pow_cost(flags: &HashMap<String, String>) -> (u32, u32) {
+    if flags.contains_key("dev-pow") {
+        (4_096, 1)
+    } else {
+        (REGISTRATION.m_cost_kib, REGISTRATION.t_cost)
+    }
+}
+
 /// Shared connect + params logic for `chat` and `serve`.
 async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
     let identity = load_identity(flags)?;
@@ -313,20 +330,17 @@ async fn connect_engine(flags: &HashMap<String, String>) -> Result<Engine> {
         .get("pow-bits")
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
+    let (pow_m_cost_kib, pow_t_cost) = pow_cost(flags);
     let params = LedgerParams {
         min_announce_pow_bits: bits,
         min_liveness_pow_bits: bits.saturating_sub(4).max(1),
-        // Match the light dev solver below; a deployed network keeps the
-        // Default (REGISTRATION-strength) Argon2 floor.
-        min_pow_m_cost_kib: 4_096,
-        min_pow_t_cost: 1,
+        min_pow_m_cost_kib: pow_m_cost_kib,
+        min_pow_t_cost: pow_t_cost,
         ..Default::default()
     };
-    // Light Argon2 cost for the local dev path; the deployed network's PoW
-    // floor comes from LedgerParams::default() (64 MiB, t=3, 20 bits).
     let difficulty = Difficulty {
-        m_cost_kib: 4_096,
-        t_cost: 1,
+        m_cost_kib: pow_m_cost_kib,
+        t_cost: pow_t_cost,
         bits,
     };
 
@@ -1929,7 +1943,9 @@ fn bail_soft(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_flags, parse_hex16, parse_sfu_mesh_limit};
+    use super::{parse_flags, parse_hex16, parse_sfu_mesh_limit, pow_cost};
+    use dante_crypto::pow::REGISTRATION;
+    use dante_ledger::LedgerParams;
 
     /// A message-id argument (`chat`/`bot` commands) is operator-supplied
     /// but still untrusted-shaped input; a 32-*byte* string containing
@@ -1962,6 +1978,35 @@ mod tests {
         let flags = parse_flags(["--pow-bits=8", "--sfu"].map(String::from).into_iter());
         assert_eq!(flags.get("pow-bits").map(String::as_str), Some("8"));
         assert!(flags.contains_key("sfu"));
+    }
+
+    /// A stock relay enforces `LedgerParams::default()`'s Argon2 floor
+    /// (`REGISTRATION` strength) with no `--min-pow-*` overrides. A client
+    /// that instead solved at the old hardcoded "light dev" cost
+    /// (4096 KiB / t=1) would have every registration hard-rejected by
+    /// `dante_crypto::pow::verify` against a relay run with no flags at all.
+    #[test]
+    fn default_pow_cost_matches_a_stock_relays_floor() {
+        let flags = parse_flags(std::iter::empty());
+        assert_eq!(
+            pow_cost(&flags),
+            (REGISTRATION.m_cost_kib, REGISTRATION.t_cost)
+        );
+        assert_eq!(
+            pow_cost(&flags),
+            (
+                LedgerParams::default().min_pow_m_cost_kib,
+                LedgerParams::default().min_pow_t_cost
+            )
+        );
+    }
+
+    /// `--dev-pow` opts into the fast/insecure cost, for a relay the operator
+    /// also runs locally with matching `--min-pow-*` overrides.
+    #[test]
+    fn dev_pow_flag_opts_into_the_light_cost() {
+        let flags = parse_flags(["--dev-pow"].map(String::from).into_iter());
+        assert_eq!(pow_cost(&flags), (4_096, 1));
     }
 
     #[test]

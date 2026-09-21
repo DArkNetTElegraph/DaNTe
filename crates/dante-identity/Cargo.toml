@@ -15,7 +15,7 @@ thiserror.workspace = true
 zeroize.workspace = true
 serde = { workspace = true }
 ciborium = "0.2"
-bip39 = "2"
+bip39 = "3"
 
 [dev-dependencies]
 hex-literal = "1.1"

@@ -313,7 +313,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download every platform's fragment
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: latest-json-fragment-*
           path: fragments

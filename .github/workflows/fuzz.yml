@@ -56,7 +56,7 @@ jobs:
       # Cache is immutable, so a fresh key per run and a prefix restore makes
       # each run start from the deepest corpus so far instead of from scratch.
       - name: Cache fuzz corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}

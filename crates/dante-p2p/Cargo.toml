@@ -44,7 +44,7 @@ description = "libp2p transport for DaNTe: Kademlia key directory + gossipsub fo
 #     only yamux config construction anywhere in dante-p2p is
 #     `yamux::Config::default` in src/lib.rs). The vulnerable code is in the
 #     binary but never invoked. Revisit once libp2p-yamux drops 0.12 entirely.
-libp2p = { version = "0.56", features = [
+libp2p = { version = "0.57", features = [
     "tokio", "tcp", "noise", "yamux",
     "kad", "gossipsub", "identify", "ping", "macros", "request-response",
 ] }
